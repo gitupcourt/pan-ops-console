@@ -1,9 +1,4 @@
-"""Pull devices from Panorama and upsert them into our DB.
-
-Same shape as pan-fw-upgrader's panorama_sync — minus the upgrade-specific
-fields (HA roles, content versions, staged images). Capacity analyzer cares
-about who/where/what-model and trusts Panorama for that.
-"""
+"""Pull devices from Panorama and upsert them into our DB."""
 
 from __future__ import annotations
 
@@ -15,15 +10,15 @@ from sqlalchemy.orm import Session
 from app.models.device import Device
 from app.models.enums import DeviceSource
 from app.models.panorama import Panorama
-from app.services.credentials import resolve as resolve_credential
+from app.services.auth import decrypt_key
 from app.services.panorama_client import PanoramaClient
 
 log = logging.getLogger(__name__)
 
 
 def sync_panorama(db: Session, pano: Panorama) -> list[Device]:
-    cred = resolve_credential(pano.credential)
-    client = PanoramaClient(pano.hostname, cred, verify_tls=pano.verify_tls)
+    api_key = decrypt_key(pano.encrypted_api_key)
+    client = PanoramaClient(pano.hostname, api_key, verify_tls=pano.verify_tls)
     try:
         managed = client.list_managed_devices()
     except Exception as exc:
@@ -48,12 +43,16 @@ def sync_panorama(db: Session, pano: Panorama) -> list[Device]:
     for m in managed:
         device = existing.get(m.serial)
         if device is None:
+            # New device imported from Panorama. Default to proxy-through-Panorama
+            # so it polls immediately without needing per-device creds — the
+            # operator can flip to direct + paste a key later if desired.
             device = Device(
                 name=m.hostname or m.serial,
                 hostname=m.hostname or m.ip_address or m.serial,
                 serial=m.serial,
                 source=DeviceSource.PANORAMA,
                 panorama_id=pano.id,
+                proxy_via_panorama=True,
             )
             db.add(device)
         else:

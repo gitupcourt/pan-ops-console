@@ -10,7 +10,7 @@ from app.config import get_settings
 from app.db import Base, engine
 # Importing the models package registers every table on Base.metadata.
 from app import models  # noqa: F401
-from app.routes import credentials, devices, metrics, panoramas
+from app.routes import devices, metrics, panoramas
 from app.services import scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -40,7 +40,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(credentials.router)
 app.include_router(panoramas.router)
 app.include_router(devices.router)
 app.include_router(metrics.router)

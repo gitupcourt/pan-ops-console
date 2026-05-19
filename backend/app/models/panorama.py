@@ -1,9 +1,14 @@
-"""Panorama instance — used as a device source and (optionally) as an API proxy."""
+"""Panorama instance — used as a device source and (optionally) as an API proxy.
+
+Each Panorama owns its API key on its own row (encrypted at rest). PAN-OS keys
+are scoped to a user on a specific host, so there's no value in a separate
+reusable credentials store — see commit history for the design rationale.
+"""
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Boolean, DateTime, LargeBinary, String, func
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 
@@ -15,8 +20,9 @@ class Panorama(Base):
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     hostname: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    credential_id: Mapped[int] = mapped_column(ForeignKey("credentials.id"), nullable=False)
-    credential = relationship("Credential", lazy="joined")
+    # Fernet-encrypted API key. Created either by pasting a known key or by
+    # running keygen() against this host with username+password once.
+    encrypted_api_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

@@ -1,15 +1,14 @@
 """PAN-OS device client — capacity-analyzer flavor.
 
-Strictly read-only. Two construction paths matching pan-fw-upgrader:
+Strictly read-only. Two construction paths:
 
-* `PanDeviceClient.direct(...)` — talk straight to the firewall.
-* `PanDeviceClient.via_panorama(...)` — route ops through Panorama using
-  target-serial (for devices we can't reach directly).
+* `PanDeviceClient.direct(host, api_key, ...)` — talk straight to the firewall.
+* `PanDeviceClient.via_panorama(panorama_host, panorama_api_key, target_serial, ...)`
+  — route ops through Panorama using its target-serial mechanism.
 
 The capacity poller only needs `op_xml()` (run an arbitrary XML op command and
 get the parsed response) — everything else in the metric catalog is built on
-top of that. Kept narrow on purpose; the upgrade UI's pan_client has the full
-fat surface and the two converge cleanly when the apps merge.
+top of that.
 """
 
 from __future__ import annotations
@@ -20,8 +19,6 @@ from xml.etree import ElementTree as ET
 from panos.errors import PanDeviceError
 from panos.firewall import Firewall as PanosFirewall
 from panos.panorama import Panorama as PanosPanorama
-
-from app.services.credentials import ResolvedCredential
 
 log = logging.getLogger(__name__)
 
@@ -35,11 +32,8 @@ class PanDeviceClient:
     # ---------- factories ----------
 
     @classmethod
-    def direct(cls, host: str, cred: ResolvedCredential, *, verify_tls: bool = True) -> "PanDeviceClient":
-        if cred.api_key:
-            fw = PanosFirewall(host, api_key=cred.api_key)
-        else:
-            fw = PanosFirewall(host, api_username=cred.username, api_password=cred.password)
+    def direct(cls, host: str, api_key: str, *, verify_tls: bool = True) -> "PanDeviceClient":
+        fw = PanosFirewall(host, api_key=api_key)
         fw.verify_ssl = verify_tls
         return cls(fw)
 
@@ -47,19 +41,12 @@ class PanDeviceClient:
     def via_panorama(
         cls,
         panorama_host: str,
-        panorama_cred: ResolvedCredential,
+        panorama_api_key: str,
         target_serial: str,
         *,
         verify_tls: bool = True,
     ) -> "PanDeviceClient":
-        if panorama_cred.api_key:
-            pano = PanosPanorama(panorama_host, api_key=panorama_cred.api_key)
-        else:
-            pano = PanosPanorama(
-                panorama_host,
-                api_username=panorama_cred.username,
-                api_password=panorama_cred.password,
-            )
+        pano = PanosPanorama(panorama_host, api_key=panorama_api_key)
         pano.verify_ssl = verify_tls
         fw = PanosFirewall(serial=target_serial)
         pano.add(fw)
@@ -68,16 +55,11 @@ class PanDeviceClient:
     # ---------- the one operation the poller actually needs ----------
 
     def op_xml(self, xml_cmd: str) -> ET.Element:
-        """Run an arbitrary XML op command and return the parsed response.
-
-        The metric catalog supplies the XML strings; this just executes them.
-        """
+        """Run an arbitrary XML op command and return the parsed response."""
         try:
             return self._device.op(xml_cmd, cmd_xml=False)
         except PanDeviceError as exc:
             raise ConnectionError(f"op() failed for cmd {xml_cmd!r}: {exc}") from exc
-
-    # ---------- light system probe (used when registering a device) ----------
 
     def get_system_info(self) -> dict:
         resp = self.op_xml("<show><system><info></info></system></show>")

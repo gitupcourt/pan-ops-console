@@ -1,48 +1,30 @@
-"""Pydantic schemas for the API surface."""
+"""Pydantic schemas for the API surface.
+
+Auth model: API keys live on the Device / Panorama row. Creating or editing
+one of those rows takes an optional `auth` payload that says either "mint a
+key now from username+password" or "here's an API key, store it." If `auth`
+is omitted on edit, the existing stored key is kept.
+"""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import AuthType, CredentialScope, DeviceSource
+from app.models.enums import DeviceSource
 
 
-# ---------- Credentials ----------
+# ---------- Auth payloads (used inline in Device/Panorama create/update) ----------
 
-class CredentialCreate(BaseModel):
-    name: str
-    description: str | None = None
-    auth_type: AuthType
-    scope: CredentialScope
-    api_key: str | None = None
-    username: str | None = None
-    password: str | None = None
-
-
-class CredentialFromUserpass(BaseModel):
-    """Mint an API key by talking to a device with username+password, then store
-    ONLY the resulting key. The password is never persisted.
-    """
-
-    name: str
-    description: str | None = None
-    scope: CredentialScope
-    target_hostname: str
+class AuthFromUserpass(BaseModel):
+    mode: Literal["userpass"] = "userpass"
     username: str
     password: str
-    verify_tls: bool = True
 
 
-class CredentialRead(BaseModel):
-    id: int
-    name: str
-    description: str | None
-    auth_type: AuthType
-    scope: CredentialScope
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = {"from_attributes": True}
+class AuthFromApiKey(BaseModel):
+    mode: Literal["api_key"] = "api_key"
+    api_key: str
 
 
 # ---------- Panoramas ----------
@@ -50,15 +32,16 @@ class CredentialRead(BaseModel):
 class PanoramaCreate(BaseModel):
     name: str
     hostname: str
-    credential_id: int
     verify_tls: bool = True
+    # Required at create time. Optional on PATCH (omit to keep the existing key).
+    auth: AuthFromUserpass | AuthFromApiKey | None = Field(default=None, discriminator="mode")
 
 
 class PanoramaRead(BaseModel):
     id: int
     name: str
     hostname: str
-    credential_id: int
+    has_api_key: bool
     verify_tls: bool
     reachable: bool
     last_sync_at: datetime | None
@@ -74,11 +57,12 @@ class DeviceCreate(BaseModel):
     name: str
     hostname: str
     ip_address: str | None = None
-    credential_id: int | None = None
     panorama_id: int | None = None
     verify_tls: bool = True
     proxy_via_panorama: bool = False
     polling_enabled: bool = True
+    # Required on create when proxy_via_panorama=false. Optional on PATCH.
+    auth: AuthFromUserpass | AuthFromApiKey | None = Field(default=None, discriminator="mode")
 
 
 class DeviceRead(BaseModel):
@@ -91,7 +75,7 @@ class DeviceRead(BaseModel):
     sw_version: str | None
     source: DeviceSource
     panorama_id: int | None
-    credential_id: int | None
+    has_api_key: bool
     verify_tls: bool
     proxy_via_panorama: bool
     polling_enabled: bool

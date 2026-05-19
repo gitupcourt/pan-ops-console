@@ -1,7 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useState } from "react";
 
-import { api, AuthPayload, Device, DeviceInput, Panorama, PanoramaInput } from "../api";
+import {
+  api,
+  AuthPayload,
+  Device,
+  DeviceInput,
+  Panorama,
+  PanoramaDevicePreview,
+  PanoramaInput,
+} from "../api";
 import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../components/ui";
 
 export default function Inventory() {
@@ -136,17 +144,13 @@ function PanoramasSection() {
     },
     onError: (e: Error, id) => setTestResult({ id, ok: false, text: e.message }),
   });
-  const sync = useMutation({
-    mutationFn: api.syncPanorama,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["panoramas"] });
-      qc.invalidateQueries({ queryKey: ["devices"] });
-    },
-  });
   const del = useMutation({
     mutationFn: api.deletePanorama,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["panoramas"] }),
   });
+
+  // Inline import picker — opening it on a Panorama fetches its device list.
+  const [importingFor, setImportingFor] = useState<number | null>(null);
 
   const panos: Panorama[] = panosQ.data ?? [];
 
@@ -197,8 +201,8 @@ function PanoramasSection() {
                     <Button onClick={() => test.mutate(p.id)} disabled={test.isPending}>
                       Test
                     </Button>
-                    <Button onClick={() => sync.mutate(p.id)} disabled={sync.isPending}>
-                      Sync devices
+                    <Button onClick={() => setImportingFor(importingFor === p.id ? null : p.id)}>
+                      {importingFor === p.id ? "Close" : "Import devices"}
                     </Button>
                     <Button onClick={() => setEditing(editing === p.id ? null : p.id)}>
                       {editing === p.id ? "Close" : "Edit"}
@@ -226,6 +230,13 @@ function PanoramasSection() {
                   <tr className="bg-zinc-950/60">
                     <td colSpan={5} className="p-0">
                       <PanoramaForm initial={p} onDone={() => setEditing(null)} />
+                    </td>
+                  </tr>
+                )}
+                {importingFor === p.id && (
+                  <tr className="bg-zinc-950/60">
+                    <td colSpan={5} className="p-0">
+                      <ImportPicker panoramaId={p.id} onDone={() => setImportingFor(null)} />
                     </td>
                   </tr>
                 )}
@@ -457,6 +468,138 @@ function DevicesSection() {
   );
 }
 
+function ImportPicker({ panoramaId, onDone }: { panoramaId: number; onDone: () => void }) {
+  const qc = useQueryClient();
+  const previewQ = useQuery({
+    queryKey: ["panorama-preview", panoramaId],
+    queryFn: () => api.previewPanoramaDevices(panoramaId),
+  });
+
+  // Selection map keyed by serial. Initialized once on load: imported devices
+  // checked by default (keeps refresh-on-sync working), new devices unchecked.
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [initialized, setInitialized] = useState(false);
+  if (previewQ.data && !initialized) {
+    const init: Record<string, boolean> = {};
+    for (const d of previewQ.data) init[d.serial] = d.already_imported;
+    setSelected(init);
+    setInitialized(true);
+  }
+
+  const sync = useMutation({
+    mutationFn: (serials: string[]) => api.syncPanorama(panoramaId, serials),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["panoramas"] });
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      onDone();
+    },
+  });
+
+  if (previewQ.isLoading) {
+    return <div className="p-4 text-xs text-zinc-500">Fetching devices from Panorama…</div>;
+  }
+  if (previewQ.error) {
+    return (
+      <div className="p-4 text-xs text-rose-300">
+        Failed to fetch: {(previewQ.error as Error).message}
+      </div>
+    );
+  }
+
+  const rows = previewQ.data ?? [];
+  const selectedSerials = Object.entries(selected).filter(([, v]) => v).map(([s]) => s);
+
+  function setAll(value: boolean) {
+    const next: Record<string, boolean> = {};
+    for (const d of rows) next[d.serial] = value;
+    setSelected(next);
+  }
+
+  return (
+    <div className="border-b border-zinc-800 bg-zinc-950/40 p-4 grid gap-3">
+      <div className="flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">
+          {rows.length} device{rows.length === 1 ? "" : "s"} known to Panorama
+        </div>
+        <div className="flex gap-2 text-xs">
+          <button type="button" className="text-zinc-400 hover:text-zinc-100" onClick={() => setAll(true)}>
+            Select all
+          </button>
+          <button type="button" className="text-zinc-400 hover:text-zinc-100" onClick={() => setAll(false)}>
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded border border-zinc-800 max-h-80 overflow-auto">
+        <table className="w-full text-sm">
+          <thead className="text-[11px] uppercase text-zinc-500 sticky top-0 bg-zinc-950 border-b border-zinc-800">
+            <tr>
+              <th className="px-3 py-2 w-8"></th>
+              <th className="text-left px-3 py-2 font-medium">Hostname</th>
+              <th className="text-left px-3 py-2 font-medium">Serial</th>
+              <th className="text-left px-3 py-2 font-medium">Model</th>
+              <th className="text-left px-3 py-2 font-medium">IP</th>
+              <th className="text-left px-3 py-2 font-medium">Connected</th>
+              <th className="text-left px-3 py-2 font-medium">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((d) => (
+              <tr key={d.serial} className="border-b border-zinc-800/40">
+                <td className="px-3 py-1.5 text-center">
+                  <input
+                    type="checkbox"
+                    checked={selected[d.serial] ?? false}
+                    onChange={(e) =>
+                      setSelected((prev) => ({ ...prev, [d.serial]: e.target.checked }))
+                    }
+                  />
+                </td>
+                <td className="px-3 py-1.5 text-zinc-100">{d.hostname ?? "—"}</td>
+                <td className="px-3 py-1.5 text-zinc-400 font-mono text-xs">{d.serial}</td>
+                <td className="px-3 py-1.5 text-zinc-400">{d.model ?? "—"}</td>
+                <td className="px-3 py-1.5 text-zinc-400">{d.ip_address ?? "—"}</td>
+                <td className="px-3 py-1.5 text-xs">
+                  {d.connected ? (
+                    <span className="text-emerald-400">yes</span>
+                  ) : (
+                    <span className="text-zinc-500">no</span>
+                  )}
+                </td>
+                <td className="px-3 py-1.5 text-xs">
+                  {d.already_imported ? (
+                    <span className="text-zinc-400">imported</span>
+                  ) : (
+                    <span className="text-blue-400">new</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="text-[11px] text-zinc-500">
+        Selected devices will be imported with <span className="text-zinc-300">proxy via Panorama</span> enabled by default — they'll start polling immediately using this Panorama's API key. You can switch individual devices to direct polling later.
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Button
+          variant="primary"
+          onClick={() => sync.mutate(selectedSerials)}
+          disabled={sync.isPending || selectedSerials.length === 0}
+        >
+          {sync.isPending ? "Importing…" : `Import ${selectedSerials.length} device${selectedSerials.length === 1 ? "" : "s"}`}
+        </Button>
+        <Button type="button" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function DeviceForm({
   panos,
   initial,
@@ -551,12 +694,27 @@ function DeviceForm({
       )}
 
       {mode === "direct" && (
-        <AuthSection
-          has_existing={!!initial?.has_api_key}
-          value={auth}
-          onChange={setAuth}
-          hostHint={ipAddress || hostname || "this device"}
-        />
+        <>
+          {!initial?.has_api_key && initial?.proxy_via_panorama && (
+            <div className="rounded border border-amber-700 bg-amber-900/20 text-amber-200 text-xs p-3">
+              This device is switching from <span className="font-semibold">Panorama proxy</span> to{" "}
+              <span className="font-semibold">direct polling</span>, but it doesn't have its own
+              API key yet. Choose Mint or Paste below — saving without auth will fail.
+            </div>
+          )}
+          <AuthSection
+            has_existing={!!initial?.has_api_key}
+            value={auth}
+            onChange={setAuth}
+            hostHint={ipAddress || hostname || "this device"}
+          />
+          {initial?.has_api_key && initial?.proxy_via_panorama && (
+            <div className="text-[11px] text-zinc-500">
+              This device already has its own API key stored from a previous direct-mode setup —
+              "Keep existing" will reuse it.
+            </div>
+          )}
+        </>
       )}
 
       <div className="flex flex-wrap items-center gap-4">

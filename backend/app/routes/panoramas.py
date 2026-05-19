@@ -5,7 +5,15 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models.panorama import Panorama
-from app.schemas import AuthFromApiKey, AuthFromUserpass, PanoramaCreate, PanoramaRead
+from app.schemas import (
+    AuthFromApiKey,
+    AuthFromUserpass,
+    PanoramaCreate,
+    PanoramaDevicePreview,
+    PanoramaRead,
+    PanoramaSyncRequest,
+)
+from app.models.device import Device
 from app.services.auth import decrypt_key, encrypt_key, mint_key
 from app.services.panorama_client import PanoramaClient
 from app.services.panorama_sync import sync_panorama
@@ -98,13 +106,62 @@ def test_panorama(pano_id: int, db: Session = Depends(get_db)):
     return {"ok": True, "info": info}
 
 
+@router.get("/{pano_id}/preview-devices", response_model=list[PanoramaDevicePreview])
+def preview_devices(pano_id: int, db: Session = Depends(get_db)):
+    """Ask Panorama what devices it knows about, WITHOUT writing to the DB.
+
+    Used by the UI to populate the import picker. Each row is flagged
+    `already_imported` if we already have a Device with that serial — those
+    rows default to checked in the UI so re-sync refreshes them.
+    """
+    pano = db.get(Panorama, pano_id)
+    if pano is None:
+        raise HTTPException(status_code=404, detail="not found")
+    if not pano.encrypted_api_key:
+        raise HTTPException(status_code=400, detail="no API key stored")
+
+    api_key = decrypt_key(pano.encrypted_api_key)
+    client = PanoramaClient(pano.hostname, api_key, verify_tls=pano.verify_tls)
+    try:
+        managed = client.list_managed_devices()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    serials = [m.serial for m in managed]
+    have = {
+        s for (s,) in db.query(Device.serial).filter(Device.serial.in_(serials)).all() if s
+    }
+
+    return [
+        PanoramaDevicePreview(
+            serial=m.serial,
+            hostname=m.hostname,
+            ip_address=m.ip_address,
+            model=m.model,
+            sw_version=m.sw_version,
+            connected=m.connected,
+            already_imported=m.serial in have,
+        )
+        for m in managed
+    ]
+
+
 @router.post("/{pano_id}/sync", response_model=PanoramaRead)
-def sync(pano_id: int, db: Session = Depends(get_db)):
+def sync(
+    pano_id: int,
+    payload: PanoramaSyncRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """Import / refresh selected devices from Panorama.
+
+    Body is optional. With no body or empty `serials`, imports everything.
+    With `serials: [...]`, only the listed serials are upserted.
+    """
     pano = db.get(Panorama, pano_id)
     if pano is None:
         raise HTTPException(status_code=404, detail="not found")
     try:
-        sync_panorama(db, pano)
+        sync_panorama(db, pano, serial_filter=(payload.serials if payload else None))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     db.refresh(pano)

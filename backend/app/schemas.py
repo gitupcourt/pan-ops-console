@@ -100,3 +100,24 @@ class MetricSeries(BaseModel):
     device_id: int
     metric: str
     samples: list[SampleRead]
+
+
+# ---------- Panorama device import ----------
+
+class PanoramaDevicePreview(BaseModel):
+    """One row from `show devices all` on Panorama, with a flag for whether
+    we already have it in our DB. The UI uses these to populate the import
+    picker.
+    """
+    serial: str
+    hostname: str | None
+    ip_address: str | None
+    model: str | None
+    sw_version: str | None
+    connected: bool
+    already_imported: bool
+
+
+class PanoramaSyncRequest(BaseModel):
+    """Filter sync to a specific set of serials. Empty list / missing = import all."""
+    serials: list[str] | None = None

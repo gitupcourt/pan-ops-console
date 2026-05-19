@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import {
   api,
@@ -45,8 +45,18 @@ function AuthSection({
   onChange: (next: typeof value) => void;
   hostHint?: string;
 }) {
-  // For creates, "unchanged" doesn't exist — the parent passes mode=userpass
-  // by default. We surface "unchanged" only when has_existing is true.
+  // When the panel is shown with no existing key (e.g. user just flipped a
+  // proxy device to direct), "unchanged" isn't a valid option but the form
+  // might still hold it from initialization. Coerce to "userpass" so the
+  // input fields appear immediately instead of forcing the operator to
+  // bounce through "Paste API key" to reset the state.
+  useEffect(() => {
+    if (!has_existing && value.mode === "unchanged") {
+      onChange({ ...value, mode: "userpass" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [has_existing]);
+
   const options: { v: AuthMode; label: string }[] = [
     ...(has_existing ? [{ v: "unchanged" as AuthMode, label: "Keep existing API key" }] : []),
     { v: "userpass" as AuthMode, label: "Mint API key from username + password (recommended)" },

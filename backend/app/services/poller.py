@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.device import Device
 from app.services.auth import decrypt_key
-from app.services.catalog import MetricSpec
+from app.services.catalog import MetricSpec, Sources
 from app.services.pan_client import PanDeviceClient
 from app.services.storage import SamplePoint, SampleStore
 
@@ -55,18 +55,40 @@ def poll_device(device: Device, metrics: list[MetricSpec]) -> list[SamplePoint]:
             cache[cmd] = client.op_xml(cmd)
         return cache[cmd]
 
+    def _sum_sources(srcs: Sources) -> float | None:
+        """Run every fetcher in `srcs` and sum the non-None extractions.
+
+        Returns None only if EVERY source returned None (truly no data).
+        A source returning 0 contributes 0 to the sum, which is what we
+        want for things like "no local config" + "60 pushed objects".
+        """
+        total = 0.0
+        any_hit = False
+        for f in srcs.sources:
+            try:
+                root = _run(f.cmd)
+            except Exception as exc:  # noqa: BLE001
+                # Some sources legitimately fail on some firewalls (e.g.
+                # `show config running` returns 0 through Panorama proxy).
+                # Log and skip — don't poison the sum.
+                log.debug("source cmd %r failed: %s", f.cmd, exc)
+                continue
+            v = f.extract.extract(root)
+            if v is not None:
+                total += v
+                any_hit = True
+        return total if any_hit else None
+
     for spec in metrics:
         try:
-            current_root = _run(spec.current.cmd)
-            current = spec.current.extract.extract(current_root)  # type: ignore[arg-type]
+            current = _sum_sources(spec.current)
             if current is None:
                 log.warning("metric %s: current extractor returned None on %s", spec.name, device.name)
                 continue
 
             max_value: float | None = None
             if spec.max is not None:
-                max_root = _run(spec.max.cmd)
-                max_value = spec.max.extract.extract(max_root)  # type: ignore[arg-type]
+                max_value = _sum_sources(spec.max)
 
             pct: float | None = None
             if max_value and max_value > 0:

@@ -15,51 +15,21 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {}
     throw new Error(detail);
   }
-  // 204 No Content
   if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
 }
 
 // ---------- Types ----------
 
-export type AuthType = "api_key" | "userpass";
-export type CredentialScope = "device" | "panorama";
-
-export type Credential = {
-  id: number;
-  name: string;
-  description: string | null;
-  auth_type: AuthType;
-  scope: CredentialScope;
-  created_at: string;
-  updated_at: string;
-};
-
-export type CredentialCreate = {
-  name: string;
-  description?: string | null;
-  auth_type: AuthType;
-  scope: CredentialScope;
-  api_key?: string;
-  username?: string;
-  password?: string;
-};
-
-export type CredentialFromUserpass = {
-  name: string;
-  description?: string | null;
-  scope: CredentialScope;
-  target_hostname: string;
-  username: string;
-  password: string;
-  verify_tls?: boolean;
-};
+export type AuthFromUserpass = { mode: "userpass"; username: string; password: string };
+export type AuthFromApiKey = { mode: "api_key"; api_key: string };
+export type AuthPayload = AuthFromUserpass | AuthFromApiKey;
 
 export type Panorama = {
   id: number;
   name: string;
   hostname: string;
-  credential_id: number;
+  has_api_key: boolean;
   verify_tls: boolean;
   reachable: boolean;
   last_sync_at: string | null;
@@ -67,11 +37,11 @@ export type Panorama = {
   last_reachability_error: string | null;
 };
 
-export type PanoramaCreate = {
+export type PanoramaInput = {
   name: string;
   hostname: string;
-  credential_id: number;
   verify_tls?: boolean;
+  auth?: AuthPayload | null;
 };
 
 export type Device = {
@@ -84,7 +54,7 @@ export type Device = {
   sw_version: string | null;
   source: "direct" | "panorama";
   panorama_id: number | null;
-  credential_id: number | null;
+  has_api_key: boolean;
   verify_tls: boolean;
   proxy_via_panorama: boolean;
   polling_enabled: boolean;
@@ -92,15 +62,15 @@ export type Device = {
   last_poll_error: string | null;
 };
 
-export type DeviceCreate = {
+export type DeviceInput = {
   name: string;
   hostname: string;
   ip_address?: string | null;
-  credential_id?: number | null;
   panorama_id?: number | null;
   verify_tls?: boolean;
   proxy_via_panorama?: boolean;
   polling_enabled?: boolean;
+  auth?: AuthPayload | null;
 };
 
 export type MetricSpec = {
@@ -127,23 +97,11 @@ export type MetricSeries = {
 // ---------- API ----------
 
 export const api = {
-  // Credentials
-  listCredentials: () => j<Credential[]>("/credentials"),
-  createCredential: (body: CredentialCreate) =>
-    j<Credential>("/credentials", { method: "POST", body: JSON.stringify(body) }),
-  createCredentialFromUserpass: (body: CredentialFromUserpass) =>
-    j<Credential>("/credentials/from-userpass", {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  deleteCredential: (id: number) =>
-    j<void>(`/credentials/${id}`, { method: "DELETE" }),
-
   // Panoramas
   listPanoramas: () => j<Panorama[]>("/panoramas"),
-  createPanorama: (body: PanoramaCreate) =>
+  createPanorama: (body: PanoramaInput) =>
     j<Panorama>("/panoramas", { method: "POST", body: JSON.stringify(body) }),
-  updatePanorama: (id: number, body: Partial<PanoramaCreate>) =>
+  updatePanorama: (id: number, body: PanoramaInput) =>
     j<Panorama>(`/panoramas/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   testPanorama: (id: number) =>
     j<{ ok: boolean; info: Record<string, string> }>(
@@ -157,9 +115,9 @@ export const api = {
 
   // Devices
   listDevices: () => j<Device[]>("/devices"),
-  createDevice: (body: DeviceCreate) =>
+  createDevice: (body: DeviceInput) =>
     j<Device>("/devices", { method: "POST", body: JSON.stringify(body) }),
-  updateDevice: (id: number, body: Partial<DeviceCreate>) =>
+  updateDevice: (id: number, body: DeviceInput) =>
     j<Device>(`/devices/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   testDevice: (id: number) =>
     j<{ ok: boolean; info: Record<string, string> }>(

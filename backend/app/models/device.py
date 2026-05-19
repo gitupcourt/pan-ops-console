@@ -1,11 +1,13 @@
-"""Firewall devices, with Panorama linkage. Schema mirrors pan-fw-upgrader's
-Device for future merge — fields not needed by the capacity analyzer are kept
-for forward-compatibility but stay optional/nullable.
+"""Firewall devices, with optional Panorama linkage.
+
+Auth model: each device that's polled directly owns its own encrypted API key.
+A device polled through Panorama (proxy_via_panorama=true) has no key of its
+own and uses the parent Panorama's key with target-serial routing instead.
 """
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, LargeBinary, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -31,17 +33,16 @@ class Device(Base):
     )
     panorama = relationship("Panorama", lazy="joined")
 
-    credential_id: Mapped[int | None] = mapped_column(
-        ForeignKey("credentials.id"), nullable=True
-    )
-    credential = relationship("Credential", lazy="joined")
+    # Per-device encrypted API key. Required when proxy_via_panorama=false.
+    # Kept around even when proxying so flipping back doesn't lose the key.
+    encrypted_api_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    # When True and the device is Panorama-managed, all metric ops route through
-    # Panorama via target-serial. Required for devices we can't reach directly.
+    # When True, all metric ops route through the linked Panorama via
+    # target-serial. The Panorama's key is used; this device's own key (if any)
+    # is ignored.
     proxy_via_panorama: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # Whether the poller should currently sample this device.
     polling_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(

@@ -1,10 +1,4 @@
-"""The poller: walk every enabled device, walk the catalog, write samples.
-
-One responsibility, deliberately narrow: take a list of devices and a list of
-metrics, fetch what each metric says to fetch, and hand the results to the
-SampleStore. Scheduling lives in scheduler.py; client construction lives in
-pan_client.py; storage lives in storage.py. This file just orchestrates.
-"""
+"""The poller: walk every enabled device, walk the catalog, write samples."""
 
 from __future__ import annotations
 
@@ -14,8 +8,8 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.device import Device
+from app.services.auth import decrypt_key
 from app.services.catalog import MetricSpec
-from app.services.credentials import resolve as resolve_credential
 from app.services.pan_client import PanDeviceClient
 from app.services.storage import SamplePoint, SampleStore
 
@@ -29,38 +23,31 @@ def _build_client(device: Device) -> PanDeviceClient:
             raise ValueError(
                 f"Device {device.name} requests Panorama proxy but has no Panorama linkage or serial"
             )
-        pano_cred = resolve_credential(device.panorama.credential)
+        api_key = decrypt_key(device.panorama.encrypted_api_key)
         return PanDeviceClient.via_panorama(
             device.panorama.hostname,
-            pano_cred,
+            api_key,
             device.serial,
             verify_tls=device.panorama.verify_tls,
         )
 
-    if not device.credential:
-        raise ValueError(f"Device {device.name} has no credential and is not proxied via Panorama")
-    cred = resolve_credential(device.credential)
-    return PanDeviceClient.direct(
-        device.hostname if not device.ip_address else device.ip_address,
-        cred,
-        verify_tls=device.verify_tls,
-    )
+    if not device.encrypted_api_key:
+        raise ValueError(
+            f"Device {device.name} has no API key and is not proxied via Panorama"
+        )
+    api_key = decrypt_key(device.encrypted_api_key)
+    target = device.ip_address or device.hostname
+    return PanDeviceClient.direct(target, api_key, verify_tls=device.verify_tls)
 
 
 def poll_device(device: Device, metrics: list[MetricSpec]) -> list[SamplePoint]:
-    """Poll one device for every metric in the catalog. Returns the SamplePoints.
-
-    On per-metric failure: log and continue — one broken metric must not poison
-    the rest. On client-construction failure: re-raise so the caller can record
-    last_poll_error on the device.
-    """
     client = _build_client(device)
     now = datetime.now(timezone.utc)
     out: list[SamplePoint] = []
 
-    # Cache responses keyed by command text — many catalog entries share the
-    # same op() (e.g. session current and session max both come from
-    # `<show><session><info>`). Saves real round-trips.
+    # Cache responses keyed by command text so metrics that share a command
+    # (e.g. session current and session max both come from `<show><session><info>`)
+    # don't re-query the device.
     cache: dict[str, object] = {}
 
     def _run(cmd: str):
@@ -102,7 +89,6 @@ def poll_device(device: Device, metrics: list[MetricSpec]) -> list[SamplePoint]:
 
 
 def poll_all(db: Session, metrics: list[MetricSpec], store: SampleStore) -> dict[int, int]:
-    """Poll every enabled device and write samples. Returns {device_id: sample_count}."""
     results: dict[int, int] = {}
     devices = db.query(Device).filter(Device.polling_enabled == True).all()  # noqa: E712
 

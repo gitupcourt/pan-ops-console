@@ -44,6 +44,16 @@ export type PanoramaInput = {
   auth?: AuthPayload | null;
 };
 
+export type PanoramaDevicePreview = {
+  serial: string;
+  hostname: string | null;
+  ip_address: string | null;
+  model: string | null;
+  sw_version: string | null;
+  connected: boolean;
+  already_imported: boolean;
+};
+
 export type Device = {
   id: number;
   name: string;
@@ -108,8 +118,13 @@ export const api = {
       `/panoramas/${id}/test-connection`,
       { method: "POST" },
     ),
-  syncPanorama: (id: number) =>
-    j<Panorama>(`/panoramas/${id}/sync`, { method: "POST" }),
+  previewPanoramaDevices: (id: number) =>
+    j<PanoramaDevicePreview[]>(`/panoramas/${id}/preview-devices`),
+  syncPanorama: (id: number, serials?: string[]) =>
+    j<Panorama>(`/panoramas/${id}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ serials: serials ?? null }),
+    }),
   deletePanorama: (id: number) =>
     j<void>(`/panoramas/${id}`, { method: "DELETE" }),
 

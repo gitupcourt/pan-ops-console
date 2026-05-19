@@ -1,8 +1,4 @@
-"""Panorama client — device discovery for the capacity analyzer.
-
-Trimmed copy of pan-fw-upgrader's panorama_client.py. Same shape so a merge
-later is straightforward.
-"""
+"""Panorama client — device discovery for the capacity analyzer."""
 
 from __future__ import annotations
 
@@ -12,8 +8,6 @@ from xml.etree import ElementTree as ET
 
 from panos.errors import PanDeviceError
 from panos.panorama import Panorama as PanosPanorama
-
-from app.services.credentials import ResolvedCredential
 
 log = logging.getLogger(__name__)
 
@@ -36,25 +30,16 @@ def _text(el: ET.Element | None, path: str) -> str | None:
 
 
 class PanoramaClient:
-    def __init__(self, hostname: str, credential: ResolvedCredential, *, verify_tls: bool = True):
+    def __init__(self, hostname: str, api_key: str, *, verify_tls: bool = True):
         self.hostname = hostname
         self.verify_tls = verify_tls
-        self._cred = credential
+        self._api_key = api_key
         self._pano: PanosPanorama | None = None
 
     def _connect(self) -> PanosPanorama:
         if self._pano is not None:
             return self._pano
-        if self._cred.api_key:
-            pano = PanosPanorama(self.hostname, api_key=self._cred.api_key)
-        elif self._cred.username and self._cred.password:
-            pano = PanosPanorama(
-                self.hostname,
-                api_username=self._cred.username,
-                api_password=self._cred.password,
-            )
-        else:
-            raise ValueError("Credential has neither api_key nor username+password")
+        pano = PanosPanorama(self.hostname, api_key=self._api_key)
         pano.verify_ssl = self.verify_tls
         self._pano = pano
         return pano

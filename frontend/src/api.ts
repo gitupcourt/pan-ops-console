@@ -139,6 +139,10 @@ export const api = {
       `/devices/${id}/test-connection`,
       { method: "POST" },
     ),
+  getDeviceCapacity: (id: number) =>
+    j<{ items: { key: string; value: number | null; raw: string }[] }>(
+      `/devices/${id}/capacity`,
+    ),
   deleteDevice: (id: number) =>
     j<void>(`/devices/${id}`, { method: "DELETE" }),
 

@@ -136,7 +136,10 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
                 dataKey="current"
                 stroke="#60a5fa"
                 strokeWidth={1.5}
-                dot={false}
+                // Show dots when data is sparse so single/few points are visible.
+                // Recharts won't render a line for one data point — dots ensure
+                // you still see SOMETHING while samples accumulate.
+                dot={points.length < 30 ? { r: 2, fill: "#60a5fa" } : false}
                 isAnimationActive={false}
               />
             </LineChart>

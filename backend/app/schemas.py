@@ -19,6 +19,20 @@ class CredentialCreate(BaseModel):
     password: str | None = None
 
 
+class CredentialFromUserpass(BaseModel):
+    """Mint an API key by talking to a device with username+password, then store
+    ONLY the resulting key. The password is never persisted.
+    """
+
+    name: str
+    description: str | None = None
+    scope: CredentialScope
+    target_hostname: str
+    username: str
+    password: str
+    verify_tls: bool = True
+
+
 class CredentialRead(BaseModel):
     id: int
     name: str

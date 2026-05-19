@@ -32,6 +32,18 @@ def create_panorama(payload: PanoramaCreate, db: Session = Depends(get_db)):
     return pano
 
 
+@router.patch("/{pano_id}", response_model=PanoramaRead)
+def update_panorama(pano_id: int, payload: PanoramaCreate, db: Session = Depends(get_db)):
+    pano = db.get(Panorama, pano_id)
+    if pano is None:
+        raise HTTPException(status_code=404, detail="not found")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(pano, k, v)
+    db.commit()
+    db.refresh(pano)
+    return pano
+
+
 @router.post("/{pano_id}/test-connection")
 def test_panorama(pano_id: int, db: Session = Depends(get_db)):
     """Hit Panorama with `show system info` and return what it told us."""

@@ -82,6 +82,9 @@ class MetricSpec:
     max: Fetcher | None
     pan_os_min: str | None = None
     pan_os_max: str | None = None
+    # "verified" | "probable" | "needs_work" — surfaced in the UI so operators
+    # know which metrics to trust at a glance. Does not affect polling.
+    status: str = "probable"
 
 
 def _build_extractor(raw: dict[str, Any]) -> Extractor:
@@ -113,6 +116,7 @@ def load_catalog(path: str | Path | None = None) -> list[MetricSpec]:
                 max=_build_fetcher(entry["max"]) if entry.get("max") else None,
                 pan_os_min=entry.get("pan_os_min"),
                 pan_os_max=entry.get("pan_os_max"),
+                status=entry.get("status", "probable"),
             )
         )
     log.info("Loaded %d metrics from catalog %s", len(metrics), path)

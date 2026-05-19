@@ -20,18 +20,27 @@
 #                  type: state_value   — value of a `show system state` key
 #   max:
 #     # Same shape as `current`. Omit if the metric has no hard max
-#     # (e.g. percentage metrics where 100 is the implicit ceiling).
+#     # (e.g. CPU/memory %, where 100 is implicit).
 #
 # pan_os_min / pan_os_max can be added to scope an entry to specific releases
 # when key names change.
+#
+# *** STATUS LEGEND ***
+#   verified   — confirmed on a live firewall (PAN-OS 11.x)
+#   probable   — based on docs / common knowledge; verify on first poll
+#   needs_work — command/extractor is a guess and will likely need adjustment
 
 version: 1
 
 metrics:
-  # ---- Configuration Resource ----
+  # ============================================================
+  # Configuration Resource — counts vs. platform max
+  # ============================================================
+
   - name: address_objects
     category: config
-    description: Address objects defined on the firewall
+    description: Address objects
+    status: probable
     current:
       cmd: "<show><running><address></address></running></show>"
       extract:
@@ -43,10 +52,221 @@ metrics:
         type: state_value
         key: cfg.general.max-address
 
-  # ---- Traffic Resource ----
+  - name: address_groups
+    category: config
+    description: Address groups
+    status: probable
+    current:
+      cmd: "<show><running><address-group></address-group></running></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-address-group</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-address-group
+
+  - name: fqdn_addresses
+    category: config
+    description: FQDN address objects
+    status: needs_work
+    # PAN-OS exposes FQDN-typed address objects through the same address tree;
+    # the dedicated `show fqdn` view differs by version. This entry needs to be
+    # validated against a real device before it can be trusted.
+    current:
+      cmd: "<show><object><registered-ip><all></all></registered-ip></object></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-fqdn</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-fqdn
+
+  - name: service_objects
+    category: config
+    description: Service objects
+    status: probable
+    current:
+      cmd: "<show><running><service></service></running></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-service</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-service
+
+  - name: service_groups
+    category: config
+    description: Service groups
+    status: probable
+    current:
+      cmd: "<show><running><service-group></service-group></running></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-service-group</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-service-group
+
+  - name: security_policies
+    category: config
+    description: Security policy rules
+    status: probable
+    current:
+      cmd: "<show><running><security-policy></security-policy></running></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-policy-rule</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-policy-rule
+
+  - name: nat_policies
+    category: config
+    description: NAT policy rules
+    status: probable
+    current:
+      cmd: "<show><running><nat-policy></nat-policy></running></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-nat-rule</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-nat-rule
+
+  - name: virtual_systems
+    category: config
+    description: Virtual systems (vsys) in use
+    status: probable
+    current:
+      cmd: "<show><system><info></info></system></show>"
+      # Single-vsys devices return one vsys; multi-vsys returns N entries.
+      # If your platform doesn't surface vsys here, swap to <show><vsys/></show>.
+      extract:
+        type: xpath_count
+        xpath: ".//vsys/entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-vsys</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-vsys
+
+  - name: arp_entries
+    category: config
+    description: ARP table entries
+    status: probable
+    current:
+      cmd: "<show><arp><entry name='all'/></arp></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entries/entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-arp</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-arp
+
+  - name: ike_peers
+    category: config
+    description: IKE peers / gateways
+    status: needs_work
+    current:
+      cmd: "<show><vpn><gateway></gateway></vpn></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-ike-peer</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-ike-peer
+
+  - name: vpn_tunnels
+    category: config
+    description: IPsec VPN tunnels
+    status: needs_work
+    current:
+      cmd: "<show><vpn><tunnel></tunnel></vpn></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-ipsec-tunnel</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-ipsec-tunnel
+
+  - name: gp_clientless_vpn
+    category: config
+    description: GlobalProtect Clientless VPN connections
+    status: needs_work
+    # GP Clientless metrics vary widely across PAN-OS versions. This is a
+    # placeholder — point it at the right `show global-protect-*` command for
+    # your environment.
+    current:
+      cmd: "<show><global-protect-portal><current-user></current-user></global-protect-portal></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    # No reliable cfg.general.max-* key for GP Clientless — leave max blank.
+
+  # ============================================================
+  # System Resource — % utilization (max implicit at 100)
+  # ============================================================
+
+  - name: dp_cpu
+    category: system
+    description: Dataplane CPU utilization
+    status: needs_work
+    # `show running resource-monitor` returns averages over various windows.
+    # The exact XPath depends on whether the device is multi-DP.
+    current:
+      cmd: "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
+      extract:
+        type: xpath_text
+        xpath: ".//data-processors/dp0/minute/cpu-load-average/entry/value"
+
+  - name: mp_cpu
+    category: system
+    description: Management plane CPU utilization
+    status: needs_work
+    # `show system resources` returns top-style text. Parsing that reliably
+    # needs a dedicated extractor; leave this disabled until that lands.
+    current:
+      cmd: "<show><system><resources></resources></system></show>"
+      extract:
+        type: xpath_text
+        xpath: ".//mp-cpu"
+
+  - name: mp_memory
+    category: system
+    description: Management plane memory utilization
+    status: needs_work
+    current:
+      cmd: "<show><system><resources></resources></system></show>"
+      extract:
+        type: xpath_text
+        xpath: ".//mp-mem"
+
+  # ============================================================
+  # Traffic Resource
+  # ============================================================
+
   - name: session_table_utilization
     category: traffic
     description: Active sessions vs. session table maximum
+    status: probable
     current:
       cmd: "<show><session><info></info></session></show>"
       extract:
@@ -57,3 +277,15 @@ metrics:
       extract:
         type: xpath_text
         xpath: ".//num-max"
+
+  - name: decryption_sessions
+    category: traffic
+    description: Concurrent SSL decryption sessions
+    status: probable
+    # `show session info` exposes the decrypted-session counter directly on
+    # modern PAN-OS. No separate max — capped by the overall session table.
+    current:
+      cmd: "<show><session><info></info></session></show>"
+      extract:
+        type: xpath_text
+        xpath: ".//num-active-ssl-proxy"

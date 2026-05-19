@@ -143,6 +143,8 @@ export const api = {
   listPanoramas: () => j<Panorama[]>("/panoramas"),
   createPanorama: (body: PanoramaCreate) =>
     j<Panorama>("/panoramas", { method: "POST", body: JSON.stringify(body) }),
+  updatePanorama: (id: number, body: Partial<PanoramaCreate>) =>
+    j<Panorama>(`/panoramas/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   testPanorama: (id: number) =>
     j<{ ok: boolean; info: Record<string, string> }>(
       `/panoramas/${id}/test-connection`,

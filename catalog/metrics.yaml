@@ -1,0 +1,59 @@
+# Capacity-analyzer metric catalog.
+#
+# Each entry pairs a "current value" fetch with a "max capacity" fetch and tells
+# the poller how to extract a number from each response. This is the file you
+# edit to add a new metric — no Python changes needed for most cases.
+#
+# Why YAML (not Python): the catalog is data, not behavior. Operators should be
+# able to tune fetch commands per PAN-OS version without touching code, and the
+# `cfg.general.max-*` system-state keys aren't 100% stable across releases.
+#
+# Schema per entry:
+#   name:        short identifier — also the column the UI graphs against
+#   category:    config | system | traffic   (matches PAN's Capacity Analyzer grouping)
+#   description: human-readable label
+#   current:
+#     cmd:       XML op command to run
+#     extract:   how to pull a number out of the parsed response
+#                  type: xpath_count   — len(root.findall(xpath))
+#                  type: xpath_text    — float(root.findtext(xpath))
+#                  type: state_value   — value of a `show system state` key
+#   max:
+#     # Same shape as `current`. Omit if the metric has no hard max
+#     # (e.g. percentage metrics where 100 is the implicit ceiling).
+#
+# pan_os_min / pan_os_max can be added to scope an entry to specific releases
+# when key names change.
+
+version: 1
+
+metrics:
+  # ---- Configuration Resource ----
+  - name: address_objects
+    category: config
+    description: Address objects defined on the firewall
+    current:
+      cmd: "<show><running><address></address></running></show>"
+      extract:
+        type: xpath_count
+        xpath: ".//entry"
+    max:
+      cmd: "<show><system><state><filter>cfg.general.max-address</filter></state></system></show>"
+      extract:
+        type: state_value
+        key: cfg.general.max-address
+
+  # ---- Traffic Resource ----
+  - name: session_table_utilization
+    category: traffic
+    description: Active sessions vs. session table maximum
+    current:
+      cmd: "<show><session><info></info></session></show>"
+      extract:
+        type: xpath_text
+        xpath: ".//num-active"
+    max:
+      cmd: "<show><session><info></info></session></show>"
+      extract:
+        type: xpath_text
+        xpath: ".//num-max"

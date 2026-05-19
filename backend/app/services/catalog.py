@@ -152,8 +152,22 @@ class Extractor:
 
 @dataclass
 class Fetcher:
+    """One (cmd, extract) pair. Multiple of these can be summed via Sources."""
     cmd: str
     extract: Extractor
+
+
+@dataclass
+class Sources:
+    """One or more fetchers whose extracted values are SUMMED.
+
+    A single source is the common case (one cmd, one extractor). Multiple
+    sources let a metric combine values across distinct commands — e.g.
+    "total address objects" = pushed-shared-policy count + running-config
+    local vsys count. Sources that return None are skipped; if every source
+    returns None, the result is None (treated as "no data this cycle").
+    """
+    sources: list[Fetcher]
 
 
 @dataclass
@@ -161,8 +175,8 @@ class MetricSpec:
     name: str
     category: str
     description: str
-    current: Fetcher
-    max: Fetcher | None
+    current: Sources
+    max: Sources | None
     pan_os_min: str | None = None
     pan_os_max: str | None = None
     # "verified" | "probable" | "needs_work" — surfaced in the UI so operators
@@ -184,6 +198,19 @@ def _build_fetcher(raw: dict[str, Any]) -> Fetcher:
     return Fetcher(cmd=raw["cmd"], extract=_build_extractor(raw["extract"]))
 
 
+def _build_sources(raw: dict[str, Any] | None) -> Sources | None:
+    """Accept either a single fetcher dict {cmd, extract} or {sources: [...]}.
+
+    Both forms produce a Sources object; the single-fetcher case becomes a
+    one-element list so the poller can treat everything uniformly.
+    """
+    if raw is None:
+        return None
+    if "sources" in raw:
+        return Sources(sources=[_build_fetcher(s) for s in raw["sources"]])
+    return Sources(sources=[_build_fetcher(raw)])
+
+
 def load_catalog(path: str | Path | None = None) -> list[MetricSpec]:
     """Read metrics.yaml and return validated MetricSpec entries."""
     path = Path(path or get_settings().CATALOG_PATH)
@@ -197,8 +224,8 @@ def load_catalog(path: str | Path | None = None) -> list[MetricSpec]:
                 name=entry["name"],
                 category=entry["category"],
                 description=entry.get("description", ""),
-                current=_build_fetcher(entry["current"]),
-                max=_build_fetcher(entry["max"]) if entry.get("max") else None,
+                current=_build_sources(entry["current"]),
+                max=_build_sources(entry.get("max")),
                 pan_os_min=entry.get("pan_os_min"),
                 pan_os_max=entry.get("pan_os_max"),
                 status=entry.get("status", "probable"),

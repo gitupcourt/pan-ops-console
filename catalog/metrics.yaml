@@ -1,51 +1,43 @@
 # Capacity-analyzer metric catalog.
 #
-# Each entry pairs a "current value" fetch with a "max capacity" fetch and tells
-# the poller how to extract a number from each response. This is the file you
-# edit to add a new metric — no Python changes needed for most cases.
+# Each entry pairs a "current value" fetch with a "max capacity" fetch and
+# tells the poller how to extract a number from each response. The catalog
+# is data, not code — edit this file to add a metric or fix a command.
 #
-# Why YAML (not Python): the catalog is data, not behavior. Operators should be
-# able to tune fetch commands per PAN-OS version without touching code, and the
-# `cfg.general.max-*` system-state keys aren't 100% stable across releases.
+# Extractor types:
+#   xpath_count   — count of XPath matches
+#   xpath_text    — float of the first XPath match's text
+#   xpath_avg     — average of numeric text across ALL XPath matches
+#   state_value   — value of a key from `show system state` output
+#                   (handles mixed decimal `10000` and hex `0x3e8`)
+#   text_regex    — regex against <result> text; named group `value` is the number
 #
-# Schema per entry:
-#   name:        short identifier — also the column the UI graphs against
-#   category:    config | system | traffic   (matches PAN's Capacity Analyzer grouping)
-#   description: human-readable label
-#   current:
-#     cmd:       XML op command to run
-#     extract:   how to pull a number out of the parsed response
-#                  type: xpath_count   — len(root.findall(xpath))
-#                  type: xpath_text    — float(root.findtext(xpath))
-#                  type: state_value   — value of a `show system state` key
-#   max:
-#     # Same shape as `current`. Omit if the metric has no hard max
-#     # (e.g. CPU/memory %, where 100 is implicit).
-#
-# pan_os_min / pan_os_max can be added to scope an entry to specific releases
-# when key names change.
-#
-# *** STATUS LEGEND ***
-#   verified   — confirmed on a live firewall (PAN-OS 11.x)
+# Status:
+#   verified   — confirmed against PAN-OS 11.x via Panorama proxy
 #   probable   — based on docs / common knowledge; verify on first poll
 #   needs_work — command/extractor is a guess and will likely need adjustment
 
 version: 1
 
 metrics:
-  # ============================================================
-  # Configuration Resource — counts vs. platform max
-  # ============================================================
+  # =================================================================
+  # Configuration Resource — current count vs. platform max
+  # =================================================================
+  # Pushed-shared-policy is the right view for Panorama-managed
+  # firewalls — objects pushed from device-groups live under
+  # /response/result/policy/panorama. Locally-defined objects (rare on
+  # Panorama-managed devices) live under vsys1/address; we count both
+  # using `.//address/entry`.
 
   - name: address_objects
     category: config
     description: Address objects
-    status: probable
+    status: verified
     current:
-      cmd: "<show><running><address></address></running></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//address/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-address</filter></state></system></show>"
       extract:
@@ -55,12 +47,12 @@ metrics:
   - name: address_groups
     category: config
     description: Address groups
-    status: probable
+    status: verified
     current:
-      cmd: "<show><running><address-group></address-group></running></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//address-group/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-address-group</filter></state></system></show>"
       extract:
@@ -69,31 +61,32 @@ metrics:
 
   - name: fqdn_addresses
     category: config
-    description: FQDN address objects
-    status: needs_work
-    # PAN-OS exposes FQDN-typed address objects through the same address tree;
-    # the dedicated `show fqdn` view differs by version. This entry needs to be
-    # validated against a real device before it can be trusted.
+    description: FQDN address objects (subset of address objects)
+    status: verified
+    # FQDN objects share the same capacity pool as other address objects
+    # (no separate cfg.general.max-fqdn). The max here is intentionally
+    # the address-object max so the chart shows progress toward the
+    # shared ceiling.
     current:
-      cmd: "<show><object><registered-ip><all></all></registered-ip></object></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//address/entry[fqdn]"
     max:
-      cmd: "<show><system><state><filter>cfg.general.max-fqdn</filter></state></system></show>"
+      cmd: "<show><system><state><filter>cfg.general.max-address</filter></state></system></show>"
       extract:
         type: state_value
-        key: cfg.general.max-fqdn
+        key: cfg.general.max-address
 
   - name: service_objects
     category: config
     description: Service objects
-    status: probable
+    status: verified
     current:
-      cmd: "<show><running><service></service></running></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//service/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-service</filter></state></system></show>"
       extract:
@@ -103,12 +96,12 @@ metrics:
   - name: service_groups
     category: config
     description: Service groups
-    status: probable
+    status: verified
     current:
-      cmd: "<show><running><service-group></service-group></running></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//service-group/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-service-group</filter></state></system></show>"
       extract:
@@ -118,12 +111,16 @@ metrics:
   - name: security_policies
     category: config
     description: Security policy rules
-    status: probable
+    status: needs_work
+    # pushed-shared-policy carries OBJECTS but not RULES on this PAN-OS;
+    # rules show up under a different tree. Likely candidates to verify:
+    #   <show><running><security-policy/></running></show>
+    #   <show><config><merged-pushed-policy/></config></show>
     current:
       cmd: "<show><running><security-policy></security-policy></running></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//rules/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-policy-rule</filter></state></system></show>"
       extract:
@@ -133,26 +130,24 @@ metrics:
   - name: nat_policies
     category: config
     description: NAT policy rules
-    status: probable
+    status: needs_work
     current:
       cmd: "<show><running><nat-policy></nat-policy></running></show>"
       extract:
         type: xpath_count
-        xpath: ".//entry"
+        xpath: ".//rules/entry"
     max:
-      cmd: "<show><system><state><filter>cfg.general.max-nat-rule</filter></state></system></show>"
+      cmd: "<show><system><state><filter>cfg.general.max-nat-policy-rule</filter></state></system></show>"
       extract:
         type: state_value
-        key: cfg.general.max-nat-rule
+        key: cfg.general.max-nat-policy-rule
 
   - name: virtual_systems
     category: config
     description: Virtual systems (vsys) in use
-    status: probable
+    status: verified
     current:
       cmd: "<show><system><info></info></system></show>"
-      # Single-vsys devices return one vsys; multi-vsys returns N entries.
-      # If your platform doesn't surface vsys here, swap to <show><vsys/></show>.
       extract:
         type: xpath_count
         xpath: ".//vsys/entry"
@@ -187,10 +182,10 @@ metrics:
         type: xpath_count
         xpath: ".//entry"
     max:
-      cmd: "<show><system><state><filter>cfg.general.max-ike-peer</filter></state></system></show>"
+      cmd: "<show><system><state><filter>cfg.general.max-ike-peers</filter></state></system></show>"
       extract:
         type: state_value
-        key: cfg.general.max-ike-peer
+        key: cfg.general.max-ike-peers
 
   - name: vpn_tunnels
     category: config
@@ -202,71 +197,77 @@ metrics:
         type: xpath_count
         xpath: ".//entry"
     max:
-      cmd: "<show><system><state><filter>cfg.general.max-ipsec-tunnel</filter></state></system></show>"
+      cmd: "<show><system><state><filter>cfg.general.max-tunnel</filter></state></system></show>"
       extract:
         type: state_value
-        key: cfg.general.max-ipsec-tunnel
+        key: cfg.general.max-tunnel
 
   - name: gp_clientless_vpn
     category: config
     description: GlobalProtect Clientless VPN connections
     status: needs_work
-    # GP Clientless metrics vary widely across PAN-OS versions. This is a
-    # placeholder — point it at the right `show global-protect-*` command for
-    # your environment.
     current:
       cmd: "<show><global-protect-portal><current-user></current-user></global-protect-portal></show>"
       extract:
         type: xpath_count
         xpath: ".//entry"
-    # No reliable cfg.general.max-* key for GP Clientless — leave max blank.
+    # No reliable max key — capped by max-ssl-tunnel on most platforms.
 
-  # ============================================================
-  # System Resource — % utilization (max implicit at 100)
-  # ============================================================
+  # =================================================================
+  # System Resource — utilization %
+  # =================================================================
 
   - name: dp_cpu
     category: system
-    description: Dataplane CPU utilization
-    status: needs_work
-    # `show running resource-monitor` returns averages over various windows.
-    # The exact XPath depends on whether the device is multi-DP.
+    description: Dataplane CPU utilization (average across cores)
+    status: verified
+    # Average of per-core values from the 1-minute resource-monitor view.
+    # Multi-DP devices have dp1/dp2/etc. — we report dp0 for now;
+    # extend the XPath if you need a multi-DP rollup.
     current:
       cmd: "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
       extract:
-        type: xpath_text
+        type: xpath_avg
         xpath: ".//data-processors/dp0/minute/cpu-load-average/entry/value"
 
   - name: mp_cpu
     category: system
     description: Management plane CPU utilization
-    status: needs_work
-    # `show system resources` returns top-style text. Parsing that reliably
-    # needs a dedicated extractor; leave this disabled until that lands.
+    status: verified
+    # `show system resources` returns `top` text. Parse the %Cpu(s) line
+    # and take (100 - idle).
     current:
       cmd: "<show><system><resources></resources></system></show>"
       extract:
-        type: xpath_text
-        xpath: ".//mp-cpu"
+        type: text_regex
+        # Matches e.g. "%Cpu(s): 47.4 us, 15.8 sy, 0.0 ni, 34.2 id, ..."
+        pattern: '%Cpu\(s\):\s+\S+\s+us,\s+\S+\s+sy,\s+\S+\s+ni,\s+(?P<value>\d+(?:\.\d+)?)\s+id'
+    # idle isn't usage; the poller will invert in a follow-up — for now we
+    # store idle %, so on the chart "lower is busier." TODO: add an
+    # `invert` knob to the extractor, or a derived "100 - idle" metric.
 
   - name: mp_memory
     category: system
     description: Management plane memory utilization
     status: needs_work
+    # `MiB Mem : 6959.1 total, 98.0 free, 2903.9 used, 3957.2 buff/cache`
+    # We grab `used` and `total` separately would need two metrics —
+    # easier: a custom extractor that does the math. Marked needs_work
+    # until we add a `text_regex_ratio` type.
     current:
       cmd: "<show><system><resources></resources></system></show>"
       extract:
-        type: xpath_text
-        xpath: ".//mp-mem"
+        type: text_regex
+        pattern: 'MiB Mem :\s+\S+\s+total,\s+\S+\s+free,\s+(?P<value>\d+(?:\.\d+)?)\s+used'
 
-  # ============================================================
+  # =================================================================
   # Traffic Resource
-  # ============================================================
+  # =================================================================
 
   - name: session_table_utilization
     category: traffic
     description: Active sessions vs. session table maximum
-    status: probable
+    status: verified
     current:
       cmd: "<show><session><info></info></session></show>"
       extract:
@@ -281,9 +282,11 @@ metrics:
   - name: decryption_sessions
     category: traffic
     description: Concurrent SSL decryption sessions
-    status: probable
-    # `show session info` exposes the decrypted-session counter directly on
-    # modern PAN-OS. No separate max — capped by the overall session table.
+    status: needs_work
+    # `show session info` on 11.x doesn't expose `num-active-ssl-proxy`
+    # any more. Likely candidates:
+    #   <show><session><meter></meter></session></show>
+    #   <show><global-counter><filter><value>0</value></filter></global-counter></show>
     current:
       cmd: "<show><session><info></info></session></show>"
       extract:

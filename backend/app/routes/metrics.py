@@ -23,6 +23,7 @@ def get_catalog():
             "category": m.category,
             "description": m.description,
             "has_max": m.max is not None,
+            "status": m.status,
         }
         for m in load_catalog()
     ]

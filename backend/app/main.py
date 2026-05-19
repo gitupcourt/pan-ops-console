@@ -46,6 +46,15 @@ app.include_router(devices.router)
 app.include_router(metrics.router)
 
 
+@app.get("/")
+def root():
+    return {
+        "name": "pan-capacity-analyzer",
+        "docs": "/docs",
+        "healthz": "/healthz",
+    }
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}

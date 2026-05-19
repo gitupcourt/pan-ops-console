@@ -20,19 +20,48 @@ from app.config import get_settings
 log = logging.getLogger(__name__)
 
 
+def _parse_int_maybe_hex(s: str) -> float | None:
+    """PAN-OS `show system state` returns values in mixed decimal and hex —
+    e.g. `cfg.general.max-address: 10000` next to `cfg.general.max-address-group: 0x3e8`.
+    Decode both.
+    """
+    s = s.strip().strip("'\"")
+    if not s:
+        return None
+    try:
+        if s.lower().startswith("0x"):
+            return float(int(s, 16))
+        return float(s)
+    except ValueError:
+        return None
+
+
 @dataclass
 class Extractor:
-    """How to pull a number out of a parsed XML response."""
+    """How to pull a number out of a parsed XML response.
 
-    type: str  # "xpath_count" | "xpath_text" | "state_value"
+    Supported types:
+      xpath_count   — count of XPath matches
+      xpath_text    — float of the first XPath match's text
+      xpath_avg     — average of numeric text across ALL XPath matches
+                      (used for per-DP-core CPU averaging)
+      state_value   — value of a key from `show system state` output
+                      (handles both decimal and hex)
+      text_regex    — regex against the <result> text content; named group
+                      `value` is the number
+    """
+
+    type: str
     xpath: str | None = None
     key: str | None = None
+    pattern: str | None = None
 
     def extract(self, root: ET.Element) -> float | None:
         if self.type == "xpath_count":
             if not self.xpath:
                 return None
             return float(len(root.findall(self.xpath)))
+
         if self.type == "xpath_text":
             if not self.xpath:
                 return None
@@ -43,26 +72,56 @@ class Extractor:
                 return float(text.strip())
             except ValueError:
                 return None
+
+        if self.type == "xpath_avg":
+            if not self.xpath:
+                return None
+            vals: list[float] = []
+            for el in root.findall(self.xpath):
+                if el.text and el.text.strip():
+                    try:
+                        vals.append(float(el.text.strip()))
+                    except ValueError:
+                        pass
+            if not vals:
+                return None
+            return sum(vals) / len(vals)
+
         if self.type == "state_value":
-            # `show system state` returns key: value lines wrapped in <result>.
-            # Find the line matching our key and parse the value out.
             if not self.key:
                 return None
             result_el = root.find(".//result")
             if result_el is None or not result_el.text:
                 return None
+            # State output: `cfg.general.max-address: 10000` or `'key': NO_MATCHES`.
+            # Match the exact key prefix to avoid `max-address` matching
+            # `max-address-group` etc.
+            target = self.key + ":"
             for line in result_el.text.splitlines():
                 line = line.strip()
-                if not line.startswith(self.key):
+                if not (line.startswith(target) or line.startswith(f"'{self.key}':")):
                     continue
-                # Format is typically: cfg.general.max-address: 80000
                 _, _, value = line.partition(":")
-                value = value.strip().strip("'\"")
-                try:
-                    return float(value)
-                except ValueError:
+                if "NO_MATCHES" in value:
                     return None
+                return _parse_int_maybe_hex(value)
             return None
+
+        if self.type == "text_regex":
+            if not self.pattern:
+                return None
+            import re
+
+            result_el = root.find(".//result")
+            text = result_el.text if result_el is not None and result_el.text else ""
+            m = re.search(self.pattern, text)
+            if not m:
+                return None
+            try:
+                return float(m.group("value"))
+            except (IndexError, ValueError):
+                return None
+
         log.warning("Unknown extractor type: %s", self.type)
         return None
 
@@ -92,6 +151,7 @@ def _build_extractor(raw: dict[str, Any]) -> Extractor:
         type=raw["type"],
         xpath=raw.get("xpath"),
         key=raw.get("key"),
+        pattern=raw.get("pattern"),
     )
 
 

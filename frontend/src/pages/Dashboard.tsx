@@ -12,7 +12,7 @@ export default function Dashboard() {
   const catalogQ = useQuery({ queryKey: ["catalog"], queryFn: api.listCatalog });
 
   const [deviceId, setDeviceId] = useState<number | null>(null);
-  const [hours, setHours] = useState(24);
+  const [hours, setHours] = useState(1);
 
   const devices: Device[] = devicesQ.data ?? [];
   const catalog: MetricSpec[] = catalogQ.data ?? [];

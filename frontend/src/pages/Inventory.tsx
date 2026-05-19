@@ -365,6 +365,9 @@ function DevicesSection() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["devices"] }),
   });
 
+  // Per-device "Capacity" panel — fetches cfg.general.max-* on demand.
+  const [capacityFor, setCapacityFor] = useState<number | null>(null);
+
   const devs: Device[] = devsQ.data ?? [];
 
   return (
@@ -430,6 +433,9 @@ function DevicesSection() {
                     <Button onClick={() => test.mutate(d.id)} disabled={test.isPending}>
                       Test
                     </Button>
+                    <Button onClick={() => setCapacityFor(capacityFor === d.id ? null : d.id)}>
+                      {capacityFor === d.id ? "Close" : "Capacity"}
+                    </Button>
                     <Button onClick={() => setEditing(editing === d.id ? null : d.id)}>
                       {editing === d.id ? "Close" : "Edit"}
                     </Button>
@@ -438,6 +444,13 @@ function DevicesSection() {
                     </Button>
                   </td>
                 </tr>
+                {capacityFor === d.id && (
+                  <tr className="bg-zinc-950/60">
+                    <td colSpan={7} className="p-0">
+                      <CapacityPanel deviceId={d.id} onClose={() => setCapacityFor(null)} />
+                    </td>
+                  </tr>
+                )}
                 {testResult?.id === d.id && (
                   <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
                     <td colSpan={7} className="px-4 py-2">
@@ -595,6 +608,116 @@ function ImportPicker({ panoramaId, onDone }: { panoramaId: number; onDone: () =
         <Button type="button" onClick={onDone}>
           Cancel
         </Button>
+      </div>
+    </div>
+  );
+}
+
+// =====================================================================
+// Capacity panel — shows every cfg.general.max-* value the device reports,
+// in a human-friendly table. On-demand fetch.
+// =====================================================================
+
+function humanize(key: string): string {
+  return key
+    .split("-")
+    .map((p) => (p.length <= 3 ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)))
+    .join(" ");
+}
+
+// Lightweight category hints — purely for grouping in the UI. Keys not in
+// any bucket fall through to "Other".
+const CATEGORIES: { label: string; match: (k: string) => boolean }[] = [
+  { label: "Objects", match: (k) => /^(address|service|tag|region|profile|schedule|edl|fqdn|application)/.test(k) },
+  { label: "Policies / Rules", match: (k) => /policy-rule|nat-pool|policy$|rule$/.test(k) },
+  { label: "Sessions", match: (k) => /session|proxy|tunnel|sctp|tcp-segs|fptcp/.test(k) },
+  { label: "Networking", match: (k) => /^(arp|mac|route|ifnet|vlan|vrouter|vwire|neigh|ipfrags|ip6|mroute|qos)/.test(k) },
+  { label: "VPN / GP", match: (k) => /ike|vpn|sslvpn|ssl-tunnel|gp|ssl-portal/.test(k) },
+  { label: "System", match: (k) => /^(vsys|cert|signature|threat|hip|fib|debug|return-mac)/.test(k) },
+];
+
+function categorize(key: string): string {
+  for (const c of CATEGORIES) if (c.match(key)) return c.label;
+  return "Other";
+}
+
+function fmtNum(n: number | null): string {
+  if (n == null) return "—";
+  return n.toLocaleString();
+}
+
+function CapacityPanel({ deviceId, onClose }: { deviceId: number; onClose: () => void }) {
+  const q = useQuery({
+    queryKey: ["device-capacity", deviceId],
+    queryFn: () => api.getDeviceCapacity(deviceId),
+  });
+  const [filter, setFilter] = useState("");
+
+  if (q.isLoading) {
+    return <div className="p-4 text-xs text-zinc-500">Fetching capacity from device…</div>;
+  }
+  if (q.error) {
+    return (
+      <div className="p-4 text-xs text-rose-300">
+        Failed: {(q.error as Error).message}
+      </div>
+    );
+  }
+  const items = q.data?.items ?? [];
+  const filtered = items.filter((i) => {
+    if (!filter) return true;
+    const q = filter.toLowerCase();
+    return i.key.toLowerCase().includes(q) || humanize(i.key).toLowerCase().includes(q);
+  });
+  const groups: Record<string, typeof items> = {};
+  for (const it of filtered) {
+    const g = categorize(it.key);
+    (groups[g] ??= []).push(it);
+  }
+  const order = ["Objects", "Policies / Rules", "Sessions", "Networking", "VPN / GP", "System", "Other"];
+
+  return (
+    <div className="border-b border-zinc-800 bg-zinc-950/40 p-4 grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">
+          Platform capacity — {items.length} keys reported by device
+        </div>
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="filter…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="text-xs"
+          />
+          <button onClick={onClose} className="text-xs text-zinc-500 hover:text-zinc-200">
+            close
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-h-[28rem] overflow-auto">
+        {order.map((g) =>
+          groups[g]?.length ? (
+            <div key={g}>
+              <div className="text-[11px] uppercase tracking-wider text-zinc-500 mb-1">{g}</div>
+              <table className="w-full text-sm">
+                <tbody>
+                  {groups[g].map((it) => (
+                    <tr key={it.key} className="border-b border-zinc-800/40">
+                      <td className="px-2 py-1 text-zinc-300">{humanize(it.key)}</td>
+                      <td
+                        className="px-2 py-1 text-right text-zinc-100 tabular-nums"
+                        title={it.raw}
+                      >
+                        {fmtNum(it.value)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null,
+        )}
       </div>
     </div>
   );

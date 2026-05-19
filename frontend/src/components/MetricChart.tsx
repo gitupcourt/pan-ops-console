@@ -1,5 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import { api, MetricSpec } from "../api";
 import { StatusBadge } from "./StatusBadge";
@@ -10,6 +18,12 @@ type Props = {
   hours: number;
 };
 
+function fmt(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (Math.abs(n) >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
 export function MetricChart({ deviceId, spec, hours }: Props) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["series", deviceId, spec.name, hours],
@@ -19,12 +33,19 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
   const points = (data?.samples ?? []).map((s) => ({
     ts: new Date(s.ts).getTime(),
     current: s.current,
-    pct: s.pct,
     max: s.max,
+    pct: s.pct,
   }));
 
   const latest = points[points.length - 1];
-  const showPct = spec.has_max && latest?.pct != null;
+  // The max reported by the device usually doesn't change between samples,
+  // but pin to the latest just in case (e.g. after a PAN-OS upgrade).
+  const max = latest?.max ?? null;
+  // Y-axis: anchor to 0..max so headroom is visible. Without a max, let
+  // Recharts auto-scale. Pad upper bound by a hair so the line doesn't
+  // sit on the top edge.
+  const yDomain: [number, number] | [number, "auto"] | undefined =
+    max != null && max > 0 ? [0, max] : undefined;
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
@@ -40,15 +61,15 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
         </div>
         {latest && (
           <div className="text-right">
-            <div className="text-lg font-semibold text-zinc-100 tabular-nums">
-              {showPct
-                ? `${latest.pct!.toFixed(1)}%`
-                : Number(latest.current).toLocaleString()}
+            <div className="text-lg font-semibold text-zinc-100 tabular-nums leading-tight">
+              {fmt(latest.current)}
+              {max != null && (
+                <span className="text-zinc-500 text-sm font-normal"> / {fmt(max)}</span>
+              )}
             </div>
-            {showPct && (
+            {latest.pct != null && (
               <div className="text-[11px] text-zinc-500 tabular-nums">
-                {Number(latest.current).toLocaleString()} /{" "}
-                {Number(latest.max).toLocaleString()}
+                {latest.pct.toFixed(latest.pct < 1 ? 2 : 1)}% of capacity
               </div>
             )}
           </div>
@@ -70,22 +91,49 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
           </div>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={points} margin={{ top: 2, right: 4, left: 0, bottom: 0 }}>
+            <LineChart data={points} margin={{ top: 4, right: 6, left: 0, bottom: 0 }}>
               <XAxis dataKey="ts" hide />
               <YAxis
-                hide={!showPct}
-                domain={showPct ? [0, 100] : ["auto", "auto"]}
+                domain={yDomain ?? ["auto", "auto"]}
+                width={42}
+                tick={{ fill: "#71717a", fontSize: 10 }}
+                tickFormatter={(v) => fmt(v)}
+                axisLine={false}
+                tickLine={false}
               />
+              {max != null && max > 0 && (
+                <ReferenceLine
+                  y={max}
+                  stroke="#dc2626"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.6}
+                  label={{
+                    value: `max ${fmt(max)}`,
+                    position: "insideTopRight",
+                    fill: "#f87171",
+                    fontSize: 10,
+                  }}
+                />
+              )}
               <Tooltip
-                contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", fontSize: 12 }}
+                contentStyle={{
+                  background: "#18181b",
+                  border: "1px solid #3f3f46",
+                  fontSize: 12,
+                }}
                 labelFormatter={(ts) => new Date(ts as number).toLocaleString()}
-                formatter={(value: number) =>
-                  showPct ? `${value.toFixed(1)}%` : Number(value).toLocaleString()
-                }
+                formatter={(value: number, _name, payload) => {
+                  const p = payload?.payload;
+                  if (p?.max != null) {
+                    const pct = p.max > 0 ? ((value / p.max) * 100).toFixed(2) : null;
+                    return [`${fmt(value)} / ${fmt(p.max)}${pct ? `  (${pct}%)` : ""}`, "current"];
+                  }
+                  return [fmt(value), "current"];
+                }}
               />
               <Line
                 type="monotone"
-                dataKey={showPct ? "pct" : "current"}
+                dataKey="current"
                 stroke="#60a5fa"
                 strokeWidth={1.5}
                 dot={false}

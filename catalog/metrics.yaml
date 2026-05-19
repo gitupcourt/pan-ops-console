@@ -110,17 +110,17 @@ metrics:
 
   - name: security_policies
     category: config
-    description: Security policy rules
-    status: needs_work
-    # pushed-shared-policy carries OBJECTS but not RULES on this PAN-OS;
-    # rules show up under a different tree. Likely candidates to verify:
-    #   <show><running><security-policy/></running></show>
-    #   <show><config><merged-pushed-policy/></config></show>
+    description: Security policy rules (pre + post)
+    status: verified
+    # Pushed rules live under <pre-rulebase> and <post-rulebase>, each with
+    # <security>/<rules>/<entry> children. XPath uses recursive descent so
+    # both buckets get counted. The 2 default-security-rules are excluded
+    # (they always exist and aren't operator-managed).
     current:
-      cmd: "<show><running><security-policy></security-policy></running></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//rules/entry"
+        xpath: ".//security/rules/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-policy-rule</filter></state></system></show>"
       extract:
@@ -129,13 +129,13 @@ metrics:
 
   - name: nat_policies
     category: config
-    description: NAT policy rules
-    status: needs_work
+    description: NAT policy rules (pre + post)
+    status: verified
     current:
-      cmd: "<show><running><nat-policy></nat-policy></running></show>"
+      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
       extract:
         type: xpath_count
-        xpath: ".//rules/entry"
+        xpath: ".//nat/rules/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-nat-policy-rule</filter></state></system></show>"
       extract:
@@ -232,33 +232,30 @@ metrics:
 
   - name: mp_cpu
     category: system
-    description: Management plane CPU utilization
+    description: Management plane CPU utilization (%)
     status: verified
-    # `show system resources` returns `top` text. Parse the %Cpu(s) line
-    # and take (100 - idle).
+    # `show system resources` returns `top` text. We capture the `id` (idle)
+    # value and use the extractor's invert flag to report usage = 100 - idle.
     current:
       cmd: "<show><system><resources></resources></system></show>"
       extract:
         type: text_regex
-        # Matches e.g. "%Cpu(s): 47.4 us, 15.8 sy, 0.0 ni, 34.2 id, ..."
+        # Matches: "%Cpu(s): 47.4 us, 15.8 sy, 0.0 ni, 34.2 id, ..."
         pattern: '%Cpu\(s\):\s+\S+\s+us,\s+\S+\s+sy,\s+\S+\s+ni,\s+(?P<value>\d+(?:\.\d+)?)\s+id'
-    # idle isn't usage; the poller will invert in a follow-up — for now we
-    # store idle %, so on the chart "lower is busier." TODO: add an
-    # `invert` knob to the extractor, or a derived "100 - idle" metric.
+        invert: true
 
   - name: mp_memory
     category: system
-    description: Management plane memory utilization
-    status: needs_work
-    # `MiB Mem : 6959.1 total, 98.0 free, 2903.9 used, 3957.2 buff/cache`
-    # We grab `used` and `total` separately would need two metrics —
-    # easier: a custom extractor that does the math. Marked needs_work
-    # until we add a `text_regex_ratio` type.
+    description: Management plane memory utilization (%)
+    status: verified
+    # `MiB Mem : 6959.1 total, 98.0 free, 2903.9 used, 3957.2 buff/cache`.
+    # Capturing both `total` and `used` in one regex lets the extractor
+    # turn this into a ratio percentage automatically.
     current:
       cmd: "<show><system><resources></resources></system></show>"
       extract:
         type: text_regex
-        pattern: 'MiB Mem :\s+\S+\s+total,\s+\S+\s+free,\s+(?P<value>\d+(?:\.\d+)?)\s+used'
+        pattern: 'MiB Mem :\s+(?P<total>\d+(?:\.\d+)?)\s+total,\s+\S+\s+free,\s+(?P<value>\d+(?:\.\d+)?)\s+used'
 
   # =================================================================
   # Traffic Resource

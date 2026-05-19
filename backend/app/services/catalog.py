@@ -55,8 +55,23 @@ class Extractor:
     xpath: str | None = None
     key: str | None = None
     pattern: str | None = None
+    # If True, replace the extracted value `v` with `100 - v`. Used for
+    # `show system resources` where the natural number on the line is the
+    # idle percentage (so usage = 100 - idle).
+    invert: bool = False
+
+    def _post(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if self.invert:
+            return 100.0 - value
+        return value
 
     def extract(self, root: ET.Element) -> float | None:
+        value = self._extract_raw(root)
+        return self._post(value)
+
+    def _extract_raw(self, root: ET.Element) -> float | None:
         if self.type == "xpath_count":
             if not self.xpath:
                 return None
@@ -118,9 +133,18 @@ class Extractor:
             if not m:
                 return None
             try:
-                return float(m.group("value"))
+                value = float(m.group("value"))
             except (IndexError, ValueError):
                 return None
+            # Optional "total" named group turns this into a percentage —
+            # useful for memory where one line gives `... total, ... used`.
+            try:
+                total = float(m.group("total"))
+                if total > 0:
+                    return (value / total) * 100.0
+            except (IndexError, ValueError):
+                pass
+            return value
 
         log.warning("Unknown extractor type: %s", self.type)
         return None
@@ -152,6 +176,7 @@ def _build_extractor(raw: dict[str, Any]) -> Extractor:
         xpath=raw.get("xpath"),
         key=raw.get("key"),
         pattern=raw.get("pattern"),
+        invert=bool(raw.get("invert", False)),
     )
 
 

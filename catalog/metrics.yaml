@@ -12,6 +12,17 @@
 #                   (handles mixed decimal `10000` and hex `0x3e8`)
 #   text_regex    — regex against <result> text; named group `value` is the number
 #
+# A metric's `current` or `max` can be either:
+#   - A single fetcher: { cmd: ..., extract: {...} }
+#   - A list summed across multiple commands:
+#       sources:
+#         - { cmd: ..., extract: {...} }
+#         - { cmd: ..., extract: {...} }
+#     Each source's value is added. Sources that error or return None
+#     are skipped, so a `running` config source returning 0 through a
+#     Panorama proxy doesn't break the metric on a different device that
+#     CAN reach local config directly.
+#
 # Status:
 #   verified   — confirmed against PAN-OS 11.x via Panorama proxy
 #   probable   — based on docs / common knowledge; verify on first poll
@@ -31,13 +42,22 @@ metrics:
 
   - name: address_objects
     category: config
-    description: Address objects
+    description: Address objects (pushed + local)
     status: verified
+    # Sum of Panorama-pushed objects (visible to both proxy and direct
+    # polling) and locally-configured objects (only visible via direct
+    # polling). When polling via Panorama proxy, the `running` source
+    # returns 0 and the total reflects pushed only — a known limitation.
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//address/entry"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//address/entry"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/address/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-address</filter></state></system></show>"
       extract:
@@ -46,13 +66,18 @@ metrics:
 
   - name: address_groups
     category: config
-    description: Address groups
+    description: Address groups (pushed + local)
     status: verified
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//address-group/entry"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//address-group/entry"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/address-group/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-address-group</filter></state></system></show>"
       extract:
@@ -61,17 +86,22 @@ metrics:
 
   - name: fqdn_addresses
     category: config
-    description: FQDN address objects (subset of address objects)
+    description: FQDN address objects (pushed + local; subset of address objects)
     status: verified
     # FQDN objects share the same capacity pool as other address objects
     # (no separate cfg.general.max-fqdn). The max here is intentionally
     # the address-object max so the chart shows progress toward the
     # shared ceiling.
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//address/entry[fqdn]"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//address/entry[fqdn]"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/address/entry[fqdn]"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-address</filter></state></system></show>"
       extract:
@@ -80,13 +110,18 @@ metrics:
 
   - name: service_objects
     category: config
-    description: Service objects
+    description: Service objects (pushed + local)
     status: verified
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//service/entry"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//service/entry"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/service/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-service</filter></state></system></show>"
       extract:
@@ -95,13 +130,18 @@ metrics:
 
   - name: service_groups
     category: config
-    description: Service groups
+    description: Service groups (pushed + local)
     status: verified
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//service-group/entry"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//service-group/entry"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/service-group/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-service-group</filter></state></system></show>"
       extract:
@@ -110,17 +150,22 @@ metrics:
 
   - name: security_policies
     category: config
-    description: Security policy rules (pre + post)
+    description: Security policy rules (pushed + local)
     status: verified
-    # Pushed rules live under <pre-rulebase> and <post-rulebase>, each with
-    # <security>/<rules>/<entry> children. XPath uses recursive descent so
-    # both buckets get counted. The 2 default-security-rules are excluded
-    # (they always exist and aren't operator-managed).
+    # Pushed rules live under <pre-rulebase>/<security>/<rules> and the
+    # matching post-rulebase path; local rules live under
+    # vsys/entry/rulebase/security/rules. Recursive XPath catches all
+    # of them in their respective sources.
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//security/rules/entry"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//security/rules/entry"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/rulebase/security/rules/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-policy-rule</filter></state></system></show>"
       extract:
@@ -129,13 +174,18 @@ metrics:
 
   - name: nat_policies
     category: config
-    description: NAT policy rules (pre + post)
+    description: NAT policy rules (pushed + local)
     status: verified
     current:
-      cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
-      extract:
-        type: xpath_count
-        xpath: ".//nat/rules/entry"
+      sources:
+        - cmd: "<show><config><pushed-shared-policy></pushed-shared-policy></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//nat/rules/entry"
+        - cmd: "<show><config><running></running></config></show>"
+          extract:
+            type: xpath_count
+            xpath: ".//vsys/entry/rulebase/nat/rules/entry"
     max:
       cmd: "<show><system><state><filter>cfg.general.max-nat-policy-rule</filter></state></system></show>"
       extract:

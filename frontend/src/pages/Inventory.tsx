@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useState } from "react";
+import { Fragment, FormEvent, useState } from "react";
 
 import { api, Credential, Device, Panorama } from "../api";
 import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../components/ui";
@@ -36,7 +36,7 @@ function CredentialsSection() {
     <Card>
       <CardHeader
         title="Credentials"
-        description="Stored secrets used to talk to firewalls and Panoramas. Username/password is decrypted only in memory; API keys are encrypted at rest."
+        description="Stored secrets used to talk to firewalls and Panoramas. The recommended flow mints an API key from username/password once, then stores only the key."
         action={
           <Button variant="primary" onClick={() => setAdding((v) => !v)}>
             {adding ? "Cancel" : "Add credential"}
@@ -235,10 +235,22 @@ function PanoramasSection() {
   const panosQ = useQuery({ queryKey: ["panoramas"], queryFn: api.listPanoramas });
   const credsQ = useQuery({ queryKey: ["credentials"], queryFn: api.listCredentials });
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [testResult, setTestResult] = useState<{ id: number; ok: boolean; text: string } | null>(null);
 
   const test = useMutation({
-    mutationFn: api.testPanorama,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["panoramas"] }),
+    mutationFn: async (id: number) => ({ id, result: await api.testPanorama(id) }),
+    onSuccess: ({ id, result }) => {
+      setTestResult({
+        id,
+        ok: true,
+        text: Object.entries(result.info)
+          .map(([k, v]) => `${k}: ${v ?? "—"}`)
+          .join("\n"),
+      });
+      qc.invalidateQueries({ queryKey: ["panoramas"] });
+    },
+    onError: (e: Error, id) => setTestResult({ id, ok: false, text: e.message }),
   });
   const sync = useMutation({
     mutationFn: api.syncPanorama,
@@ -253,7 +265,9 @@ function PanoramasSection() {
   });
 
   const panos: Panorama[] = panosQ.data ?? [];
-  const panoCreds = (credsQ.data ?? []).filter((c) => c.scope === "panorama" && c.auth_type === "api_key");
+  const panoCreds = (credsQ.data ?? []).filter(
+    (c) => c.scope === "panorama" && c.auth_type === "api_key",
+  );
 
   return (
     <Card>
@@ -267,10 +281,7 @@ function PanoramasSection() {
         }
       />
       {adding && (
-        <PanoramaForm
-          creds={panoCreds}
-          onDone={() => setAdding(false)}
-        />
+        <PanoramaForm creds={panoCreds} onDone={() => setAdding(false)} />
       )}
       {panos.length === 0 ? (
         <Empty>No Panoramas yet.</Empty>
@@ -287,33 +298,70 @@ function PanoramasSection() {
           </thead>
           <tbody>
             {panos.map((p) => (
-              <tr key={p.id} className="border-b border-zinc-800/50 align-top">
-                <td className="px-4 py-2 text-zinc-100">{p.name}</td>
-                <td className="px-4 py-2 text-zinc-400">{p.hostname}</td>
-                <td className="px-4 py-2 text-xs">
-                  {p.reachable ? (
-                    <span className="text-emerald-400">yes</span>
-                  ) : (
-                    <span className="text-rose-400" title={p.last_reachability_error ?? ""}>
-                      no
-                    </span>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-xs text-zinc-500">
-                  {p.last_sync_at ? new Date(p.last_sync_at).toLocaleString() : "never"}
-                </td>
-                <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
-                  <Button onClick={() => test.mutate(p.id)} disabled={test.isPending}>
-                    Test
-                  </Button>
-                  <Button onClick={() => sync.mutate(p.id)} disabled={sync.isPending}>
-                    Sync devices
-                  </Button>
-                  <Button variant="danger" onClick={() => del.mutate(p.id)}>
-                    Delete
-                  </Button>
-                </td>
-              </tr>
+              <Fragment key={p.id}>
+                <tr className="border-b border-zinc-800/50 align-top">
+                  <td className="px-4 py-2 text-zinc-100">{p.name}</td>
+                  <td className="px-4 py-2 text-zinc-400">{p.hostname}</td>
+                  <td className="px-4 py-2 text-xs">
+                    {p.reachable ? (
+                      <span className="text-emerald-400">yes</span>
+                    ) : (
+                      <span className="text-rose-400" title={p.last_reachability_error ?? ""}>
+                        no
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-zinc-500">
+                    {p.last_sync_at ? new Date(p.last_sync_at).toLocaleString() : "never"}
+                  </td>
+                  <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
+                    <Button onClick={() => test.mutate(p.id)} disabled={test.isPending}>
+                      Test
+                    </Button>
+                    <Button onClick={() => sync.mutate(p.id)} disabled={sync.isPending}>
+                      Sync devices
+                    </Button>
+                    <Button onClick={() => setEditing(editing === p.id ? null : p.id)}>
+                      {editing === p.id ? "Close" : "Edit"}
+                    </Button>
+                    <Button variant="danger" onClick={() => del.mutate(p.id)}>
+                      Delete
+                    </Button>
+                  </td>
+                </tr>
+                {testResult?.id === p.id && (
+                  <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
+                    <td colSpan={5} className="px-4 py-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <pre
+                          className={`text-xs whitespace-pre-wrap ${
+                            testResult.ok ? "text-emerald-300" : "text-rose-300"
+                          }`}
+                        >
+                          {testResult.text}
+                        </pre>
+                        <button
+                          className="text-xs text-zinc-500 hover:text-zinc-200"
+                          onClick={() => setTestResult(null)}
+                        >
+                          dismiss
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {editing === p.id && (
+                  <tr className="bg-zinc-950/60">
+                    <td colSpan={5} className="p-0">
+                      <PanoramaForm
+                        creds={panoCreds}
+                        initial={p}
+                        onDone={() => setEditing(null)}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -322,22 +370,34 @@ function PanoramasSection() {
   );
 }
 
-function PanoramaForm({ creds, onDone }: { creds: Credential[]; onDone: () => void }) {
+function PanoramaForm({
+  creds,
+  initial,
+  onDone,
+}: {
+  creds: Credential[];
+  initial?: Panorama;
+  onDone: () => void;
+}) {
   const qc = useQueryClient();
-  const [name, setName] = useState("");
-  const [hostname, setHostname] = useState("");
-  const [credentialId, setCredentialId] = useState<number | "">("");
-  const [verifyTls, setVerifyTls] = useState(true);
+  const [name, setName] = useState(initial?.name ?? "");
+  const [hostname, setHostname] = useState(initial?.hostname ?? "");
+  const [credentialId, setCredentialId] = useState<number | "">(
+    initial?.credential_id ?? "",
+  );
+  const [verifyTls, setVerifyTls] = useState(initial?.verify_tls ?? true);
   const [err, setErr] = useState<string | null>(null);
 
-  const create = useMutation({
-    mutationFn: () =>
-      api.createPanorama({
+  const save = useMutation({
+    mutationFn: () => {
+      const body = {
         name,
         hostname,
         credential_id: Number(credentialId),
         verify_tls: verifyTls,
-      }),
+      };
+      return initial ? api.updatePanorama(initial.id, body) : api.createPanorama(body);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["panoramas"] });
       onDone();
@@ -350,7 +410,7 @@ function PanoramaForm({ creds, onDone }: { creds: Credential[]; onDone: () => vo
       onSubmit={(e) => {
         e.preventDefault();
         setErr(null);
-        create.mutate();
+        save.mutate();
       }}
       className="border-b border-zinc-800 bg-zinc-950/40 p-4 grid gap-3"
     >
@@ -382,8 +442,8 @@ function PanoramaForm({ creds, onDone }: { creds: Credential[]; onDone: () => vo
       </label>
       {err && <div className="text-xs text-rose-400">{err}</div>}
       <div className="flex gap-2">
-        <Button type="submit" variant="primary" disabled={create.isPending}>
-          {create.isPending ? "Saving…" : "Save"}
+        <Button type="submit" variant="primary" disabled={save.isPending}>
+          {save.isPending ? "Saving…" : initial ? "Save changes" : "Save"}
         </Button>
         <Button type="button" onClick={onDone}>
           Cancel
@@ -403,9 +463,25 @@ function DevicesSection() {
   const credsQ = useQuery({ queryKey: ["credentials"], queryFn: api.listCredentials });
   const panosQ = useQuery({ queryKey: ["panoramas"], queryFn: api.listPanoramas });
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [testResult, setTestResult] = useState<{ id: number; ok: boolean; text: string } | null>(null);
 
   const test = useMutation({
-    mutationFn: api.testDevice,
+    mutationFn: async (id: number) => ({ id, result: await api.testDevice(id) }),
+    onSuccess: ({ id, result }) => {
+      setTestResult({
+        id,
+        ok: true,
+        text: Object.entries(result.info)
+          .map(([k, v]) => `${k}: ${v ?? "—"}`)
+          .join("\n"),
+      });
+      qc.invalidateQueries({ queryKey: ["devices"] });
+    },
+    onError: (e: Error, id) => setTestResult({ id, ok: false, text: e.message }),
+  });
+  const togglePolling = useMutation({
+    mutationFn: (d: Device) => api.updateDevice(d.id, { polling_enabled: !d.polling_enabled }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["devices"] }),
   });
   const del = useMutation({
@@ -414,12 +490,15 @@ function DevicesSection() {
   });
 
   const devs: Device[] = devsQ.data ?? [];
+  const deviceCreds = (credsQ.data ?? []).filter(
+    (c) => c.scope === "device" && c.auth_type === "api_key",
+  );
 
   return (
     <Card>
       <CardHeader
         title="Devices"
-        description="Firewalls polled by the capacity analyzer. Devices imported via Panorama sync show source=panorama and can be configured to proxy through it."
+        description="Firewalls polled by the capacity analyzer. Edit a device to switch between direct and Panorama-proxied polling, change its credential, or toggle polling."
         action={
           <Button variant="primary" onClick={() => setAdding((v) => !v)}>
             {adding ? "Cancel" : "Add device"}
@@ -428,7 +507,7 @@ function DevicesSection() {
       />
       {adding && (
         <DeviceForm
-          creds={(credsQ.data ?? []).filter((c) => c.scope === "device" && c.auth_type === "api_key")}
+          creds={deviceCreds}
           panos={panosQ.data ?? []}
           onDone={() => setAdding(false)}
         />
@@ -442,7 +521,7 @@ function DevicesSection() {
               <th className="text-left px-4 py-2 font-medium">Name</th>
               <th className="text-left px-4 py-2 font-medium">Host</th>
               <th className="text-left px-4 py-2 font-medium">Model</th>
-              <th className="text-left px-4 py-2 font-medium">Source</th>
+              <th className="text-left px-4 py-2 font-medium">Reach</th>
               <th className="text-left px-4 py-2 font-medium">Polling</th>
               <th className="text-left px-4 py-2 font-medium">Last poll</th>
               <th className="px-4 py-2"></th>
@@ -450,38 +529,82 @@ function DevicesSection() {
           </thead>
           <tbody>
             {devs.map((d) => (
-              <tr key={d.id} className="border-b border-zinc-800/50 align-top">
-                <td className="px-4 py-2 text-zinc-100">{d.name}</td>
-                <td className="px-4 py-2 text-zinc-400">{d.ip_address ?? d.hostname}</td>
-                <td className="px-4 py-2 text-zinc-400">{d.model ?? "—"}</td>
-                <td className="px-4 py-2 text-zinc-500 text-xs">
-                  {d.source}
-                  {d.proxy_via_panorama ? " (proxied)" : ""}
-                </td>
-                <td className="px-4 py-2 text-xs">
-                  {d.polling_enabled ? (
-                    <span className="text-emerald-400">on</span>
-                  ) : (
-                    <span className="text-zinc-500">off</span>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-xs text-zinc-500">
-                  {d.last_poll_at ? new Date(d.last_poll_at).toLocaleString() : "never"}
-                  {d.last_poll_error && (
-                    <div className="text-rose-400 mt-0.5" title={d.last_poll_error}>
-                      error
-                    </div>
-                  )}
-                </td>
-                <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
-                  <Button onClick={() => test.mutate(d.id)} disabled={test.isPending}>
-                    Test
-                  </Button>
-                  <Button variant="danger" onClick={() => del.mutate(d.id)}>
-                    Delete
-                  </Button>
-                </td>
-              </tr>
+              <Fragment key={d.id}>
+                <tr className="border-b border-zinc-800/50 align-top">
+                  <td className="px-4 py-2 text-zinc-100">{d.name}</td>
+                  <td className="px-4 py-2 text-zinc-400">{d.ip_address ?? d.hostname}</td>
+                  <td className="px-4 py-2 text-zinc-400">{d.model ?? "—"}</td>
+                  <td className="px-4 py-2 text-zinc-500 text-xs">
+                    {d.proxy_via_panorama ? "via Panorama" : "direct"}
+                    <div className="text-[10px] text-zinc-600">{d.source}</div>
+                  </td>
+                  <td className="px-4 py-2 text-xs">
+                    <button
+                      onClick={() => togglePolling.mutate(d)}
+                      className={`px-1.5 py-0.5 rounded border ${
+                        d.polling_enabled
+                          ? "border-emerald-700 bg-emerald-900/30 text-emerald-300"
+                          : "border-zinc-700 bg-zinc-800 text-zinc-400"
+                      }`}
+                      title="Toggle polling"
+                    >
+                      {d.polling_enabled ? "on" : "off"}
+                    </button>
+                  </td>
+                  <td className="px-4 py-2 text-xs text-zinc-500">
+                    {d.last_poll_at ? new Date(d.last_poll_at).toLocaleString() : "never"}
+                    {d.last_poll_error && (
+                      <div className="text-rose-400 mt-0.5" title={d.last_poll_error}>
+                        error
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
+                    <Button onClick={() => test.mutate(d.id)} disabled={test.isPending}>
+                      Test
+                    </Button>
+                    <Button onClick={() => setEditing(editing === d.id ? null : d.id)}>
+                      {editing === d.id ? "Close" : "Edit"}
+                    </Button>
+                    <Button variant="danger" onClick={() => del.mutate(d.id)}>
+                      Delete
+                    </Button>
+                  </td>
+                </tr>
+                {testResult?.id === d.id && (
+                  <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
+                    <td colSpan={7} className="px-4 py-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <pre
+                          className={`text-xs whitespace-pre-wrap ${
+                            testResult.ok ? "text-emerald-300" : "text-rose-300"
+                          }`}
+                        >
+                          {testResult.text}
+                        </pre>
+                        <button
+                          className="text-xs text-zinc-500 hover:text-zinc-200"
+                          onClick={() => setTestResult(null)}
+                        >
+                          dismiss
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {editing === d.id && (
+                  <tr className="bg-zinc-950/60">
+                    <td colSpan={7} className="p-0">
+                      <DeviceForm
+                        creds={deviceCreds}
+                        panos={panosQ.data ?? []}
+                        initial={d}
+                        onDone={() => setEditing(null)}
+                      />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
           </tbody>
         </table>
@@ -493,34 +616,47 @@ function DevicesSection() {
 function DeviceForm({
   creds,
   panos,
+  initial,
   onDone,
 }: {
   creds: Credential[];
   panos: Panorama[];
+  initial?: Device;
   onDone: () => void;
 }) {
   const qc = useQueryClient();
-  const [name, setName] = useState("");
-  const [hostname, setHostname] = useState("");
-  const [ipAddress, setIpAddress] = useState("");
-  const [mode, setMode] = useState<"direct" | "panorama">("direct");
-  const [credentialId, setCredentialId] = useState<number | "">("");
-  const [panoramaId, setPanoramaId] = useState<number | "">("");
-  const [proxyViaPanorama, setProxyViaPanorama] = useState(false);
-  const [verifyTls, setVerifyTls] = useState(true);
+  const [name, setName] = useState(initial?.name ?? "");
+  const [hostname, setHostname] = useState(initial?.hostname ?? "");
+  const [ipAddress, setIpAddress] = useState(initial?.ip_address ?? "");
+  const initialMode: "direct" | "panorama" =
+    initial && (initial.proxy_via_panorama || (!initial.credential_id && initial.panorama_id))
+      ? "panorama"
+      : "direct";
+  const [mode, setMode] = useState<"direct" | "panorama">(initialMode);
+  const [credentialId, setCredentialId] = useState<number | "">(initial?.credential_id ?? "");
+  const [panoramaId, setPanoramaId] = useState<number | "">(initial?.panorama_id ?? "");
+  const [proxyViaPanorama, setProxyViaPanorama] = useState(initial?.proxy_via_panorama ?? false);
+  const [verifyTls, setVerifyTls] = useState(initial?.verify_tls ?? true);
+  const [pollingEnabled, setPollingEnabled] = useState(initial?.polling_enabled ?? true);
   const [err, setErr] = useState<string | null>(null);
 
-  const create = useMutation({
-    mutationFn: () =>
-      api.createDevice({
+  const save = useMutation({
+    mutationFn: () => {
+      const body = {
         name,
         hostname,
         ip_address: ipAddress || null,
         credential_id: mode === "direct" ? Number(credentialId) : null,
-        panorama_id: mode === "panorama" ? Number(panoramaId) : null,
+        panorama_id:
+          mode === "panorama"
+            ? Number(panoramaId)
+            : initial?.panorama_id ?? null,
         proxy_via_panorama: mode === "panorama" && proxyViaPanorama,
         verify_tls: verifyTls,
-      }),
+        polling_enabled: pollingEnabled,
+      };
+      return initial ? api.updateDevice(initial.id, body) : api.createDevice(body);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["devices"] });
       onDone();
@@ -533,9 +669,9 @@ function DeviceForm({
       onSubmit={(e) => {
         e.preventDefault();
         setErr(null);
-        create.mutate();
+        save.mutate();
       }}
-      className="border-b border-zinc-800 bg-zinc-950/40 p-4 grid gap-3"
+      className="border-b border-zinc-800 p-4 grid gap-3"
     >
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Field label="Name">
@@ -599,16 +735,26 @@ function DeviceForm({
         </>
       )}
 
-      <label className="flex items-center gap-2 text-xs text-zinc-400">
-        <input type="checkbox" checked={verifyTls} onChange={(e) => setVerifyTls(e.target.checked)} />
-        Verify TLS certificate
-      </label>
+      <div className="flex flex-wrap items-center gap-4">
+        <label className="flex items-center gap-2 text-xs text-zinc-400">
+          <input type="checkbox" checked={verifyTls} onChange={(e) => setVerifyTls(e.target.checked)} />
+          Verify TLS certificate
+        </label>
+        <label className="flex items-center gap-2 text-xs text-zinc-400">
+          <input
+            type="checkbox"
+            checked={pollingEnabled}
+            onChange={(e) => setPollingEnabled(e.target.checked)}
+          />
+          Polling enabled
+        </label>
+      </div>
 
       {err && <div className="text-xs text-rose-400">{err}</div>}
 
       <div className="flex gap-2">
-        <Button type="submit" variant="primary" disabled={create.isPending}>
-          {create.isPending ? "Saving…" : "Save"}
+        <Button type="submit" variant="primary" disabled={save.isPending}>
+          {save.isPending ? "Saving…" : initial ? "Save changes" : "Save"}
         </Button>
         <Button type="button" onClick={onDone}>
           Cancel

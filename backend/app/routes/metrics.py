@@ -44,7 +44,7 @@ def get_series(
         device_id=device_id,
         metric=metric,
         samples=[
-            SampleRead(ts=p.ts, current_value=p.current, max_value=p.max, pct=p.pct)
+            SampleRead(ts=p.ts, current=p.current, max=p.max, pct=p.pct)
             for p in points
         ],
     )

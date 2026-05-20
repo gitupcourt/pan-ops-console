@@ -135,11 +135,17 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
                 type="monotone"
                 dataKey="current"
                 stroke="#60a5fa"
-                strokeWidth={1.5}
-                // Show dots when data is sparse so single/few points are visible.
-                // Recharts won't render a line for one data point — dots ensure
-                // you still see SOMETHING while samples accumulate.
-                dot={points.length < 30 ? { r: 2, fill: "#60a5fa" } : false}
+                strokeWidth={2}
+                // Show dots when data is sparse — a single sample has no line,
+                // so the dot is the ONLY thing the user sees. Made it bigger
+                // (r=4) with a white ring so it's visible even when the value
+                // sits at the very bottom of a 0..max scale (e.g. 60 of 10000).
+                dot={
+                  points.length < 30
+                    ? { r: 4, fill: "#60a5fa", stroke: "#0b0e14", strokeWidth: 2 }
+                    : false
+                }
+                activeDot={{ r: 5, fill: "#93c5fd", stroke: "#0b0e14", strokeWidth: 2 }}
                 isAnimationActive={false}
               />
             </LineChart>

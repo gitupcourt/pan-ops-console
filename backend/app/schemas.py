@@ -6,12 +6,26 @@ key now from username+password" or "here's an API key, store it." If `auth`
 is omitted on edit, the existing stored key is kept.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 from app.models.enums import DeviceSource
+
+
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """SQLite drops the timezone on datetimes even when the column is
+    declared `DateTime(timezone=True)`. Everything in the DB is *written*
+    as UTC, so when we read it back naive we reattach UTC. Without this
+    the JSON serializer emits ISO strings with no offset, and the
+    browser's `new Date(...)` interprets them as LOCAL time — making
+    every chart appear empty because the points land in the future
+    relative to `now()`.
+    """
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
 
 
 # ---------- Auth payloads (used inline in Device/Panorama create/update) ----------
@@ -50,6 +64,11 @@ class PanoramaRead(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_validator("last_sync_at", "last_reachability_at", mode="before")
+    @classmethod
+    def _utc(cls, v):
+        return _ensure_utc(v)
+
 
 # ---------- Devices ----------
 
@@ -84,6 +103,11 @@ class DeviceRead(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_validator("last_poll_at", mode="before")
+    @classmethod
+    def _utc(cls, v):
+        return _ensure_utc(v)
+
 
 # ---------- Samples ----------
 
@@ -94,6 +118,11 @@ class SampleRead(BaseModel):
     pct: float | None
 
     model_config = {"from_attributes": True, "populate_by_name": True}
+
+    @field_validator("ts", mode="before")
+    @classmethod
+    def _ts_to_utc(cls, v):
+        return _ensure_utc(v)
 
 
 class MetricSeries(BaseModel):

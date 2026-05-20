@@ -28,6 +28,10 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["series", deviceId, spec.name, hours],
     queryFn: () => api.getSeries(deviceId, spec.name, hours),
+    // Keep the previous device/range's data on screen while the new query
+    // is in flight. Without this, every refresh flashes "no samples yet"
+    // before the response lands.
+    placeholderData: (prev) => prev,
   });
 
   const points = (data?.samples ?? []).map((s) => ({

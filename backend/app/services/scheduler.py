@@ -7,6 +7,7 @@ intervals or jitter, this is the file that grows.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -39,14 +40,27 @@ def start() -> None:
         return
     settings = get_settings()
     _scheduler = BackgroundScheduler(daemon=True)
+    # Fire the first tick ~10 seconds after startup so the app has data
+    # quickly without blocking the API container boot. Subsequent ticks
+    # then run on the configured interval.
+    #
+    # Note: passing `next_run_time=None` to add_job disables the job
+    # entirely — APScheduler treats it as "no scheduled future run." We
+    # need an explicit datetime to arm the trigger.
+    first_run = datetime.now(timezone.utc) + timedelta(seconds=10)
     _scheduler.add_job(
         _tick,
         trigger=IntervalTrigger(seconds=settings.POLL_INTERVAL_SECONDS),
         id="capacity-poll",
-        next_run_time=None,  # don't fire immediately on startup
+        next_run_time=first_run,
+        max_instances=1,
+        coalesce=True,
     )
     _scheduler.start()
-    log.info("Scheduler started — poll interval %ds", settings.POLL_INTERVAL_SECONDS)
+    log.info(
+        "Scheduler started — poll interval %ds, first tick at %s",
+        settings.POLL_INTERVAL_SECONDS, first_run.isoformat(),
+    )
 
 
 def stop() -> None:

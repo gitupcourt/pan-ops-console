@@ -112,12 +112,19 @@ class DeviceRead(BaseModel):
 # ---------- Samples ----------
 
 class SampleRead(BaseModel):
+    # Field names match the API surface (current / max / pct) NOT the
+    # SQLAlchemy column names (current_value / max_value). Aliases were
+    # tried but FastAPI defaults to `response_model_by_alias=True`, so
+    # JSON output ended up as `current_value` while the frontend
+    # expected `current` — silent type mismatch, empty charts. Construct
+    # SampleRead from the storage layer's SamplePoint dataclass (which
+    # also uses these names) and there's no impedance mismatch.
     ts: datetime
-    current: float = Field(alias="current_value")
-    max: float | None = Field(default=None, alias="max_value")
+    current: float
+    max: float | None = None
     pct: float | None
 
-    model_config = {"from_attributes": True, "populate_by_name": True}
+    model_config = {"from_attributes": True}
 
     @field_validator("ts", mode="before")
     @classmethod

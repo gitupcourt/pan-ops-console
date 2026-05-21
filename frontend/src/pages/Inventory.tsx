@@ -7,7 +7,6 @@ import {
   Device,
   DeviceInput,
   Panorama,
-  PanoramaDevicePreview,
   PanoramaInput,
 } from "../api";
 import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../components/ui";

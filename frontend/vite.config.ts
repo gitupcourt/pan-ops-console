@@ -12,6 +12,8 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    // Allow Tilt-served dev URL behind the homelab ingress
+    allowedHosts: [".apps.courtlukens.com"],
     watch: {
       // Polling is reliable for bind-mounted volumes inside Docker.
       usePolling: true,

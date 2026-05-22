@@ -2,9 +2,19 @@
 
 const base = "/api";
 
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.status = status;
+  }
+}
+
 async function j<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(`${base}${path}`, {
     headers: { "Content-Type": "application/json" },
+    // Session cookie auth — always send credentials so the cookie rides.
+    credentials: "include",
     ...init,
   });
   if (!resp.ok) {
@@ -13,13 +23,29 @@ async function j<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await resp.json();
       if (body?.detail) detail = body.detail;
     } catch {}
-    throw new Error(detail);
+    throw new ApiError(resp.status, detail);
   }
   if (resp.status === 204) return undefined as T;
   return resp.json() as Promise<T>;
 }
 
 // ---------- Types ----------
+
+export type User = {
+  id: number;
+  username: string;
+  email: string | null;
+  is_admin: boolean;
+  is_active: boolean;
+  totp_enabled: boolean;
+  created_at: string;
+  last_login_at: string | null;
+};
+
+export type BootstrapStatus = {
+  needs_bootstrap: boolean;
+  oidc_providers: string[];
+};
 
 export type AuthFromUserpass = { mode: "userpass"; username: string; password: string };
 export type AuthFromApiKey = { mode: "api_key"; api_key: string };
@@ -107,6 +133,27 @@ export type MetricSeries = {
 // ---------- API ----------
 
 export const api = {
+  // Auth
+  bootstrapStatus: () => j<BootstrapStatus>("/auth/bootstrap-status"),
+  signupFirst: (body: { username: string; email?: string | null; password: string }) =>
+    j<User>("/auth/signup-first", { method: "POST", body: JSON.stringify(body) }),
+  login: (body: { username: string; password: string; totp_code?: string | null }) =>
+    j<User>("/auth/login", { method: "POST", body: JSON.stringify(body) }),
+  logout: () => j<void>("/auth/logout", { method: "POST" }),
+  me: () => j<User>("/auth/me"),
+  changePassword: (body: { current_password: string; new_password: string }) =>
+    j<void>("/auth/change-password", { method: "POST", body: JSON.stringify(body) }),
+
+  // Users (admin)
+  listUsers: () => j<User[]>("/users"),
+  createUser: (body: { username: string; email?: string | null; password: string; is_admin?: boolean }) =>
+    j<User>("/users", { method: "POST", body: JSON.stringify(body) }),
+  setUserActive: (id: number, active: boolean) =>
+    j<User>(`/users/${id}/active?active=${active}`, { method: "PATCH" }),
+  setUserAdmin: (id: number, is_admin: boolean) =>
+    j<User>(`/users/${id}/admin?is_admin=${is_admin}`, { method: "PATCH" }),
+  deleteUser: (id: number) => j<void>(`/users/${id}`, { method: "DELETE" }),
+
   // Panoramas
   listPanoramas: () => j<Panorama[]>("/panoramas"),
   createPanorama: (body: PanoramaInput) =>

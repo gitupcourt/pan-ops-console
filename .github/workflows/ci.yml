@@ -1,0 +1,26 @@
+name: CI
+
+# Build + push images on every push to main, then (when HOMELAB_PAT is set)
+# open a PR in gitupcourt/homelab bumping the manifest image tags. All the
+# heavy lifting lives in the org-level reusable workflow — this file just
+# names the images this app produces.
+#
+# See: https://github.com/gitupcourt/.github
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ship:
+    uses: gitupcourt/.github/.github/workflows/build-and-bump.yml@main
+    with:
+      app_name: pan-capacity-analyzer
+      images: |
+        [
+          {"name": "backend",  "context": "backend"},
+          {"name": "frontend", "context": "frontend", "dockerfile": "frontend/Dockerfile.prod"}
+        ]
+      manifest_dir: manifests/pan-capacity-analyzer
+    secrets: inherit

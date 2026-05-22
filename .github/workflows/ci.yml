@@ -1,5 +1,12 @@
 name: CI
 
+# Build + push images on every push to main, then (when HOMELAB_PAT is set)
+# open a PR in gitupcourt/homelab bumping the manifest image tags. All the
+# heavy lifting lives in the org-level reusable workflow — this file just
+# names the images this app produces.
+#
+# See: https://github.com/gitupcourt/.github
+
 on:
   push:
     branches: [main]
@@ -7,6 +14,13 @@ on:
 
 jobs:
   ship:
+    # The reusable workflow declares permissions: { contents: read, packages: write }
+    # on its build job. GitHub's default workflow permissions for this org are
+    # read-only, so we must explicitly grant the same set at the call site —
+    # a reusable workflow can never request MORE than the caller has access to.
+    permissions:
+      contents: read
+      packages: write
     uses: gitupcourt/.github/.github/workflows/build-and-bump.yml@main
     with:
       app_name: pan-capacity-analyzer

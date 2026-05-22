@@ -9,7 +9,7 @@ is omitted on edit, the existing stored key is kept.
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.enums import DeviceSource
 
@@ -184,7 +184,7 @@ class LoginRequest(BaseModel):
 class SignupFirstRequest(BaseModel):
     """Only valid when needs_bootstrap is True. The created user is auto-admin."""
     username: str = Field(min_length=3, max_length=64)
-    email: EmailStr | None = None
+    email: str | None = None
     password: str
 
 
@@ -209,7 +209,7 @@ class UserRead(BaseModel):
 class UserCreate(BaseModel):
     """Admin-only: invite a new user. Caller picks a temporary password."""
     username: str = Field(min_length=3, max_length=64)
-    email: EmailStr | None = None
+    email: str | None = None
     password: str
     is_admin: bool = False
 

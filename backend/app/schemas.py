@@ -9,7 +9,7 @@ is omitted on edit, the existing stored key is kept.
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_serializer, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from app.models.enums import DeviceSource
 
@@ -157,3 +157,64 @@ class PanoramaDevicePreview(BaseModel):
 class PanoramaSyncRequest(BaseModel):
     """Filter sync to a specific set of serials. Empty list / missing = import all."""
     serials: list[str] | None = None
+
+
+# =====================================================================
+# Auth
+# =====================================================================
+
+class BootstrapStatus(BaseModel):
+    """Probed at app load to decide what login page to show.
+
+    needs_bootstrap=True means no users exist yet; the UI should render
+    the first-user setup screen. oidc_providers lists configured SSO
+    options (empty until Phase 2).
+    """
+    needs_bootstrap: bool
+    oidc_providers: list[str] = []
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    # Phase 1.5 — TOTP code if the user has 2FA enabled
+    totp_code: str | None = None
+
+
+class SignupFirstRequest(BaseModel):
+    """Only valid when needs_bootstrap is True. The created user is auto-admin."""
+    username: str = Field(min_length=3, max_length=64)
+    email: EmailStr | None = None
+    password: str
+
+
+class UserRead(BaseModel):
+    id: int
+    username: str
+    email: str | None
+    is_admin: bool
+    is_active: bool
+    totp_enabled: bool
+    created_at: datetime
+    last_login_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("created_at", "last_login_at", mode="before")
+    @classmethod
+    def _utc(cls, v):
+        return _ensure_utc(v)
+
+
+class UserCreate(BaseModel):
+    """Admin-only: invite a new user. Caller picks a temporary password."""
+    username: str = Field(min_length=3, max_length=64)
+    email: EmailStr | None = None
+    password: str
+    is_admin: bool = False
+
+
+class PasswordChangeRequest(BaseModel):
+    """Authenticated user changing their own password."""
+    current_password: str
+    new_password: str

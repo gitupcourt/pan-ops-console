@@ -1,0 +1,7 @@
+name: Hello test
+on: workflow_dispatch
+jobs:
+  test:
+    uses: gitupcourt/.github/.github/workflows/hello.yml@main
+    with:
+      who: capacity-analyzer

@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pan-capacity-backend
+  labels:
+    app: pan-capacity
+    tier: backend
+spec:
+  # Single replica — SQLite isn't safe for concurrent writers. Don't scale
+  # this above 1 unless you've swapped storage to Postgres/TimescaleDB.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: pan-capacity, tier: backend }
+  template:
+    metadata:
+      labels: { app: pan-capacity, tier: backend }
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/gitupcourt/pan-capacity-analyzer-backend:latest
+          ports: [{ containerPort: 8000 }]
+          env:
+            - { name: DATABASE_URL, value: "sqlite:////app/data/capacity.db" }
+            - { name: CATALOG_PATH, value: "/app/catalog/metrics.yaml" }
+            - { name: POLL_INTERVAL_SECONDS, value: "300" }
+            # CORS — set to the public origin of your frontend. Comma-separated
+            # if you serve from multiple hostnames.
+            - { name: CORS_ORIGINS, value: "https://capacity.example.com" }
+            - name: FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pan-capacity-secrets
+                  key: FERNET_KEY
+          volumeMounts:
+            - { name: data, mountPath: /app/data }
+            - { name: catalog, mountPath: /app/catalog }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pan-capacity-data
+        - name: catalog
+          configMap:
+            name: pan-capacity-catalog
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pan-capacity-backend
+spec:
+  selector: { app: pan-capacity, tier: backend }
+  ports: [{ port: 8000, targetPort: 8000 }]

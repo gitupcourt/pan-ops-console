@@ -14,11 +14,9 @@ SQLite is the default for portability. For multi-tenant deployments or hundreds 
 
 **How we're set up for this now:** the `SampleStore` interface knows nothing about SQLite. The schema is intentionally narrow (device_id, metric, timestamp, current, max, pct). A `TimescaleSampleStore` is a drop-in replacement.
 
-## Merge with pan-fw-upgrader
+## Extract the auth / inventory module
 
-Long-term, this app and [pan-fw-upgrader](https://github.com/gitupcourt/pan-fw-upgrader) become tabs in the same UI — same auth, same device inventory, same Panorama integration, two different read/write personalities.
-
-**How we're set up for this now:** the auth, credential, device, and Panorama models / services are deliberately mirrored from the upgrade UI. When we merge, those modules collapse together with minimal churn. The capacity-specific pieces (catalog, samples, poller) are cleanly separated and bolt onto the merged app as a new feature area.
+The Panorama + device + credential management surface (mint API key from user/pass, encrypted-at-rest storage, Panorama device import with selection, direct vs proxy polling) is deliberately written so it could be extracted as a standalone module and reused by other PAN-OS-facing apps. Today it lives in `backend/app/{models,services}/` and `frontend/src/pages/Inventory.tsx`; promoting it to its own package is the next step before that reuse happens.
 
 ## Forecasting
 

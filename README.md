@@ -1,14 +1,12 @@
 # pan-capacity-analyzer
 
-Open-source replica of Palo Alto Networks' Capacity Analyzer. Polls firewalls on a schedule, correlates current usage with each device's configured maximum, and persists time-series so you can see trends and forecast when something will hit the wall.
+Polls firewalls on a schedule, correlates current usage with each device's configured maximum, and persists time-series so you can see trends and forecast when something will hit the wall.
 
 ## Why
 
-PAN's Capacity Analyzer is locked behind Strata Cloud Manager. This is the same idea — running anywhere you can host a container, with your data in a file you control.
+Quick view of resources to determine if NGFW is nearing functional capacity from either a configuration or performance perspective.
 
 ## What it tracks
-
-Mirrors PAN's Capacity Analyzer metric set:
 
 - **Configuration:** ARP table, GP Clientless VPN, IKE Peers, VPN Tunnels, Address Objects/Groups, FQDN Addresses, Service Objects/Groups, NAT Policies, Security Policies, virtual systems.
 - **System:** Dataplane CPU, Management Plane CPU, MP Memory.

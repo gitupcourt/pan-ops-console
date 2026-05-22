@@ -2,6 +2,8 @@
 
 Polls firewalls on a schedule, correlates current usage with each device's configured maximum, and persists time-series so you can see trends and forecast when something will hit the wall.
 
+[![CI](https://github.com/gitupcourt/pan-capacity-analyzer/actions/workflows/ci.yml/badge.svg)](https://github.com/gitupcourt/pan-capacity-analyzer/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 ## Why
 
 Quick view of resources to determine if NGFW is nearing functional capacity from either a configuration or performance perspective.
@@ -20,9 +22,9 @@ Early scaffold. See [ROADMAP.md](ROADMAP.md) for deferred work.
 
 ## Stack
 
-- Python 3.12 + FastAPI (backend / API)
+- Python 3.11 + FastAPI (backend / API)
 - SQLite by default for portability (storage layer is swappable — Postgres/TimescaleDB later)
-- React + Recharts (frontend, coming)
+- React + Recharts (frontend)
 - Docker Compose for the whole thing
 
 ## Quickstart
@@ -32,3 +34,5 @@ cp .env.example .env
 # edit .env: set FERNET_KEY (generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`)
 docker compose up --build
 ```
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for Kubernetes, from-source, and configuration details, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit together.

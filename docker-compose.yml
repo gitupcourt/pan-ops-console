@@ -1,21 +1,47 @@
+# Simple, self-contained deployment for pan-capacity-analyzer.
+#
+# Quick start:
+#   1. cp .env.example .env
+#   2. Generate a FERNET_KEY and paste it into .env:
+#        python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#   3. docker compose up -d
+#   4. Open http://localhost:5174 — add a Panorama or device under Inventory.
+#
+# Production deploy: same compose works fine as a single-host install.
+# For multi-host or anything fancier (HA, blue/green), see deploy/kubernetes/.
+
 services:
   backend:
-    build: ./backend
+    image: ghcr.io/gitupcourt/pan-capacity-analyzer-backend:latest
+    # To build from source instead of pulling: comment `image:` and uncomment:
+    # build: ./backend
     env_file: .env
-    ports:
-      - "8001:8000"
+    environment:
+      DATABASE_URL: sqlite:////app/data/capacity.db
+      CATALOG_PATH: /app/catalog/metrics.yaml
+      POLL_INTERVAL_SECONDS: "300"
+      CORS_ORIGINS: "http://localhost:5174"
     volumes:
-      - ./data:/app/data
+      - capacity-data:/app/data
       - ./catalog:/app/catalog:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    image: ghcr.io/gitupcourt/pan-capacity-analyzer-frontend:latest
+    # build:
+    #   context: ./frontend
+    #   dockerfile: Dockerfile.prod
     ports:
-      - "5174:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+      - "5174:80"
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  capacity-data:

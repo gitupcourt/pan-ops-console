@@ -1,0 +1,19 @@
+# The metric catalog drives what the poller fetches. Recreate this ConfigMap
+# whenever you change catalog/metrics.yaml in the source tree:
+#
+#   kubectl create configmap pan-capacity-catalog \
+#     --from-file=metrics.yaml=catalog/metrics.yaml \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# The version in this YAML is just a placeholder; the snippet above is the
+# real way to keep the catalog in sync with the source.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pan-capacity-catalog
+data:
+  metrics.yaml: |
+    # See catalog/metrics.yaml in the repo for the real content. Replace
+    # this placeholder by running the kubectl create configmap snippet above.
+    version: 1
+    metrics: []

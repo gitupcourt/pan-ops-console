@@ -14,6 +14,7 @@ OIDC endpoints land in Slice 2 (Phase 2 in the plan).
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse, Response as RawResponse
 from sqlalchemy.orm import Session as DBSession
 
 from app.config import get_settings
@@ -39,7 +40,7 @@ from app.services.sessions import create_session, revoke_all_for_user, revoke_se
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _set_session_cookie(response: Response, token: str) -> None:
+def _set_session_cookie(response, token: str) -> None:
     s = get_settings()
     response.set_cookie(
         key=s.SESSION_COOKIE_NAME,
@@ -52,7 +53,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
     )
 
 
-def _clear_session_cookie(response: Response) -> None:
+def _clear_session_cookie(response) -> None:
     s = get_settings()
     response.delete_cookie(
         key=s.SESSION_COOKIE_NAME,
@@ -153,16 +154,20 @@ def login(
     return user
 
 
-@router.post("/logout", status_code=204)
+@router.post("/logout")
 def logout(
     request: Request,
-    response: Response,
     db: DBSession = Depends(get_db),
-) -> None:
+):
     token = request.cookies.get(get_settings().SESSION_COOKIE_NAME)
     if token:
         revoke_session(db, token)
-    _clear_session_cookie(response)
+    # Build the response explicitly so cookie deletion is unambiguous and we
+    # don't trip FastAPI's "204 must not have a body" assertion that fires
+    # when a Response parameter is present alongside status_code=204.
+    resp = RawResponse(status_code=204)
+    _clear_session_cookie(resp)
+    return resp
 
 
 @router.get("/me", response_model=UserRead)
@@ -170,16 +175,15 @@ def me(user: User = Depends(current_user)) -> UserRead:
     return user
 
 
-@router.post("/change-password", status_code=204)
+@router.post("/change-password")
 def change_password(
     payload: PasswordChangeRequest,
-    response: Response,
     request: Request,
     db: DBSession = Depends(get_db),
     user: User = Depends(current_user),
-) -> None:
+):
     """Rotate the current user's password. Revokes every OTHER session
-    (cookie on this device stays valid)."""
+    (cookie on this device stays valid via the freshly minted token)."""
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="current password is wrong")
     try:
@@ -193,7 +197,8 @@ def change_password(
     user.password_hash = hash_password(payload.new_password)
     db.commit()
 
-    # Revoke all sessions, then issue a fresh one for the current browser.
     revoke_all_for_user(db, user.id)
     token = create_session(db, user, user_agent=request.headers.get("user-agent"))
-    _set_session_cookie(response, token)
+    resp = RawResponse(status_code=204)
+    _set_session_cookie(resp, token)
+    return resp

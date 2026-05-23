@@ -12,7 +12,9 @@ export default function Login() {
   // valid password, then expects a follow-up call with the code.
   const [needsTotp, setNeedsTotp] = useState(false);
   const [totpCode, setTotpCode] = useState("");
-  const [err, setErr] = useState<string | null>(null);
+  // Surface OIDC error messages bounced back via ?oidc_error=
+  const oidcErr = new URLSearchParams(window.location.search).get("oidc_error");
+  const [err, setErr] = useState<string | null>(oidcErr);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: FormEvent) {

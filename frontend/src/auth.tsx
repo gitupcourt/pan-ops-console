@@ -14,7 +14,10 @@ type AuthState = {
   bootstrap: BootstrapStatus | undefined;
   isBootstrapLoading: boolean;
   refresh: () => Promise<void>;
-  login: (username: string, password: string) => Promise<void>;
+  // Login may complete in one call OR require a TOTP code. The two-stage
+  // flow returns "needs_totp"; the caller renders the code field and
+  // calls login again with the code.
+  login: (username: string, password: string, totp_code?: string) => Promise<"ok" | "needs_totp">;
   signupFirst: (username: string, email: string | null, password: string) => Promise<void>;
   logout: () => Promise<void>;
 };
@@ -52,11 +55,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   const loginM = useMutation({
-    mutationFn: ({ username, password }: { username: string; password: string }) =>
-      api.login({ username, password }),
-    onSuccess: (user) => {
-      qc.setQueryData(["auth", "me"], user);
-      qc.invalidateQueries({ queryKey: ["auth", "bootstrap"] });
+    mutationFn: ({ username, password, totp_code }: { username: string; password: string; totp_code?: string }) =>
+      api.login({ username, password, totp_code: totp_code ?? null }),
+    onSuccess: (result) => {
+      // Only cache the user if we actually got one (i.e. login completed).
+      // The needs_totp shape doesn't have an id.
+      if (result && typeof result === "object" && "id" in result) {
+        qc.setQueryData(["auth", "me"], result);
+        qc.invalidateQueries({ queryKey: ["auth", "bootstrap"] });
+      }
     },
   });
 
@@ -86,8 +93,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refresh: async () => {
       await Promise.all([bootstrapQ.refetch(), meQ.refetch()]);
     },
-    login: async (username, password) => {
-      await loginM.mutateAsync({ username, password });
+    login: async (username, password, totp_code) => {
+      const r = await loginM.mutateAsync({ username, password, totp_code });
+      if (r && typeof r === "object" && "needs_totp" in r) return "needs_totp";
+      return "ok";
     },
     signupFirst: async (username, email, password) => {
       await signupM.mutateAsync({ username, email, password });

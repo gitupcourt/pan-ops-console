@@ -1,23 +1,62 @@
 name: CI
 
-# Build + push images on every push to main, then (when HOMELAB_PAT is set)
-# open a PR in gitupcourt/homelab bumping the manifest image tags. All the
-# heavy lifting lives in the org-level reusable workflow — this file just
-# names the images this app produces.
+# On every push and every PR, run tests. Then on push-to-main only,
+# build images, push to GHCR, and open the manifest bump PR. PRs run
+# tests but don't ship images — that's deliberate, both to save CI time
+# and to keep GHCR free of speculative PR builds.
 #
 # See: https://github.com/gitupcourt/.github
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
+  # =====================================================================
+  # Tests — gates the rest of the pipeline. Must pass before any image
+  # is built, and (once we add it to the branch ruleset) before the PR
+  # can be merged at all.
+  # =====================================================================
+  test-backend:
+    name: backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install backend deps
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run pytest
+        working-directory: backend
+        env:
+          # Provide a Fernet key so app.config doesn't reject startup
+          # during test collection (tests override this in conftest, but
+          # collection happens before fixtures fire).
+          FERNET_KEY: "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
+        run: pytest
+
+  # =====================================================================
+  # Build + push images and open the bump PR. Runs only on push to main
+  # and only after tests pass. PRs skip this entirely.
+  # =====================================================================
   ship:
-    # The reusable workflow declares permissions: { contents: read, packages: write }
-    # on its build job. GitHub's default workflow permissions for this org are
-    # read-only, so we must explicitly grant the same set at the call site —
-    # a reusable workflow can never request MORE than the caller has access to.
+    needs: test-backend
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read
       packages: write

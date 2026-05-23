@@ -1,27 +1,29 @@
 """OIDC client.
 
 Provider-agnostic — wires any standards-compliant OpenID Connect IdP
-(Authentik, Keycloak, Google, Okta, Entra ID, GitHub-via-OAuth-compat,
-etc.) into the app's session auth.
+(Authentik, Keycloak, Entra ID, Google, Okta, …) into the app's
+session auth.
 
-Configuration is env-driven via the OIDC_PROVIDER_<NAME>_* pattern;
-see app.config for the schema. Providers are loaded once at module
-import and exposed by name.
+Providers are stored as OIDCProvider rows in the DB and managed through
+the admin UI (/providers/oidc routes). Env-var providers from a previous
+generation of this app continue to work as a fallback during initial
+deploy, but rows in the DB always take precedence on slug conflict.
 
 State + PKCE flow:
-- /auth/oidc/<name>/login generates a random `state` and PKCE pair,
+- /auth/oidc/<slug>/login generates a random `state` and PKCE pair,
   stashes them in an in-memory dict keyed by state, and 302-redirects
   to the IdP authorization endpoint.
-- /auth/oidc/<name>/callback receives ?code=&state=, validates state,
+- /auth/oidc/<slug>/callback receives ?code=&state=, validates state,
   exchanges code+verifier for tokens at the IdP, validates the ID
   token signature against the IdP's JWKS, extracts the claims, and
   resolves/creates the local user. On success, creates a session and
   redirects to "/".
 
-In-memory state is fine for the single-replica deploy this app is
-designed for. A multi-replica deploy would need a shared store
-(Redis or a `oidc_state` table). Documented in the docstring of
-`_pending_states` below so the next person knows where to look.
+In-memory state + discovery cache are fine for the single-replica
+deploy this app is designed for. A multi-replica deploy would need a
+shared store (Redis or a `oidc_state` table). Documented in the
+docstring of `_pending_states` below so the next person knows where
+to look.
 """
 
 from __future__ import annotations
@@ -35,30 +37,27 @@ from typing import Any
 
 from authlib.integrations.httpx_client import OAuth2Client
 from authlib.jose import JsonWebKey, jwt
+from sqlalchemy.orm import Session as DBSession
+
+from app.services.auth import decrypt_key, encrypt_key
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
-class OIDCProvider:
-    """A single configured OIDC provider."""
-
-    name: str                       # short slug used in URLs (e.g. "authentik")
-    display_name: str               # rendered on the login page button
-    issuer: str                     # IdP issuer URL (no trailing slash)
+class OIDCProviderConfig:
+    """A loaded provider, ready for use. Source is either DB or env."""
+    slug: str
+    display_name: str
+    issuer: str
     client_id: str
     client_secret: str
-    scopes: list[str]               # at least ["openid"]; usually + email + profile
+    scopes: list[str]
 
-
-# Module-level cache: name -> provider. Empty if no env vars set.
-_PROVIDERS: dict[str, OIDCProvider] = {}
 
 # Pending OAuth states. Keyed by random state token; value = {
-#   "provider": name,
-#   "code_verifier": str,
-#   "nonce": str,
-#   "created_at": float (epoch),
+#   "provider": slug, "code_verifier": str, "nonce": str,
+#   "redirect_uri": str, "created_at": float (epoch),
 # }
 #
 # In-memory is fine for single-replica. For multi-replica, swap this
@@ -66,13 +65,82 @@ _PROVIDERS: dict[str, OIDCProvider] = {}
 _pending_states: dict[str, dict[str, Any]] = {}
 _STATE_TTL_SECONDS = 600  # 10 minutes from /login to /callback
 
+# Discovery (well-known) cache. Keyed by issuer URL.
+_discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_DISCOVERY_TTL = 3600.0
 
-def load_providers() -> dict[str, OIDCProvider]:
-    """Scan os.environ for OIDC_PROVIDER_<NAME>_* vars and build the
-    provider table. Re-callable; replaces the cache.
+
+def list_enabled_providers(db: DBSession) -> list[OIDCProviderConfig]:
+    """All enabled providers from the DB, merged with env-var fallbacks
+    that don't conflict by slug. DB always wins on conflict."""
+    from app.models.oidc_provider import OIDCProvider
+
+    out: dict[str, OIDCProviderConfig] = {}
+
+    # Env-var fallback first; DB overrides.
+    for p in _load_env_providers().values():
+        out[p.slug] = p
+
+    rows = db.query(OIDCProvider).filter(OIDCProvider.enabled == True).all()  # noqa: E712
+    for row in rows:
+        try:
+            secret = decrypt_key(row.encrypted_client_secret)
+        except Exception as exc:
+            log.warning("OIDC provider %s: client secret decrypt failed (%s); skipping",
+                        row.slug, type(exc).__name__)
+            continue
+        scopes = [s for s in (row.scopes or "openid email profile").split() if s]
+        if "openid" not in scopes:
+            scopes.insert(0, "openid")
+        out[row.slug] = OIDCProviderConfig(
+            slug=row.slug,
+            display_name=row.display_name,
+            issuer=row.issuer.rstrip("/"),
+            client_id=row.client_id,
+            client_secret=secret,
+            scopes=scopes,
+        )
+    return list(out.values())
+
+
+def get_provider(db: DBSession, slug: str) -> OIDCProviderConfig | None:
+    slug = slug.lower()
+    for p in list_enabled_providers(db):
+        if p.slug == slug:
+            return p
+    return None
+
+
+def list_provider_names(db: DBSession) -> list[str]:
+    """Slugs surfaced in /auth/bootstrap-status. UI renders one button per."""
+    return sorted(p.slug for p in list_enabled_providers(db))
+
+
+def invalidate_discovery_cache(issuer: str | None = None) -> None:
+    """Drop cached well-known docs. Call after a provider create/update
+    so the next login uses the fresh issuer URL."""
+    if issuer is None:
+        _discovery_cache.clear()
+    else:
+        _discovery_cache.pop(issuer.rstrip("/"), None)
+
+
+# ---------- Helpers for the admin routes ----------
+
+def encrypt_client_secret(plaintext: str) -> bytes:
+    return encrypt_key(plaintext)
+
+
+# ---------- Env-var fallback (legacy / bootstrap) ----------
+
+def _load_env_providers() -> dict[str, OIDCProviderConfig]:
+    """Scan OIDC_PROVIDER_<NAME>_* env vars and build configs.
+
+    Kept for backward compatibility and so an operator can pre-seed a
+    provider before any admin exists (rare, but possible). DB rows
+    always take precedence — see list_enabled_providers.
     """
-    found: dict[str, OIDCProvider] = {}
-    # First pass: collect names by looking for *_ISSUER keys.
+    found: dict[str, OIDCProviderConfig] = {}
     for k in list(os.environ):
         if not k.startswith("OIDC_PROVIDER_") or not k.endswith("_ISSUER"):
             continue
@@ -87,52 +155,27 @@ def load_providers() -> dict[str, OIDCProvider]:
         client_id = _g("CLIENT_ID")
         client_secret = _g("CLIENT_SECRET")
         if not (issuer and client_id and client_secret):
-            log.warning("OIDC provider %s missing required env vars; skipping", name)
             continue
-
         display_name = _g("DISPLAY_NAME") or name.title()
         scopes_raw = _g("SCOPES") or "openid email profile"
-        scopes = [s.strip() for s in scopes_raw.split() if s.strip()]
+        scopes = [s for s in scopes_raw.split() if s]
         if "openid" not in scopes:
             scopes.insert(0, "openid")
-
-        # Lowercase the slug for URL safety, preserve original mixed case
-        # for the display_name only.
         slug = name.lower()
-        found[slug] = OIDCProvider(
-            name=slug,
+        found[slug] = OIDCProviderConfig(
+            slug=slug,
             display_name=display_name,
             issuer=issuer.rstrip("/"),
             client_id=client_id,
             client_secret=client_secret,
             scopes=scopes,
         )
-        log.info("loaded OIDC provider %s (issuer=%s)", slug, issuer)
-
-    _PROVIDERS.clear()
-    _PROVIDERS.update(found)
-    return _PROVIDERS
-
-
-def get_provider(name: str) -> OIDCProvider | None:
-    return _PROVIDERS.get(name.lower())
-
-
-def list_provider_names() -> list[str]:
-    """Slugs for the bootstrap-status response — UI renders one button per."""
-    return sorted(_PROVIDERS.keys())
+    return found
 
 
 # ---------- Discovery / metadata ----------
 
-# Cache discovery responses for an hour so we're not hitting the IdP on
-# every login. IdPs publish .well-known/openid-configuration which lists
-# their authorization, token, jwks, userinfo endpoints.
-_discovery_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-_DISCOVERY_TTL = 3600.0
-
-
-def discover(provider: OIDCProvider) -> dict[str, Any]:
+def discover(provider: OIDCProviderConfig) -> dict[str, Any]:
     """Fetch (or return cached) IdP metadata."""
     import httpx
 
@@ -151,13 +194,12 @@ def discover(provider: OIDCProvider) -> dict[str, Any]:
 
 # ---------- Code flow ----------
 
-def begin_login(provider: OIDCProvider, redirect_uri: str) -> str:
+def begin_login(provider: OIDCProviderConfig, redirect_uri: str) -> str:
     """Build the IdP authorization URL and stash pending state. Returns
     the URL the user agent should be redirected to."""
     meta = discover(provider)
     auth_url = meta["authorization_endpoint"]
 
-    # PKCE — challenge sent now, verifier kept until callback
     code_verifier = secrets.token_urlsafe(64)
     from hashlib import sha256
     import base64
@@ -170,7 +212,7 @@ def begin_login(provider: OIDCProvider, redirect_uri: str) -> str:
 
     _gc_pending_states()
     _pending_states[state] = {
-        "provider": provider.name,
+        "provider": provider.slug,
         "code_verifier": code_verifier,
         "nonce": nonce,
         "redirect_uri": redirect_uri,
@@ -193,7 +235,7 @@ def begin_login(provider: OIDCProvider, redirect_uri: str) -> str:
     return f"{auth_url}{sep}{qs}"
 
 
-def complete_login(state: str, code: str) -> dict[str, Any]:
+def complete_login(db: DBSession, state: str, code: str) -> dict[str, Any]:
     """Validate state, exchange the code for tokens, validate the ID token,
     and return the parsed claims. Raises ValueError on any failure.
     """
@@ -203,13 +245,11 @@ def complete_login(state: str, code: str) -> dict[str, Any]:
     if time.time() - pending["created_at"] > _STATE_TTL_SECONDS:
         raise ValueError("state expired")
 
-    provider = get_provider(pending["provider"])
+    provider = get_provider(db, pending["provider"])
     if provider is None:
         raise ValueError(f"provider {pending['provider']} no longer configured")
 
     meta = discover(provider)
-
-    # Exchange code → tokens
     client = OAuth2Client(
         client_id=provider.client_id,
         client_secret=provider.client_secret,
@@ -227,7 +267,6 @@ def complete_login(state: str, code: str) -> dict[str, Any]:
     if not id_token_raw:
         raise ValueError("IdP did not return an id_token")
 
-    # Fetch JWKS and validate the ID token signature
     import httpx
     with httpx.Client(timeout=10.0) as h:
         jwks_doc = h.get(meta["jwks_uri"]).json()
@@ -253,7 +292,3 @@ def _gc_pending_states() -> None:
     ]
     for s in expired:
         _pending_states.pop(s, None)
-
-
-# Load providers at import time so the routes can reference them.
-load_providers()

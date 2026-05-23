@@ -82,7 +82,7 @@ def bootstrap_status(db: DBSession = Depends(get_db)) -> BootstrapStatus:
     has_any_user = db.query(User.id).first() is not None
     return BootstrapStatus(
         needs_bootstrap=not has_any_user,
-        oidc_providers=oidc.list_provider_names(),
+        oidc_providers=oidc.list_provider_names(db),
     )
 
 
@@ -305,29 +305,37 @@ def totp_verify(
 # =====================================================================
 # OIDC / Single Sign-On
 #
-# Provider config lives in env vars (see app.services.oidc). Flow:
+# Providers are configured by an admin via /providers/oidc — the normal
+# path. An env-var fallback (OIDC_PROVIDER_<NAME>_*) is also honored for
+# pre-deploy bootstrap or air-gapped installs that need OIDC available
+# before any admin exists. DB rows take precedence on slug conflict.
 #
-#   1. Browser hits /auth/oidc/<name>/login
+# Flow:
+#   1. Browser hits /auth/oidc/<slug>/login
 #        → server 302-redirects to IdP authorization URL with state+PKCE
 #   2. User authenticates at IdP
-#   3. IdP redirects back to /auth/oidc/<name>/callback?code=&state=
+#   3. IdP redirects back to /auth/oidc/<slug>/callback?code=&state=
 #        → server exchanges code for tokens, validates the id_token,
 #          resolves the local user (or auto-provisions on bootstrap),
 #          sets the session cookie, and 302-redirects to /
 #
 # Identity matching policy:
-#   - If no users exist (needs_bootstrap=true) and a user signs in via
-#     OIDC, they become the first admin.
+#   - If no users exist (env-var-configured provider in a fresh deploy),
+#     the first OIDC sign-in becomes admin. Once any admin exists, this
+#     path is unreachable.
 #   - Otherwise we require a pre-existing local row matched by email
-#     (case-insensitive). The OIDC sub claim is then stored on the user
-#     row so future logins are stable even if the email changes.
-#   - Anyone signing in via OIDC without a matching row gets a 403 with
-#     a clear "ask an admin to invite you" message. Invite-only.
+#     (case-insensitive) or username. Anyone signing in via OIDC without
+#     a matching row gets a friendly "ask an admin to invite you" error
+#     redirect. Invite-only by default.
 # =====================================================================
 
 @router.get("/oidc/{provider_name}/login")
-def oidc_login(provider_name: str, request: Request):
-    provider = oidc.get_provider(provider_name)
+def oidc_login(
+    provider_name: str,
+    request: Request,
+    db: DBSession = Depends(get_db),
+):
+    provider = oidc.get_provider(db, provider_name)
     if provider is None:
         raise HTTPException(status_code=404, detail=f"unknown provider {provider_name}")
     redirect_uri = _oidc_redirect_uri(request, provider_name)
@@ -359,7 +367,7 @@ def oidc_callback(
         return _oidc_error_redirect("missing code or state from IdP")
 
     try:
-        claims = oidc.complete_login(state, code)
+        claims = oidc.complete_login(db, state, code)
     except Exception as exc:  # noqa: BLE001
         return _oidc_error_redirect(f"OIDC failure: {exc}")
 

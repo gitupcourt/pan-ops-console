@@ -377,6 +377,17 @@ def oidc_callback(
     if not sub:
         return _oidc_error_redirect("IdP response missing sub claim")
 
+    # Log every callback's identifying claims. The match below is brittle
+    # in subtle ways (Entra returns email only when an optional claim is
+    # enabled; some IdPs lowercase, some don't; some return UPN as
+    # preferred_username, some return the bare local-part). Surfacing
+    # what we actually got makes mismatches trivial to diagnose.
+    import logging
+    logging.getLogger(__name__).info(
+        "OIDC callback claims provider=%s sub=%s email=%r preferred_username=%r name=%r",
+        provider_name, sub, email, preferred, claims.get("name"),
+    )
+
     # Bootstrap path: no users yet → first OIDC user becomes admin.
     any_user = db.query(User.id).first() is not None
     if not any_user:
@@ -396,10 +407,24 @@ def oidc_callback(
         if email:
             user = db.query(User).filter(User.email == email).first()
         if user is None and preferred:
-            user = db.query(User).filter(User.username == preferred).first()
+            # Match preferred_username against either email or username —
+            # Entra's preferred_username is the UPN (often == email).
+            user = db.query(User).filter(
+                (User.username == preferred) | (User.email == preferred.lower())
+            ).first()
         if user is None or not user.is_active:
+            # Include the would-be-matched values in the error so the
+            # operator doesn't have to chase logs to understand why it
+            # didn't match. These are the user's own claims, not anyone
+            # else's, so surfacing them in their own URL is fine.
+            details = []
+            if email:
+                details.append(f"email={email}")
+            if preferred:
+                details.append(f"upn/preferred_username={preferred}")
+            hint = " (" + ", ".join(details) + ")" if details else ""
             return _oidc_error_redirect(
-                "no account for this identity. Ask an admin to invite you."
+                f"no account matches this identity{hint}. Ask an admin to invite you."
             )
 
     # Issue a session cookie and bounce to the SPA.

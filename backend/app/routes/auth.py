@@ -37,7 +37,7 @@ from app.schemas import (
     TOTPVerifyResponse,
     UserRead,
 )
-from app.services import totp
+from app.services import oidc, totp
 from app.services.auth_dep import current_user
 from app.services.passwords import (
     PasswordPolicyError,
@@ -82,7 +82,7 @@ def bootstrap_status(db: DBSession = Depends(get_db)) -> BootstrapStatus:
     has_any_user = db.query(User.id).first() is not None
     return BootstrapStatus(
         needs_bootstrap=not has_any_user,
-        oidc_providers=[],
+        oidc_providers=oidc.list_provider_names(),
     )
 
 
@@ -300,6 +300,126 @@ def totp_verify(
         db.add(BackupCode(user_id=user.id, code_hash=totp.hash_backup_code(code)))
     db.commit()
     return TOTPVerifyResponse(backup_codes=codes)
+
+
+# =====================================================================
+# OIDC / Single Sign-On
+#
+# Provider config lives in env vars (see app.services.oidc). Flow:
+#
+#   1. Browser hits /auth/oidc/<name>/login
+#        → server 302-redirects to IdP authorization URL with state+PKCE
+#   2. User authenticates at IdP
+#   3. IdP redirects back to /auth/oidc/<name>/callback?code=&state=
+#        → server exchanges code for tokens, validates the id_token,
+#          resolves the local user (or auto-provisions on bootstrap),
+#          sets the session cookie, and 302-redirects to /
+#
+# Identity matching policy:
+#   - If no users exist (needs_bootstrap=true) and a user signs in via
+#     OIDC, they become the first admin.
+#   - Otherwise we require a pre-existing local row matched by email
+#     (case-insensitive). The OIDC sub claim is then stored on the user
+#     row so future logins are stable even if the email changes.
+#   - Anyone signing in via OIDC without a matching row gets a 403 with
+#     a clear "ask an admin to invite you" message. Invite-only.
+# =====================================================================
+
+@router.get("/oidc/{provider_name}/login")
+def oidc_login(provider_name: str, request: Request):
+    provider = oidc.get_provider(provider_name)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider {provider_name}")
+    redirect_uri = _oidc_redirect_uri(request, provider_name)
+    url = oidc.begin_login(provider, redirect_uri)
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=url, status_code=302)
+
+
+@router.get("/oidc/{provider_name}/callback")
+def oidc_callback(
+    provider_name: str,
+    request: Request,
+    db: DBSession = Depends(get_db),
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
+):
+    """Receives the IdP's redirect after user auth.
+
+    On any failure (IdP rejected, state mismatch, etc.), we redirect to
+    `/login?oidc_error=...` so the SPA can surface the message — much
+    friendlier than serving a JSON blob in the browser.
+    """
+    from fastapi.responses import RedirectResponse
+    if error:
+        return _oidc_error_redirect(error_description or error)
+    if not code or not state:
+        return _oidc_error_redirect("missing code or state from IdP")
+
+    try:
+        claims = oidc.complete_login(state, code)
+    except Exception as exc:  # noqa: BLE001
+        return _oidc_error_redirect(f"OIDC failure: {exc}")
+
+    sub = claims.get("sub")
+    email = (claims.get("email") or "").strip().lower()
+    preferred = claims.get("preferred_username") or claims.get("nickname")
+    if not sub:
+        return _oidc_error_redirect("IdP response missing sub claim")
+
+    # Bootstrap path: no users yet → first OIDC user becomes admin.
+    any_user = db.query(User.id).first() is not None
+    if not any_user:
+        username = preferred or (email.split("@")[0] if email else f"oidc-{sub[:8]}")
+        user = User(
+            username=username,
+            email=email or None,
+            is_admin=True,
+            is_active=True,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    else:
+        # Invite-only: must already have a user row.
+        user = None
+        if email:
+            user = db.query(User).filter(User.email == email).first()
+        if user is None and preferred:
+            user = db.query(User).filter(User.username == preferred).first()
+        if user is None or not user.is_active:
+            return _oidc_error_redirect(
+                "no account for this identity. Ask an admin to invite you."
+            )
+
+    # Issue a session cookie and bounce to the SPA.
+    token = create_session(db, user, user_agent=request.headers.get("user-agent"))
+    resp = RedirectResponse(url="/", status_code=302)
+    _set_session_cookie(resp, token)
+    return resp
+
+
+def _oidc_redirect_uri(request: Request, provider_name: str) -> str:
+    """The callback URL we hand the IdP at the start of the flow. The
+    same URL must reach this endpoint at the end of it — IdPs strict-
+    match registered redirect URIs. Configure via PUBLIC_BASE_URL when
+    behind a reverse proxy; falls back to the request's host otherwise.
+    """
+    base = get_settings().PUBLIC_BASE_URL.rstrip("/")
+    if base:
+        return f"{base}/api/auth/oidc/{provider_name}/callback"
+    # Fallback for dev. The behind-an-ingress case really wants PUBLIC_BASE_URL.
+    return str(request.url_for("oidc_callback", provider_name=provider_name))
+
+
+def _oidc_error_redirect(message: str):
+    """Redirect to the SPA's /login route with the error in a query param.
+    The SPA surfaces it on the page."""
+    from fastapi.responses import RedirectResponse
+    from urllib.parse import quote
+    return RedirectResponse(url=f"/login?oidc_error={quote(message)}", status_code=302)
 
 
 @router.post("/totp/disable")

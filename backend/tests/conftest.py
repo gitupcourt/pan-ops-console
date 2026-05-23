@@ -48,21 +48,22 @@ _FAKE_CATALOG.write_text("version: 1\nmetrics: []\n", encoding="utf-8")
 
 @pytest.fixture
 def client():
-    """Fresh TestClient per test, with a fresh DB.
+    """Fresh TestClient per test, with empty DB tables.
 
-    We can't keep one client across the whole module because tests for
-    "no users → bootstrap-status returns needs_bootstrap=true" and "with
-    a user → false" would interfere.
+    Subtle: simply unlinking the .db file between tests doesn't isolate
+    them, because the SQLAlchemy engine + connection pool that the app
+    imported at module load is still pointing at the original file
+    inode. On Linux, deleting a file with open file handles leaves the
+    data alive for those handles. The reliable reset is to issue a
+    SQL-level drop+create through the existing engine.
     """
     from fastapi.testclient import TestClient
 
-    # Reset DB file between tests so they don't see each other's rows.
-    if _TEST_DB.exists():
-        _TEST_DB.unlink()
+    # Force a clean schema. drop_all is a no-op on the first run.
+    from app.db import Base, engine
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
-    # Re-import to make sure the engine sees the fresh file. The app
-    # creates tables on lifespan startup, so we just hand TestClient
-    # the app and let it boot.
     from app.main import app
 
     with TestClient(app) as c:

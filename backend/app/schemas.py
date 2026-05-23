@@ -258,3 +258,49 @@ class LoginNeedsTOTPResponse(BaseModel):
     with `totp_code` populated.
     """
     needs_totp: bool = True
+
+
+# ---------- OIDC provider config (admin-managed) ----------
+
+class OIDCProviderCreate(BaseModel):
+    slug: str = Field(min_length=2, max_length=64, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    display_name: str = Field(min_length=1, max_length=120)
+    issuer: str = Field(min_length=8, max_length=500)
+    client_id: str = Field(min_length=1, max_length=255)
+    client_secret: str = Field(min_length=1)
+    scopes: str = "openid email profile"
+    enabled: bool = True
+
+
+class OIDCProviderUpdate(BaseModel):
+    """Patch shape — every field optional. Pass `client_secret` only when
+    rotating it; omit (or send null) to keep the existing value."""
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    issuer: str | None = Field(default=None, min_length=8, max_length=500)
+    client_id: str | None = Field(default=None, min_length=1, max_length=255)
+    client_secret: str | None = None
+    scopes: str | None = None
+    enabled: bool | None = None
+
+
+class OIDCProviderRead(BaseModel):
+    """What an admin sees. Note the client_secret is intentionally absent;
+    the UI shows the field as write-only ("click to rotate").
+    """
+    id: int
+    slug: str
+    display_name: str
+    issuer: str
+    client_id: str
+    scopes: str
+    enabled: bool
+    has_client_secret: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def _utc_oidc(cls, v):
+        return _ensure_utc(v)

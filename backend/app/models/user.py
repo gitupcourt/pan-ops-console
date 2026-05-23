@@ -1,4 +1,4 @@
-"""User accounts + sessions.
+"""User accounts + sessions + TOTP backup codes.
 
 Auth model is deliberately simple: username + Argon2-hashed password,
 optional TOTP, DB-backed sessions. Roles are just is_admin for now;
@@ -6,6 +6,10 @@ RBAC granularity comes later if there's ever a real multi-user need.
 
 TOTP secrets are encrypted at rest with FERNET_KEY, same as the firewall
 API credentials — one sacred secret to lose, not two.
+
+Backup codes are single-use static codes printed at TOTP enrollment.
+We never store them in plaintext — only sha256 hashes — and consume
+them by deleting the matching row on use.
 """
 
 from datetime import datetime
@@ -44,6 +48,29 @@ class User(Base):
 
     sessions: Mapped[list["Session"]] = relationship(
         "Session", back_populates="user", cascade="all, delete-orphan"
+    )
+    backup_codes: Mapped[list["BackupCode"]] = relationship(
+        "BackupCode", back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class BackupCode(Base):
+    """One single-use TOTP backup code. Stored as sha256 hex; the
+    plaintext is shown to the user once at enrollment and never again.
+    A consumed code is deleted, not flagged — there's no audit value in
+    keeping them around.
+    """
+
+    __tablename__ = "backup_codes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user: Mapped[User] = relationship("User", back_populates="backup_codes", lazy="joined")
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

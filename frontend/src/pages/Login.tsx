@@ -8,6 +8,10 @@ export default function Login() {
   const { login, bootstrap } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  // Two-stage TOTP flow: backend returns { needs_totp: true } after a
+  // valid password, then expects a follow-up call with the code.
+  const [needsTotp, setNeedsTotp] = useState(false);
+  const [totpCode, setTotpCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -16,7 +20,15 @@ export default function Login() {
     setErr(null);
     setBusy(true);
     try {
-      await login(username, password);
+      const result = await login(
+        username,
+        password,
+        needsTotp ? totpCode : undefined,
+      );
+      if (result === "needs_totp") {
+        setNeedsTotp(true);
+      }
+      // result === "ok" — AuthProvider has flipped user state; App will re-render.
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : "Sign in failed");
     } finally {
@@ -32,35 +44,70 @@ export default function Login() {
           <p className="text-xs text-zinc-500 mt-1">Sign in to continue</p>
         </div>
 
-        <Field label="Username">
-          <Input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            autoComplete="username"
-            autoFocus
-            required
-          />
-        </Field>
-        <Field label="Password">
-          <Input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
-        </Field>
+        {!needsTotp && (
+          <>
+            <Field label="Username">
+              <Input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                autoFocus
+                required
+              />
+            </Field>
+            <Field label="Password">
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </Field>
+          </>
+        )}
+
+        {needsTotp && (
+          <>
+            <div className="text-xs text-zinc-400">
+              Signed in as <span className="text-zinc-200">{username}</span>. Enter the
+              6-digit code from your authenticator, or one of your backup codes.
+            </div>
+            <Field label="Authenticator code">
+              <Input
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value)}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                autoFocus
+                required
+                placeholder="123456 or backup code"
+              />
+            </Field>
+            <button
+              type="button"
+              className="text-[11px] text-zinc-500 hover:text-zinc-200"
+              onClick={() => {
+                setNeedsTotp(false);
+                setTotpCode("");
+                setErr(null);
+              }}
+            >
+              ← back
+            </button>
+          </>
+        )}
 
         {err && <div className="text-xs text-rose-400">{err}</div>}
 
         <Button type="submit" variant="primary" disabled={busy} className="w-full">
-          {busy ? "Signing in…" : "Sign in"}
+          {busy ? "Signing in…" : needsTotp ? "Verify" : "Sign in"}
         </Button>
 
-        {bootstrap?.oidc_providers && bootstrap.oidc_providers.length > 0 && (
+        {!needsTotp && (bootstrap?.oidc_providers?.length ?? 0) > 0 && (
           <div className="pt-4 border-t border-zinc-800 space-y-2">
             <div className="text-[11px] text-zinc-500 text-center">or sign in with</div>
-            {bootstrap.oidc_providers.map((p) => (
+            {bootstrap!.oidc_providers.map((p) => (
               <Button
                 key={p}
                 type="button"

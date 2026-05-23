@@ -12,7 +12,7 @@ from app.config import get_settings
 from app.db import Base, engine
 # Importing the models package registers every table on Base.metadata.
 from app import models  # noqa: F401
-from app.routes import auth, devices, metrics, panoramas, users
+from app.routes import auth, devices, metrics, panoramas, providers, users
 from app.services import scheduler
 from app.services.auth_dep import current_user
 
@@ -55,6 +55,7 @@ app.include_router(panoramas.router, dependencies=_auth_required)
 app.include_router(devices.router, dependencies=_auth_required)
 app.include_router(metrics.router, dependencies=_auth_required)
 app.include_router(users.router, dependencies=_auth_required)
+app.include_router(providers.router, dependencies=_auth_required)
 
 
 @app.get("/")

@@ -137,12 +137,30 @@ export const api = {
   bootstrapStatus: () => j<BootstrapStatus>("/auth/bootstrap-status"),
   signupFirst: (body: { username: string; email?: string | null; password: string }) =>
     j<User>("/auth/signup-first", { method: "POST", body: JSON.stringify(body) }),
+  // Returns the User object on success, OR { needs_totp: true } when the
+  // password is valid but TOTP is required. Caller should narrow based on
+  // the response shape.
   login: (body: { username: string; password: string; totp_code?: string | null }) =>
-    j<User>("/auth/login", { method: "POST", body: JSON.stringify(body) }),
+    j<User | { needs_totp: true }>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   logout: () => j<void>("/auth/logout", { method: "POST" }),
   me: () => j<User>("/auth/me"),
   changePassword: (body: { current_password: string; new_password: string }) =>
     j<void>("/auth/change-password", { method: "POST", body: JSON.stringify(body) }),
+  totpSetup: () =>
+    j<{ secret: string; otpauth_uri: string }>("/auth/totp/setup", { method: "POST" }),
+  totpVerify: (code: string) =>
+    j<{ backup_codes: string[] }>("/auth/totp/verify", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+  totpDisable: (password: string) =>
+    j<void>("/auth/totp/disable", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
 
   // Users (admin)
   listUsers: () => j<User[]>("/users"),

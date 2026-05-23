@@ -7,6 +7,7 @@ import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import Login from "./pages/Login";
 import Profile from "./pages/Profile";
+import Providers from "./pages/Providers";
 import Users from "./pages/Users";
 
 export default function App() {
@@ -37,6 +38,7 @@ export default function App() {
               <NavTab to="/">Dashboard</NavTab>
               <NavTab to="/inventory">Inventory</NavTab>
               {user.is_admin && <NavTab to="/users">Users</NavTab>}
+              {user.is_admin && <NavTab to="/providers">Providers</NavTab>}
             </nav>
             <UserMenu />
           </div>
@@ -47,6 +49,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/users" element={user.is_admin ? <Users /> : <NotAuthorized />} />
+            <Route path="/providers" element={user.is_admin ? <Providers /> : <NotAuthorized />} />
             <Route path="/profile" element={<Profile />} />
           </Routes>
         </main>

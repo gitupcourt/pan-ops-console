@@ -47,6 +47,38 @@ export type BootstrapStatus = {
   oidc_providers: string[];
 };
 
+export type OIDCProvider = {
+  id: number;
+  slug: string;
+  display_name: string;
+  issuer: string;
+  client_id: string;
+  scopes: string;
+  enabled: boolean;
+  has_client_secret: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type OIDCProviderCreate = {
+  slug: string;
+  display_name: string;
+  issuer: string;
+  client_id: string;
+  client_secret: string;
+  scopes?: string;
+  enabled?: boolean;
+};
+
+export type OIDCProviderUpdate = {
+  display_name?: string | null;
+  issuer?: string | null;
+  client_id?: string | null;
+  client_secret?: string | null;
+  scopes?: string | null;
+  enabled?: boolean | null;
+};
+
 export type AuthFromUserpass = { mode: "userpass"; username: string; password: string };
 export type AuthFromApiKey = { mode: "api_key"; api_key: string };
 export type AuthPayload = AuthFromUserpass | AuthFromApiKey;
@@ -161,6 +193,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ password }),
     }),
+
+  // OIDC providers (admin)
+  listOIDCProviders: () => j<OIDCProvider[]>("/providers/oidc"),
+  createOIDCProvider: (body: OIDCProviderCreate) =>
+    j<OIDCProvider>("/providers/oidc", { method: "POST", body: JSON.stringify(body) }),
+  updateOIDCProvider: (id: number, body: OIDCProviderUpdate) =>
+    j<OIDCProvider>(`/providers/oidc/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteOIDCProvider: (id: number) =>
+    j<void>(`/providers/oidc/${id}`, { method: "DELETE" }),
 
   // Users (admin)
   listUsers: () => j<User[]>("/users"),

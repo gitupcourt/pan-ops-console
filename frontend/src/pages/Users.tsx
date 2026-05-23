@@ -6,7 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 
-import { ApiError, api, User } from "../api";
+import { ApiError, api } from "../api";
 import { useAuth } from "../auth";
 import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../components/ui";
 

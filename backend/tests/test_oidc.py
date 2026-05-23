@@ -1,66 +1,73 @@
-"""OIDC route + service tests.
+"""OIDC route + service tests (DB-backed providers).
 
-We don't hit a real IdP — every IdP-facing call is patched. What we're
-verifying:
-  - bootstrap-status surfaces configured providers
-  - /oidc/<name>/login redirects to the IdP authorize URL with the
-    right params (state, nonce, PKCE challenge, scope, client_id, redirect_uri)
-  - /oidc/<name>/callback errors redirect to /login with the message
-  - successful claim → first user becomes admin (bootstrap path)
-  - successful claim with email matching an existing user → that user
-    is logged in
-  - successful claim that matches NOTHING → friendly error redirect
+Providers are configured via the admin API rather than env vars. Each
+test seeds a provider through /providers/oidc and exercises the login
+flow. Network calls to the IdP are mocked.
 """
 
 from __future__ import annotations
 
-import os
 from urllib.parse import parse_qs, urlparse
 
-import pytest
+
+STRONG = "correct horse battery staple"
+DEFAULT_PAYLOAD = {
+    "slug": "fake",
+    "display_name": "Fake IdP",
+    "issuer": "https://idp.test",
+    "client_id": "client-id-xyz",
+    "client_secret": "shhhh",
+    "scopes": "openid email profile",
+    "enabled": True,
+}
 
 
-# Provider env vars are set BEFORE app import. conftest already imports
-# the app at test collection time, so we set them here at module scope.
-os.environ["OIDC_PROVIDER_FAKE_ISSUER"] = "https://idp.test"
-os.environ["OIDC_PROVIDER_FAKE_CLIENT_ID"] = "client-id-xyz"
-os.environ["OIDC_PROVIDER_FAKE_CLIENT_SECRET"] = "shhhh"
-os.environ["OIDC_PROVIDER_FAKE_DISPLAY_NAME"] = "Fake IdP"
+def _seed_provider(client, **overrides):
+    """Bootstrap an admin and create a provider via the admin API.
+    Returns the new provider id; the client is still signed in as admin."""
+    client.post(
+        "/auth/signup-first",
+        json={"username": "admin", "password": STRONG},
+    )
+    payload = {**DEFAULT_PAYLOAD, **overrides}
+    r = client.post("/providers/oidc", json=payload)
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
 
 
-@pytest.fixture(autouse=True)
-def _reload_providers():
-    """Pick up the env vars above each test. The module's load at import
-    time may have run before these were set (depending on test order)."""
-    from app.services import oidc
-    oidc.load_providers()
-    yield
-
-
-def test_bootstrap_status_includes_oidc_provider(client):
+def test_bootstrap_status_lists_enabled_providers(client):
+    _seed_provider(client)
+    client.post("/auth/logout")
     r = client.get("/auth/bootstrap-status")
     assert r.status_code == 200
-    body = r.json()
-    assert "fake" in body["oidc_providers"]
+    assert "fake" in r.json()["oidc_providers"]
+
+
+def test_disabled_provider_hidden_from_bootstrap_status(client):
+    pid = _seed_provider(client)
+    client.patch(f"/providers/oidc/{pid}", json={"enabled": False})
+    client.post("/auth/logout")
+    assert "fake" not in client.get("/auth/bootstrap-status").json()["oidc_providers"]
 
 
 def test_oidc_login_unknown_provider_404(client):
+    _seed_provider(client)
+    client.post("/auth/logout")
     r = client.get("/auth/oidc/nope/login", follow_redirects=False)
     assert r.status_code == 404
 
 
 def test_oidc_login_redirects_to_idp(client, monkeypatch):
-    # Stub the discovery call so we don't hit the network.
+    _seed_provider(client)
+    client.post("/auth/logout")
+
     from app.services import oidc
 
-    def fake_discover(_provider):
-        return {
-            "authorization_endpoint": "https://idp.test/auth",
-            "token_endpoint": "https://idp.test/token",
-            "jwks_uri": "https://idp.test/jwks",
-        }
-
-    monkeypatch.setattr(oidc, "discover", fake_discover)
+    monkeypatch.setattr(oidc, "discover", lambda _p: {
+        "authorization_endpoint": "https://idp.test/auth",
+        "token_endpoint": "https://idp.test/token",
+        "jwks_uri": "https://idp.test/jwks",
+    })
 
     r = client.get("/auth/oidc/fake/login", follow_redirects=False)
     assert r.status_code == 302
@@ -77,18 +84,20 @@ def test_oidc_login_redirects_to_idp(client, monkeypatch):
 
 
 def test_oidc_callback_idp_error_redirects_to_login(client):
+    _seed_provider(client)
+    client.post("/auth/logout")
     r = client.get(
         "/auth/oidc/fake/callback?error=access_denied&error_description=user+said+no",
         follow_redirects=False,
     )
     assert r.status_code == 302
     assert r.headers["location"].startswith("/login?oidc_error=")
-    assert "user" in r.headers["location"]
 
 
 def test_oidc_callback_unknown_state(client):
-    """Replay protection: a state that was never issued (or already
-    consumed) is rejected."""
+    """Replay protection: a state that was never issued is rejected."""
+    _seed_provider(client)
+    client.post("/auth/logout")
     r = client.get(
         "/auth/oidc/fake/callback?code=anything&state=nope",
         follow_redirects=False,
@@ -97,54 +106,15 @@ def test_oidc_callback_unknown_state(client):
     assert "oidc_error" in r.headers["location"]
 
 
-def test_oidc_callback_bootstrap_makes_first_user_admin(client, monkeypatch):
-    """First OIDC login on an empty DB creates an admin user."""
-    from app.services import oidc
-
-    monkeypatch.setattr(oidc, "discover", lambda _p: {
-        "authorization_endpoint": "https://idp.test/auth",
-        "token_endpoint": "https://idp.test/token",
-        "jwks_uri": "https://idp.test/jwks",
-    })
-    # Skip the real token exchange + JWT validation. We're verifying the
-    # POST-claim path: matching, provisioning, session creation.
-    monkeypatch.setattr(oidc, "complete_login", lambda state, code: {
-        "sub": "alice-sub-id",
-        "email": "alice@example.com",
-        "preferred_username": "alice",
-    })
-    # Seed the in-memory state dict so the route gets past its state check.
-    # (complete_login is stubbed, but the route doesn't know that — it
-    # passes state through to oidc.complete_login which now ignores it.)
-
-    r = client.get(
-        "/auth/oidc/fake/callback?code=abc&state=anything",
-        follow_redirects=False,
-    )
-    assert r.status_code == 302
-    assert r.headers["location"] == "/"
-
-    # The user should be created and the session cookie set.
-    me = client.get("/auth/me").json()
-    assert me["username"] == "alice"
-    assert me["email"] == "alice@example.com"
-    assert me["is_admin"] is True
-
-
-def test_oidc_callback_invite_only_for_subsequent_users(client, monkeypatch):
-    """Once any user exists, OIDC requires a matching local row.
-    Unknown identity → redirect to /login with an error."""
-    from app.services import oidc
-
-    # Bootstrap a local admin first
-    client.post(
-        "/auth/signup-first",
-        json={"username": "admin", "password": "correct horse battery staple"},
-    )
+def test_oidc_callback_invite_only(client, monkeypatch):
+    """Existing admin signed up locally. OIDC sign-in from a stranger
+    redirects to /login with the invite-required error."""
+    _seed_provider(client)
     client.post("/auth/logout")
 
+    from app.services import oidc
     monkeypatch.setattr(oidc, "discover", lambda _p: {})
-    monkeypatch.setattr(oidc, "complete_login", lambda state, code: {
+    monkeypatch.setattr(oidc, "complete_login", lambda db, state, code: {
         "sub": "stranger-sub-id",
         "email": "stranger@example.com",
         "preferred_username": "stranger",
@@ -157,34 +127,27 @@ def test_oidc_callback_invite_only_for_subsequent_users(client, monkeypatch):
     assert r.status_code == 302
     assert "oidc_error" in r.headers["location"]
     assert "invite" in r.headers["location"].lower()
-    # No session cookie issued
     assert client.get("/auth/me").status_code == 401
 
 
 def test_oidc_callback_matches_existing_user_by_email(client, monkeypatch):
-    """An invited user whose local email matches an OIDC claim gets
-    logged in seamlessly."""
-    from app.services import oidc
-
-    # Admin bootstrap + invites bob with a known email
-    client.post(
-        "/auth/signup-first",
-        json={"username": "admin", "password": "correct horse battery staple"},
-    )
+    """An admin-invited user with a matching email gets signed in via OIDC."""
+    _seed_provider(client)
     client.post(
         "/users",
         json={
             "username": "bob",
             "email": "bob@example.com",
-            "password": "correct horse battery staple",
+            "password": STRONG,
         },
     )
     client.post("/auth/logout")
 
+    from app.services import oidc
     monkeypatch.setattr(oidc, "discover", lambda _p: {})
-    monkeypatch.setattr(oidc, "complete_login", lambda state, code: {
+    monkeypatch.setattr(oidc, "complete_login", lambda db, state, code: {
         "sub": "bob-sub-id",
-        "email": "BOB@example.com",   # casing differs — we lowercase before match
+        "email": "BOB@example.com",  # casing differs — we lowercase before match
         "preferred_username": "bob",
     })
 

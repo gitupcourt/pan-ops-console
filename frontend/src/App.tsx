@@ -6,33 +6,25 @@ import Bootstrap from "./pages/Bootstrap";
 import Dashboard from "./pages/Dashboard";
 import Inventory from "./pages/Inventory";
 import Login from "./pages/Login";
+import Profile from "./pages/Profile";
+import Users from "./pages/Users";
 
 export default function App() {
   const { user, bootstrap, isBootstrapLoading, isLoading } = useAuth();
 
-  // Initial paint — wait for bootstrap-status before deciding which screen
-  // to show. Without this gate, the user sees the login flash before
-  // getting redirected to the signup page on a fresh install.
   if (isBootstrapLoading) {
     return <FullPageStatus text="Loading…" />;
   }
-
-  // Fresh install — no users yet. Show first-user setup.
   if (bootstrap?.needs_bootstrap) {
     return <Bootstrap />;
   }
-
-  // Bootstrap-status loaded, but /auth/me still in flight on first paint.
   if (isLoading) {
     return <FullPageStatus text="Loading…" />;
   }
-
-  // Not signed in.
   if (!user) {
     return <Login />;
   }
 
-  // Signed in — the actual app.
   return (
     <BrowserRouter>
       <div className="min-h-full">
@@ -54,8 +46,8 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/inventory" element={<Inventory />} />
-            {/* Users page lands in slice 1c. */}
-            <Route path="/users" element={<UsersPlaceholder />} />
+            <Route path="/users" element={user.is_admin ? <Users /> : <NotAuthorized />} />
+            <Route path="/profile" element={<Profile />} />
           </Routes>
         </main>
       </div>
@@ -85,14 +77,11 @@ function UserMenu() {
   if (!user) return null;
   return (
     <div className="ml-auto flex items-center gap-3 text-xs">
-      <span className="text-zinc-400">
+      <NavLink to="/profile" className="text-zinc-400 hover:text-zinc-100">
         {user.username}
         {user.is_admin && <span className="ml-1 text-amber-400">·admin</span>}
-      </span>
-      <button
-        onClick={() => logout()}
-        className="text-zinc-500 hover:text-zinc-200"
-      >
+      </NavLink>
+      <button onClick={() => logout()} className="text-zinc-500 hover:text-zinc-200">
         Sign out
       </button>
     </div>
@@ -107,10 +96,10 @@ function FullPageStatus({ text }: { text: string }) {
   );
 }
 
-function UsersPlaceholder() {
+function NotAuthorized() {
   return (
     <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
-      User management arrives in the next slice.
+      Admins only.
     </div>
   );
 }

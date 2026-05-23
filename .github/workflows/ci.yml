@@ -51,11 +51,39 @@ jobs:
         run: pytest
 
   # =====================================================================
+  # Frontend type-check. Catches TS strict-mode errors (unused imports,
+  # implicit any, type mismatches) in ~10s on every PR — cheap insurance
+  # so we don't discover them 90 seconds into the docker prod build on
+  # push-to-main.
+  # =====================================================================
+  test-frontend:
+    name: frontend typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      - name: tsc --noEmit
+        working-directory: frontend
+        run: npm run typecheck
+
+  # =====================================================================
   # Build + push images and open the bump PR. Runs only on push to main
-  # and only after tests pass. PRs skip this entirely.
+  # and only after both test jobs pass. PRs skip this entirely.
   # =====================================================================
   ship:
-    needs: test-backend
+    needs: [test-backend, test-frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

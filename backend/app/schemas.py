@@ -218,3 +218,43 @@ class PasswordChangeRequest(BaseModel):
     """Authenticated user changing their own password."""
     current_password: str
     new_password: str
+
+
+# ---------- TOTP ----------
+
+class TOTPSetupResponse(BaseModel):
+    """Returned from /auth/totp/setup. The secret is encrypted at rest
+    immediately, but the plaintext goes back to the user this one time
+    so they can paste it into an authenticator app manually if they
+    can't scan the QR. After /auth/totp/verify succeeds, this secret is
+    "locked in" and can only be retrieved by disabling TOTP and starting
+    fresh.
+    """
+    secret: str
+    otpauth_uri: str
+
+
+class TOTPVerifyRequest(BaseModel):
+    code: str
+
+
+class TOTPVerifyResponse(BaseModel):
+    """Backup codes shown ONCE on successful enrollment. Cannot be
+    retrieved again — losing them means disabling and re-enrolling TOTP.
+    """
+    backup_codes: list[str]
+
+
+class TOTPDisableRequest(BaseModel):
+    """Disabling TOTP requires the password as a second factor of sorts
+    — we don't want a hijacked session (e.g. a left-open laptop) to be
+    able to silently strip second-factor protection."""
+    password: str
+
+
+class LoginNeedsTOTPResponse(BaseModel):
+    """Returned (with status 200) when password is valid but TOTP is
+    required. Frontend collects the code and retries the login call
+    with `totp_code` populated.
+    """
+    needs_totp: bool = True

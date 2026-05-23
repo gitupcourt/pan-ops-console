@@ -29,6 +29,23 @@ class Settings(BaseSettings):
     # navigations carry the cookie, but cross-site POSTs don't.
     SESSION_COOKIE_SAMESITE: str = "lax"
 
+    # Public URL where this app is reachable from a browser. Used to
+    # construct the OIDC redirect_uri the IdP calls back to. If left empty,
+    # the OIDC routes fall back to deriving from the request — fine for
+    # local dev, but most IdPs reject mismatched redirect URIs, so set
+    # this explicitly in production.
+    PUBLIC_BASE_URL: str = ""
+
+    # OIDC providers are read from env vars matching:
+    #   OIDC_PROVIDER_<NAME>_ISSUER          = "https://idp.example.com"
+    #   OIDC_PROVIDER_<NAME>_CLIENT_ID       = "..."
+    #   OIDC_PROVIDER_<NAME>_CLIENT_SECRET   = "..."
+    #   OIDC_PROVIDER_<NAME>_DISPLAY_NAME    = "Authentik"        (optional)
+    #   OIDC_PROVIDER_<NAME>_SCOPES          = "openid email profile" (optional)
+    # The lookup happens at startup in app.services.oidc.load_providers().
+    # `extra="ignore"` (set above) lets these pass through without being
+    # named here on the Settings class.
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]

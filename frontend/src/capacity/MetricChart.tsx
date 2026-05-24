@@ -10,7 +10,7 @@ import {
 } from "recharts";
 
 import { api, MetricSpec } from "../api";
-import { StatusBadge } from "./StatusBadge";
+import { StatusBadge } from "../core/ui/StatusBadge";
 
 type Props = {
   deviceId: number;

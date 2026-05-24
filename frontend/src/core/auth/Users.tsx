@@ -6,9 +6,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useState } from "react";
 
-import { ApiError, api } from "../api";
-import { useAuth } from "../auth";
-import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../components/ui";
+import { ApiError, api } from "../../api";
+import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../ui/ui";
+import { useAuth } from "./AuthContext";
 
 export default function Users() {
   const { user: me } = useAuth();

@@ -2,9 +2,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { FormEvent, useState } from "react";
 
-import { ApiError, api } from "../api";
-import { useAuth } from "../auth";
-import { Button, Card, CardHeader, Field, Input } from "../components/ui";
+import { ApiError, api } from "../../api";
+import { Button, Card, CardHeader, Field, Input } from "../ui/ui";
+import { useAuth } from "./AuthContext";
 
 export default function Profile() {
   const { user } = useAuth();

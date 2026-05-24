@@ -6,8 +6,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, FormEvent, useState } from "react";
 
-import { ApiError, OIDCProvider, OIDCProviderCreate, api } from "../api";
-import { Button, Card, CardHeader, Empty, Field, Input } from "../components/ui";
+import { ApiError, OIDCProvider, OIDCProviderCreate, api } from "../../api";
+import { Button, Card, CardHeader, Empty, Field, Input } from "../ui/ui";
 
 export default function Providers() {
   const qc = useQueryClient();

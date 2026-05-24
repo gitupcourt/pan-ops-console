@@ -1,14 +1,14 @@
 import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
 
-import { useAuth } from "./auth";
-import Bootstrap from "./pages/Bootstrap";
-import Dashboard from "./pages/Dashboard";
-import Inventory from "./pages/Inventory";
-import Login from "./pages/Login";
-import Profile from "./pages/Profile";
-import Providers from "./pages/Providers";
-import Users from "./pages/Users";
+import Dashboard from "./capacity/Dashboard";
+import { useAuth } from "./core/auth/AuthContext";
+import Bootstrap from "./core/auth/Bootstrap";
+import Login from "./core/auth/Login";
+import Profile from "./core/auth/Profile";
+import Providers from "./core/auth/Providers";
+import Users from "./core/auth/Users";
+import Inventory from "./core/devices/Inventory";
 
 export default function App() {
   const { user, bootstrap, isBootstrapLoading, isLoading } = useAuth();
@@ -32,7 +32,7 @@ export default function App() {
         <header className="border-b border-zinc-800 bg-zinc-950/60 backdrop-blur sticky top-0 z-10">
           <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-6">
             <h1 className="text-base font-semibold text-zinc-100">
-              PAN Capacity Analyzer
+              PAN NGFW Ops Console
             </h1>
             <nav className="flex items-center gap-4 text-sm">
               <NavTab to="/">Dashboard</NavTab>

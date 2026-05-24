@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api, Device, MetricSpec } from "../api";
-import { MetricChart } from "../components/MetricChart";
-import { Button, Select } from "../components/ui";
+import { Button, Select } from "../core/ui/ui";
+import { MetricChart } from "./MetricChart";
 
 const HOURS_OPTIONS = [1, 6, 24, 24 * 7, 24 * 30];
 

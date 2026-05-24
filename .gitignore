@@ -30,3 +30,6 @@ Thumbs.db
 node_modules/
 dist/
 build/
+
+# Session brief for AI agents — must not be committed to public repos
+CLAUDE.md

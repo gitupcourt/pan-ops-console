@@ -5,7 +5,7 @@ A single backend container and a single frontend container, with one volume betw
 ```
                        ┌─────────────────────────┐
                        │  Browser                │
-                       │  http(s)://capacity.../ │
+                       │  http(s)://console/...  │
                        └────────────┬────────────┘
                                     │
                                     ▼
@@ -22,8 +22,8 @@ A single backend container and a single frontend container, with one volume betw
    ┌────────────────────────────────────────────────────────────┐
    │  Backend container                                         │
    │  - FastAPI HTTP API                  (port 8000)           │
-   │  - APScheduler poller loop                                 │
-   │  - pan-os-python client                                    │
+   │  - APScheduler poller loop (capacity module)               │
+   │  - pan-os-python client (core/command_proxy)               │
    │  ┌──────────────────────────────────────────────────────┐  │
    │  │  SQLite file at /app/data/capacity.db                │  │
    │  │  (mounted from PVC / named volume / bind mount)      │  │
@@ -38,6 +38,43 @@ A single backend container and a single frontend container, with one volume betw
             ┌────────────────────────────────┐
             │  Firewalls / Panorama          │
             └────────────────────────────────┘
+```
+
+## Module layout
+
+The backend is organized as a shared `core/` (auth, devices, panorama, command_proxy, credentials) plus one feature module per area of operations. Capacity is the first such module; upgrade orchestration is the next one to land.
+
+```
+backend/app/
+├── core/                  shared platform code
+│   ├── auth/              users, sessions, OIDC, TOTP, FastAPI deps
+│   ├── devices/           device model + /devices route
+│   ├── panorama/          Panorama model, client, sync + /panoramas route
+│   ├── command_proxy/     pan-os client (proxy-first, direct-fallback)
+│   ├── credentials.py     Fernet-encrypted credential helpers
+│   ├── crypto.py          Fernet wrappers
+│   └── schema_utils.py
+├── capacity/              polling, catalog, time-series storage, /metrics
+│   ├── models/sample.py
+│   ├── routes/metrics.py
+│   ├── services/{catalog,poller,scheduler,storage}.py
+│   └── schemas.py
+├── main.py                FastAPI app, lifespan, router includes
+├── config.py              env-var settings
+└── db.py                  SQLAlchemy engine + session factory
+```
+
+Module boundaries are enforced by imports: a `capacity` route may import from `core/*`, but `core/*` may not import from `capacity/`. Upgrade orchestration (incoming) will follow the same convention as `upgrade/`.
+
+The frontend mirrors the same split:
+
+```
+frontend/src/
+├── core/{auth,devices,ui}/
+├── capacity/
+├── api.ts                 cross-module API client and shared types
+├── App.tsx                routing root
+└── main.tsx               Vite entry
 ```
 
 ## Components
@@ -102,10 +139,9 @@ Extractor types: `xpath_count`, `xpath_text`, `xpath_avg`, `state_value`, `text_
 - Persistent storage if you want data to survive container restarts (`docker volume` for compose; `PVC` for k8s)
 
 **Not required:**
-- An external database
-- A message queue / Redis
-- An auth provider (the app has no built-in user auth — protect it with your reverse proxy if exposing it publicly)
-- Anything else
+- An external database — SQLite by default (Postgres planned for the merged app)
+- A message queue / Redis — capacity polling runs in-process today (Celery/Redis come with the upgrade module)
+- An external auth provider — local accounts (Argon2id) + optional TOTP work out of the box. OIDC providers are admin-configurable in the UI if you have one (Authentik, Entra, Okta, Keycloak, Google, etc.) but they're optional, not required.
 
 ## Reverse proxy / TLS
 

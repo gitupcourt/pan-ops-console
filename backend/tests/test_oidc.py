@@ -61,7 +61,7 @@ def test_oidc_login_redirects_to_idp(client, monkeypatch):
     _seed_provider(client)
     client.post("/auth/logout")
 
-    from app.services import oidc
+    from app.core.auth.services import oidc
 
     monkeypatch.setattr(oidc, "discover", lambda _p: {
         "authorization_endpoint": "https://idp.test/auth",
@@ -112,7 +112,7 @@ def test_oidc_callback_invite_only(client, monkeypatch):
     _seed_provider(client)
     client.post("/auth/logout")
 
-    from app.services import oidc
+    from app.core.auth.services import oidc
     monkeypatch.setattr(oidc, "discover", lambda _p: {})
     monkeypatch.setattr(oidc, "complete_login", lambda db, state, code: {
         "sub": "stranger-sub-id",
@@ -143,7 +143,7 @@ def test_oidc_callback_matches_existing_user_by_email(client, monkeypatch):
     )
     client.post("/auth/logout")
 
-    from app.services import oidc
+    from app.core.auth.services import oidc
     monkeypatch.setattr(oidc, "discover", lambda _p: {})
     monkeypatch.setattr(oidc, "complete_login", lambda db, state, code: {
         "sub": "bob-sub-id",

@@ -8,13 +8,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi import Depends
 
+from app.capacity.routes import metrics
+from app.capacity.services import scheduler
 from app.config import get_settings
+from app.core.auth.deps import current_user
+from app.core.auth.routes import auth, providers, users
+from app.core.devices.routes import devices
+from app.core.panorama.routes import panoramas
 from app.db import Base, engine
-# Importing the models package registers every table on Base.metadata.
-from app import models  # noqa: F401
-from app.routes import auth, devices, metrics, panoramas, providers, users
-from app.services import scheduler
-from app.services.auth_dep import current_user
+
+# Importing each module's models package registers every table on
+# Base.metadata so lifespan's create_all sees them.
+from app.capacity import models as _capacity_models  # noqa: F401
+from app.core.auth import models as _auth_models  # noqa: F401
+from app.core.devices import models as _devices_models  # noqa: F401
+from app.core.panorama import models as _panorama_models  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)
@@ -33,7 +41,7 @@ async def lifespan(app: FastAPI):
 
 
 settings = get_settings()
-app = FastAPI(title="pan-capacity-analyzer", lifespan=lifespan)
+app = FastAPI(title="pan-ops-console", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,7 +69,7 @@ app.include_router(providers.router, dependencies=_auth_required)
 @app.get("/")
 def root():
     return {
-        "name": "pan-capacity-analyzer",
+        "name": "pan-ops-console",
         "docs": "/docs",
         "healthz": "/healthz",
     }

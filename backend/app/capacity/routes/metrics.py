@@ -6,9 +6,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.capacity.schemas import MetricSeries, SampleRead
-from app.capacity.services import scheduler
 from app.capacity.services.catalog import load_catalog
 from app.capacity.services.storage import SQLAlchemySampleStore
+from app.capacity.tasks import poll_all
 from app.db import SessionLocal, get_db
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -52,6 +52,13 @@ def get_series(
 
 @router.post("/poll/run-now", status_code=202)
 def poll_now():
-    """Kick off an immediate poll cycle (synchronous for now)."""
-    scheduler.trigger_now()
-    return {"status": "ok"}
+    """Enqueue an immediate poll cycle on the Celery worker.
+
+    Returns the task ID so callers can poll for completion if they care.
+    Before phase 2e cutover this ran synchronously in the API process via
+    APScheduler.trigger_now(); now it dispatches to the worker pool and
+    returns immediately. The worker runs the same poller code that beat
+    triggers on schedule.
+    """
+    result = poll_all.delay()
+    return {"status": "enqueued", "task_id": result.id}

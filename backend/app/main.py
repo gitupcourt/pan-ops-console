@@ -9,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Depends
 
 from app.capacity.routes import metrics
-from app.capacity.services import scheduler
 from app.config import get_settings
 from app.core.auth.deps import current_user
 from app.core.auth.routes import auth, providers, users
@@ -36,11 +35,12 @@ async def lifespan(app: FastAPI):
     # first-run-against-legacy-create_all-schema case (stamps instead of
     # re-creating). See app/core/migrations.py.
     run_migrations()
-    scheduler.start()
-    try:
-        yield
-    finally:
-        scheduler.stop()
+    # Capacity polling no longer runs in-process. The `capacity.poll_all`
+    # Celery task (app/capacity/tasks/__init__.py) is driven by the beat
+    # process on the configured POLL_INTERVAL_SECONDS schedule. The
+    # in-process APScheduler that lived here through phases 1–4 was
+    # retired at phase 2e cutover.
+    yield
 
 
 settings = get_settings()

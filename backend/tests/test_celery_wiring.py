@@ -40,15 +40,23 @@ def test_capacity_poll_all_task_registered():
     )
 
 
-def test_beat_schedule_is_empty_until_phase_2e():
-    """Sanity check on the no-behavior-change discipline of phase 2c.
+def test_capacity_beat_schedule_entry():
+    """Phase 2e cutover wired capacity.poll_all into the beat schedule.
 
-    If a beat_schedule entry sneaks in here, capacity polling would
-    double-fire (APScheduler + beat) the moment a beat process is
-    started. That's a phase 2e change, not 2c.
+    The matching APScheduler removal lives in the same PR — the two
+    must move in lockstep or polling would double-fire (during the
+    transition window) or stop entirely. This test guards the beat
+    side; the lifespan-no-longer-starts-APScheduler guard is the
+    absence of a scheduler.start() call in app.main.
     """
+    from app.config import get_settings
     from app.workers.celery_app import celery
 
-    assert celery.conf.beat_schedule == {}, (
-        "beat_schedule should be empty until phase 2e wires the cutover"
+    settings = get_settings()
+    schedule = celery.conf.beat_schedule
+    assert "capacity-poll-all" in schedule, (
+        f"capacity.poll_all not in beat_schedule. Entries: {list(schedule)}"
     )
+    entry = schedule["capacity-poll-all"]
+    assert entry["task"] == "capacity.poll_all"
+    assert entry["schedule"] == float(settings.POLL_INTERVAL_SECONDS)

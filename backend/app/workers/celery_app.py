@@ -54,10 +54,14 @@ celery.conf.update(
     # need results to stick around long enough for the UI to read them
     # post-completion. 1 day is comfortable.
     result_expires=86400,
-    # Beat schedule deliberately empty in phase 2c. Phase 2e adds:
-    #   "capacity-poll-all": {
-    #       "task": "capacity.poll_all",
-    #       "schedule": settings.POLL_INTERVAL_SECONDS,
-    #   }
-    beat_schedule={},
+    # Beat schedule — populated at phase 2e cutover. The in-process
+    # APScheduler that lived in app.main.lifespan was retired in the
+    # same commit. capacity.poll_all is the only entry today; phase 4d
+    # will add upgrade-side tasks (refresh.sync_all_panoramas, etc.).
+    beat_schedule={
+        "capacity-poll-all": {
+            "task": "capacity.poll_all",
+            "schedule": float(_settings.POLL_INTERVAL_SECONDS),
+        },
+    },
 )

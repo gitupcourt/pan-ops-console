@@ -51,6 +51,36 @@ jobs:
         run: pytest
 
   # =====================================================================
+  # Backend image smoke test — build the actual production Dockerfile
+  # and confirm `app.main` imports cleanly inside it. This catches
+  # "things the docker-compose bind-mount masks" — the exact class of
+  # bug that bit phase 2a (alembic/ + alembic.ini at /app got missed by
+  # the COPY layer; only surfaced when the platform session tried to
+  # roll out and the pod CrashLoopBackOff'd).
+  #
+  # Costs ~30-45s of CI; saves a multi-PR back-and-forth with the
+  # platform session when something is missing from the image.
+  # =====================================================================
+  smoke-backend-image:
+    name: backend image smoke
+    needs: [test-backend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t pan-ops-console-backend:smoke backend/
+      - name: Import app.main inside the image
+        run: |
+          docker run --rm \
+            -e FERNET_KEY="0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs=" \
+            pan-ops-console-backend:smoke \
+            python -c "import app.main; print('app.main imported OK')"
+      - name: Verify alembic.ini + alembic/ are present in image
+        run: |
+          docker run --rm pan-ops-console-backend:smoke \
+            sh -c "test -f /app/alembic.ini && test -d /app/alembic && echo 'alembic assets present'"
+
+  # =====================================================================
   # Frontend type-check. Catches TS strict-mode errors (unused imports,
   # implicit any, type mismatches) in ~10s on every PR — cheap insurance
   # so we don't discover them 90 seconds into the docker prod build on
@@ -83,7 +113,7 @@ jobs:
   # and only after both test jobs pass. PRs skip this entirely.
   # =====================================================================
   ship:
-    needs: [test-backend, test-frontend]
+    needs: [test-backend, test-frontend, smoke-backend-image]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

@@ -161,11 +161,12 @@ def upgrade() -> None:
     )
 
     # ---------- devices ----------
-    # device_source enum — declared explicitly so a fresh Postgres install
-    # doesn't depend on SQLAlchemy auto-creating the type.
-    device_source = sa.Enum("direct", "panorama", name="device_source")
-    device_source.create(op.get_bind(), checkfirst=True)
-
+    # device_source enum — the column-level definition below auto-creates
+    # the underlying type (CREATE TYPE on Postgres; CHECK constraint on
+    # SQLite). No need for a separate explicit create — that pattern was
+    # the source of a DuplicateObject error on Postgres because alembic
+    # fires CREATE TYPE again when the Enum is referenced inside
+    # create_table, even with create_type=False on the Enum.
     op.create_table(
         "devices",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -177,7 +178,7 @@ def upgrade() -> None:
         sa.Column("sw_version", sa.String(length=64), nullable=True),
         sa.Column(
             "source",
-            device_source,
+            sa.Enum("direct", "panorama", name="device_source"),
             nullable=False,
             server_default="direct",
         ),
@@ -251,8 +252,9 @@ def downgrade() -> None:
     op.drop_table("samples")
 
     op.drop_table("devices")
-    device_source = sa.Enum("direct", "panorama", name="device_source")
-    device_source.drop(op.get_bind(), checkfirst=True)
+    # device_source enum: on Postgres, the type lingers after drop_table —
+    # explicit drop here, no-op on SQLite (the dialect has no native enum).
+    sa.Enum(name="device_source").drop(op.get_bind(), checkfirst=True)
 
     op.drop_table("panoramas")
 

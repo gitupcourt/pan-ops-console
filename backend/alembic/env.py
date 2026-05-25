@@ -9,20 +9,27 @@ table on Base.metadata so autogenerate (and the eventual `alembic upgrade`
 check that all tables exist) sees the full schema.
 """
 
+import sys
 from logging.config import fileConfig
+from pathlib import Path
 
-from alembic import context
-from sqlalchemy import engine_from_config, pool
+# Ensure the `app` package is importable when alembic is invoked from
+# backend/ (e.g. `alembic upgrade head` in CI, in a pod, or in dev).
+# Plain `alembic` doesn't add cwd to sys.path the way `python -m` does.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.config import get_settings
-from app.db import Base
+from alembic import context  # noqa: E402
+from sqlalchemy import engine_from_config, pool  # noqa: E402
+
+from app.config import get_settings  # noqa: E402
+from app.db import Base  # noqa: E402
 
 # Importing each module's models package registers every table on
 # Base.metadata. Mirrors the pattern in app.main.
-from app.capacity import models as _capacity_models  # noqa: F401
-from app.core.auth import models as _auth_models  # noqa: F401
-from app.core.devices import models as _devices_models  # noqa: F401
-from app.core.panorama import models as _panorama_models  # noqa: F401
+from app.capacity import models as _capacity_models  # noqa: E402,F401
+from app.core.auth import models as _auth_models  # noqa: E402,F401
+from app.core.devices import models as _devices_models  # noqa: E402,F401
+from app.core.panorama import models as _panorama_models  # noqa: E402,F401
 
 
 config = context.config

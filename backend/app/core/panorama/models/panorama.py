@@ -28,15 +28,19 @@ class Panorama(Base):
         Boolean, default=True, server_default=true(), nullable=False
     )
 
-    # Org-wide opt-in: when True, upgrade orchestration may proxy through this
-    # Panorama for its managed devices (instead of going direct). Carry-forward
-    # from upgrader (phase 4a). Per MIGRATION_NOTES §14, the proxy path also
-    # requires per-device `proxy_via_panorama=True` — the two-layer gate is
-    # intentional. Capacity polling has been doing this proxy by default for
-    # any device whose `proxy_via_panorama=True`; this column lets ops disable
-    # it at the Panorama level when needed.
+    # Org-wide opt-OUT: when True (the default), upgrade orchestration may
+    # proxy through this Panorama for its managed devices. When False, all
+    # upgrade traffic for this Panorama's devices goes direct regardless of
+    # the per-device `proxy_via_panorama` flag. Defaulting to True
+    # (proxy-on) matches the operator-side directive captured in CLAUDE.md
+    # ("default to Panorama proxied even for the upgrader function; the
+    # operator has the option to disable") and the analogous behaviour on
+    # the device side (Panorama-imported devices land with
+    # `proxy_via_panorama=True`). The two-layer gate from MIGRATION_NOTES
+    # §14 is preserved structurally — both flags must be True for proxy to
+    # engage — but the default posture is proxy-on at both layers.
     proxy_upgrades: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=false(), nullable=False
+        Boolean, default=True, server_default=true(), nullable=False
     )
 
     created_at: Mapped[datetime] = mapped_column(

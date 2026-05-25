@@ -24,7 +24,7 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import text
 
-from app.core.command_proxy import build_client_with_fallback
+from app.core.command_proxy.builder import build_client_with_fallback
 from app.core.devices.models.device import Device
 from app.core.panorama.models.panorama import Panorama
 

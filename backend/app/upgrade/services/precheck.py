@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.core.command_proxy import build_client_with_fallback
+from app.core.command_proxy.builder import build_client_with_fallback
 from app.core.command_proxy.pan_client import (
     DEFAULT_READINESS_CHECKS,
     PanDeviceClient,

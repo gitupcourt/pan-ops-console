@@ -19,7 +19,8 @@ present).
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -54,6 +55,22 @@ engine = create_engine(
     **_build_engine_kwargs(settings.DATABASE_URL),
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+
+
+# SQLite doesn't enforce foreign-key constraints unless PRAGMA
+# foreign_keys is set per-connection. Without this, ON DELETE CASCADE /
+# SET NULL silently no-op on SQLite dev/test runs — masking real bugs
+# that would later bite under Postgres (which always enforces FKs).
+# The listener fires on every checkout from the pool; harmless if it
+# fires for non-SQLite engines (the isinstance check short-circuits).
+@event.listens_for(Engine, "connect")
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
+    # Only act on SQLite connections — duck-type check via the dbapi
+    # module since SQLAlchemy doesn't pass dialect info to this hook.
+    if type(dbapi_connection).__module__.startswith("sqlite3"):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 class Base(DeclarativeBase):

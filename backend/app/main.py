@@ -23,6 +23,7 @@ from app.capacity import models as _capacity_models  # noqa: F401
 from app.core.auth import models as _auth_models  # noqa: F401
 from app.core.devices import models as _devices_models  # noqa: F401
 from app.core.panorama import models as _panorama_models  # noqa: F401
+from app.upgrade import models as _upgrade_models  # noqa: F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger(__name__)

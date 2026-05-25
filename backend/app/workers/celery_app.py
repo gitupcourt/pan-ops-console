@@ -22,8 +22,42 @@ don't vanish before the UI can read them.
 from __future__ import annotations
 
 from celery import Celery
+from sqlalchemy.orm import configure_mappers
 
 from app.config import get_settings
+
+# Eager-import every module's models package so the SQLAlchemy class
+# registry is fully populated *before* the worker tries to configure
+# any mapper.
+#
+# This matters because Device has `relationship("Panorama", ...)` —
+# resolved by string at mapper-configure time. The worker entry point
+# (`celery -A app.workers.celery_app:celery worker`) doesn't go
+# through `app.main`'s import chain, so without these explicit imports
+# the worker process gets Device loaded (via app.capacity.tasks →
+# poller → device model) but NOT Panorama, and the first task
+# execution dies with:
+#
+#   sqlalchemy.exc.InvalidRequestError: When initializing mapper
+#   Mapper[Device(devices)], expression 'Panorama' failed to locate
+#   a name ('Panorama').
+#
+# This pattern (eager registry population) mirrors `app.main`'s
+# matching block. Adding a new module's models package: list it both
+# here and in app.main.
+#
+# Fix for pan-ops-console#39 (caught at phase-2e cutover).
+from app.capacity import models as _capacity_models  # noqa: E402, F401
+from app.core.auth import models as _auth_models  # noqa: E402, F401
+from app.core.devices import models as _devices_models  # noqa: E402, F401
+from app.core.panorama import models as _panorama_models  # noqa: E402, F401
+from app.upgrade import models as _upgrade_models  # noqa: E402, F401
+
+# Force registry resolution NOW (at worker boot) instead of at first
+# task execution. A missing class — same shape as the bug above —
+# fails the worker pod's liveness probe loudly rather than silently
+# accepting tasks and dying mid-execute.
+configure_mappers()
 
 _settings = get_settings()
 

@@ -32,6 +32,12 @@ COPY --chown=app:app app ./app
 COPY --chown=app:app alembic.ini ./
 COPY --chown=app:app alembic ./alembic
 
+# Operational scripts — invoked as `python -m scripts.<name>` from a Job
+# pod (migrate_sqlite_to_postgres at phase 2e cutover; rotate_fernet for
+# future key rotations). Same docker-compose-bind-mount masking trap as
+# alembic/ above: include explicitly so the cluster pod has them.
+COPY --chown=app:app scripts ./scripts
+
 # /app/data is the SQLite mount point in prod. Pre-create it so the dir
 # exists even if the volume is empty, owned by the runtime user.
 RUN install -d -o app -g app -m 0750 /app/data

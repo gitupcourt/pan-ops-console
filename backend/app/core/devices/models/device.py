@@ -20,7 +20,6 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
-    Enum,
     ForeignKey,
     LargeBinary,
     String,
@@ -30,6 +29,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.db_types import py_enum_column
 from app.core.devices.models.enums import DeviceSource, HARole
 from app.db import Base
 
@@ -51,7 +51,7 @@ class Device(Base):
     current_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     source: Mapped[DeviceSource] = mapped_column(
-        Enum(DeviceSource, name="device_source"),
+        py_enum_column(DeviceSource, name="device_source"),
         default=DeviceSource.DIRECT,
         server_default="direct",
         nullable=False,
@@ -92,7 +92,7 @@ class Device(Base):
         "Device", remote_side="Device.id", lazy="joined", post_update=True
     )
     ha_role: Mapped[HARole] = mapped_column(
-        Enum(HARole, name="ha_role"),
+        py_enum_column(HARole, name="ha_role"),
         default=HARole.UNKNOWN,
         server_default="unknown",
         nullable=False,

@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     CATALOG_PATH: str = "/app/catalog/metrics.yaml"
     CORS_ORIGINS: str = "http://localhost:5173"
 
+    # Redis URL — used as Celery broker + result backend. Format:
+    # redis://[:password@]host:port/db. Default points at the in-cluster
+    # Redis Service name expected to exist post-phase-2d; local dev /
+    # tests don't need Redis (capacity polling stays on APScheduler
+    # until phase 2e wires the Celery beat schedule).
+    REDIS_URL: str = "redis://redis:6379/0"
+
     # Auth / sessions
     SESSION_COOKIE_NAME: str = "pcasession"
     SESSION_LIFETIME_SECONDS: int = 60 * 60 * 12  # 12 hours

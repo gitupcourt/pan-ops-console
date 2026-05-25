@@ -30,6 +30,7 @@ from app.capacity import models as _capacity_models  # noqa: E402,F401
 from app.core.auth import models as _auth_models  # noqa: E402,F401
 from app.core.devices import models as _devices_models  # noqa: E402,F401
 from app.core.panorama import models as _panorama_models  # noqa: E402,F401
+from app.upgrade import models as _upgrade_models  # noqa: E402,F401
 
 
 config = context.config

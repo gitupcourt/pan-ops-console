@@ -90,7 +90,7 @@ jobs:
       packages: write
     uses: gitupcourt/.github/.github/workflows/build-and-bump.yml@main
     with:
-      app_name: pan-capacity-analyzer
+      app_name: pan-ops-console
       images: '[{"name":"backend","context":"backend"},{"name":"frontend","context":"frontend","dockerfile":"frontend/Dockerfile.prod"}]'
-      manifest_dir: manifests/pan-capacity-analyzer
+      manifest_dir: manifests/pan-ops-console
     secrets: inherit

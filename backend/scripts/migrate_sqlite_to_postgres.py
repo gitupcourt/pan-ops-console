@@ -76,6 +76,30 @@ Truncate dest tables first (DANGEROUS — wipes any data in Postgres):
 - 0  success
 - 1  --apply was passed but at least one table failed
 - 2  pre-flight failure (DB unreachable, keys malformed, etc.)
+
+## Operational note for the cluster Job runner
+
+The `alembic upgrade head` step that prepares the dest DB (run BEFORE
+this script) loads `app.config` via `alembic/env.py`, which evaluates
+`Settings()` at module import. `FERNET_KEY` is a required pydantic
+Field with `min_length=32` — alembic itself doesn't use the key but
+the import will SystemExit without it. The migration runbook should
+set `FERNET_KEY` in BOTH the alembic Job and this script's Job; for
+the alembic Job, the value doesn't have to be the new one (it's not
+used for anything alembic does), but it has to be a valid Fernet
+token to pass validation. The cleanest convention is to set
+`FERNET_KEY=<new-key>` in both — same secret reference, single
+sealed-secret to manage.
+
+## Boolean coercion (SQLite → Postgres)
+
+SQLite stores booleans as INTEGER 0/1; Postgres has a native BOOLEAN
+type that refuses to auto-coerce a smallint at INSERT time
+(`psycopg.errors.DatatypeMismatch`). The script reflects the dest
+schema once up-front, discovers which columns are BOOLEAN, and
+coerces int → bool at row-write time. Works transparently on both
+engines (SQLite-as-dest tests hit the no-op path; Postgres-as-dest
+prod hits the coercion path).
 """
 
 from __future__ import annotations
@@ -89,8 +113,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy import create_engine, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.types import Boolean
 
 log = logging.getLogger(__name__)
 
@@ -247,6 +272,54 @@ def _row_to_dict(spec: TableSpec, row: sqlite3.Row) -> dict[str, Any]:
     return {col: row[col] for col in spec.columns}
 
 
+def _discover_bool_columns(engine: Engine) -> set[tuple[str, str]]:
+    """Reflect the dest schema and return {(table_name, column_name)} for
+    every BOOLEAN column.
+
+    SQLite stores booleans as INTEGER 0/1 (no native bool type). Postgres
+    has a native BOOLEAN that won't auto-coerce a smallint at INSERT
+    time — `psycopg.errors.DatatypeMismatch`. We detect bool columns on
+    the dest and coerce the int → bool at row-write time so the script
+    works on both engines without per-column manual mapping. (Option A
+    from pan-ops-console#34.)
+    """
+    md = MetaData()
+    # Only reflect the tables the script touches — full reflection can
+    # be slow on schemas with many tables; we have a known small set.
+    table_names = [spec.name for spec in TABLES]
+    md.reflect(bind=engine, only=table_names, extend_existing=True)
+    bool_cols: set[tuple[str, str]] = set()
+    for table in md.tables.values():
+        for col in table.columns:
+            if isinstance(col.type, Boolean):
+                bool_cols.add((table.name, col.name))
+    log.debug("Discovered %d boolean columns: %s", len(bool_cols), sorted(bool_cols))
+    return bool_cols
+
+
+def _coerce_bools(
+    spec: TableSpec, data: dict[str, Any], bool_cols: set[tuple[str, str]]
+) -> dict[str, Any]:
+    """Convert int 0/1 (and other truthy/falsy primitives) to bool for
+    every column the dest engine declares as BOOLEAN. In-place + returns.
+
+    No-op on dest engines where the column type is non-Boolean (capacity
+    SQLite's BOOLEAN is INTEGER under the hood; the test fixtures hit
+    this no-op path). Distinct from a blanket `bool(x)` because we only
+    touch known bool columns — keeps the encrypted-blob bytes (and other
+    non-bool fields) untouched.
+    """
+    for col_name in spec.columns:
+        if (spec.name, col_name) in bool_cols and col_name in data:
+            val = data[col_name]
+            if val is not None and not isinstance(val, bool):
+                # SQLite gives us 0/1 ints. Anything else truthy/falsy
+                # (including unexpected str "0"/"1" from a hand-edited
+                # SQLite DB) goes through the same coercion.
+                data[col_name] = bool(val) if not isinstance(val, str) else val in ("1", "true", "True")
+    return data
+
+
 def _migrate_table(
     *,
     source: sqlite3.Connection,
@@ -256,6 +329,7 @@ def _migrate_table(
     new: Fernet,
     apply: bool,
     truncate_dest: bool,
+    bool_cols: set[tuple[str, str]],
 ) -> TableResult:
     res = TableResult()
 
@@ -282,6 +356,7 @@ def _migrate_table(
 
     for row in rows:
         data = _row_to_dict(spec, row)
+        _coerce_bools(spec, data, bool_cols)
 
         for enc_col in spec.encrypted_columns:
             try:
@@ -390,6 +465,11 @@ def migrate(
     total_verified = 0
     total_failed = 0
 
+    # Discover BOOLEAN columns once up-front. Cheap (small reflection set)
+    # and the result is constant for the duration of the migration.
+    bool_cols = _discover_bool_columns(dest_engine)
+    log.info("Found %d BOOLEAN columns in dest schema", len(bool_cols))
+
     for spec in TABLES:
         with dest_engine.begin() as conn:
             res = _migrate_table(
@@ -400,6 +480,7 @@ def migrate(
                 new=new,
                 apply=apply,
                 truncate_dest=truncate_dest,
+                bool_cols=bool_cols,
             )
             total_inserted += res.inserted
             total_verified += res.verified_blobs

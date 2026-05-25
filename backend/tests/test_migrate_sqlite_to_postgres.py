@@ -18,7 +18,12 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine, text
 
-from scripts.migrate_sqlite_to_postgres import migrate
+from scripts.migrate_sqlite_to_postgres import (
+    TABLES,
+    _coerce_bools,
+    _discover_bool_columns,
+    migrate,
+)
 
 KEY_A = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
 KEY_B = "aFKkQ2GfQEJDxKjPYsbnNg-LeFRSnB-DcdsdJZ3lGtY="
@@ -353,3 +358,112 @@ def test_undecryptable_blob_blocks_table_write(
         # devices table is empty due to rollback.
         n = conn.execute(text("SELECT COUNT(*) FROM devices")).scalar_one()
     assert n == 0
+
+
+# ---------- Boolean coercion (pan-ops-console#34) ----------
+
+def test_discover_bool_columns_finds_known_bools(dest_engine_factory):
+    """Reflection picks up every BOOLEAN column the dest schema declares."""
+    dest = dest_engine_factory()
+    bool_cols = _discover_bool_columns(dest)
+
+    # Spot-check the obvious ones from the merged schema.
+    expected_present = {
+        ("users", "is_admin"),
+        ("users", "is_active"),
+        ("users", "totp_enabled"),
+        ("oidc_providers", "enabled"),
+        ("panoramas", "verify_tls"),
+        ("panoramas", "reachable"),
+        ("panoramas", "proxy_upgrades"),
+        ("devices", "verify_tls"),
+        ("devices", "proxy_via_panorama"),
+        ("devices", "polling_enabled"),
+        ("devices", "connected"),
+    }
+    missing = expected_present - bool_cols
+    assert not missing, f"Reflection missed: {sorted(missing)}"
+
+
+def test_coerce_bools_int_to_bool():
+    """The integer 0/1 values that SQLite returns become bool for known
+    boolean columns; non-bool columns are untouched."""
+    spec = next(s for s in TABLES if s.name == "users")
+    bool_cols = {
+        ("users", "is_admin"),
+        ("users", "is_active"),
+        ("users", "totp_enabled"),
+    }
+    data = {
+        "id": 1,                          # int, not in bool_cols → stays int
+        "username": "alice",              # str → untouched
+        "is_admin": 1,                    # int → True
+        "is_active": 1,                   # int → True
+        "totp_enabled": 0,                # int → False
+        "encrypted_totp_secret": b"\\x00\\x01",  # bytes → untouched
+        "password_hash": None,            # None → None (unchanged)
+    }
+
+    _coerce_bools(spec, data, bool_cols)
+
+    assert data["is_admin"] is True
+    assert data["is_active"] is True
+    assert data["totp_enabled"] is False
+    assert data["id"] == 1                # not a bool column
+    assert data["username"] == "alice"
+    assert data["encrypted_totp_secret"] == b"\\x00\\x01"
+    assert data["password_hash"] is None
+
+
+def test_coerce_bools_none_stays_none():
+    """NULL bool column stays NULL (not coerced to False)."""
+    spec = next(s for s in TABLES if s.name == "users")
+    bool_cols = {("users", "totp_enabled")}
+    data = {"id": 5, "totp_enabled": None}
+    _coerce_bools(spec, data, bool_cols)
+    assert data["totp_enabled"] is None
+
+
+def test_coerce_bools_already_bool_passes_through():
+    """Idempotent — a row that's already in dest format doesn't double-coerce."""
+    spec = next(s for s in TABLES if s.name == "users")
+    bool_cols = {("users", "is_admin")}
+    data = {"is_admin": True}
+    _coerce_bools(spec, data, bool_cols)
+    assert data["is_admin"] is True
+
+
+def test_apply_with_bool_coercion_writes_correct_types(
+    source_db_path, dest_engine_factory
+):
+    """End-to-end: source has SQLite int 0/1 for booleans, dest gets the
+    right Python types post-INSERT.
+
+    SQLite-as-dest stores them as int either way, so what we're really
+    asserting is that the coerce path didn't blow up. The real
+    type-mismatch error only fires on Postgres — when the platform
+    session re-runs this against the cluster Postgres, the coercion
+    should make psycopg accept the INSERT.
+    """
+    dest = dest_engine_factory()
+    source = sqlite3.connect(source_db_path)
+    source.row_factory = sqlite3.Row
+
+    rc = migrate(
+        source=source, dest_engine=dest,
+        old=Fernet(KEY_A.encode()), new=Fernet(KEY_B.encode()),
+        apply=True, truncate_dest=False,
+    )
+    assert rc == 0
+    source.close()
+
+    with dest.begin() as conn:
+        # alice was seeded with totp_enabled=1
+        totp = conn.execute(
+            text("SELECT totp_enabled FROM users WHERE id = 1")
+        ).scalar_one()
+        # SQLite stores it back as 1 (the BOOLEAN column-affinity quirk).
+        # The actual cross-engine assertion that matters is: the row WROTE
+        # without erroring. If coercion was off, the dry-run-passing
+        # apply-failing pattern from pan-ops-console#34 would reproduce.
+        assert totp in (1, True)

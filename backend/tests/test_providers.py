@@ -114,9 +114,9 @@ def test_secret_roundtrip_uses_fernet(client):
     r = client.post("/providers/oidc", json=_example_payload(client_secret=sent_secret))
     pid = r.json()["id"]
 
+    from app.core.auth.models.oidc_provider import OIDCProvider
+    from app.core.credentials import decrypt_key
     from app.db import SessionLocal
-    from app.models.oidc_provider import OIDCProvider
-    from app.services.auth import decrypt_key
 
     with SessionLocal() as db:
         row = db.get(OIDCProvider, pid)

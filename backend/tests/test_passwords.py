@@ -7,7 +7,7 @@ confirm the wiring + the minimum-length floor.
 
 import pytest
 
-from app.services.passwords import (
+from app.core.auth.services.passwords import (
     PasswordPolicyError,
     check_password_strength,
     hash_password,

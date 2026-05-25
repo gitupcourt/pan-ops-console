@@ -18,7 +18,6 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
-    Enum,
     ForeignKey,
     Integer,
     String,
@@ -27,6 +26,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.db_types import py_enum_column
 from app.db import Base
 from app.upgrade.models.enums import JobState, TaskPhase, WorkflowType
 
@@ -39,7 +39,7 @@ class UpgradeJob(Base):
     target_version: Mapped[str] = mapped_column(String(64), nullable=False)
 
     workflow: Mapped[WorkflowType] = mapped_column(
-        Enum(WorkflowType, name="workflow_type"),
+        py_enum_column(WorkflowType, name="workflow_type"),
         default=WorkflowType.FULL,
         nullable=False,
     )
@@ -95,7 +95,7 @@ class UpgradeJob(Base):
     )
 
     state: Mapped[JobState] = mapped_column(
-        Enum(JobState, name="job_state"), default=JobState.PENDING, nullable=False
+        py_enum_column(JobState, name="job_state"), default=JobState.PENDING, nullable=False
     )
 
     created_by_id: Mapped[int | None] = mapped_column(
@@ -136,7 +136,7 @@ class DeviceUpgradeTask(Base):
     ha_pair_key: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
 
     phase: Mapped[TaskPhase] = mapped_column(
-        Enum(TaskPhase, name="task_phase"),
+        py_enum_column(TaskPhase, name="task_phase"),
         default=TaskPhase.PENDING,
         nullable=False,
     )

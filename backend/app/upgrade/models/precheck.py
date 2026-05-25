@@ -16,7 +16,6 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
-    Enum,
     ForeignKey,
     Integer,
     String,
@@ -24,6 +23,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.db_types import py_enum_column
 from app.db import Base
 from app.upgrade.models.enums import Severity
 
@@ -86,7 +86,7 @@ class PrecheckRun(Base):
 
     # Worst severity across all checks — drives the row badge color.
     overall_severity: Mapped[Severity] = mapped_column(
-        Enum(Severity, name="severity"), nullable=False
+        py_enum_column(Severity, name="severity"), nullable=False
     )
 
     pass_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

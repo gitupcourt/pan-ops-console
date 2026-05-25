@@ -10,7 +10,6 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Enum,
     ForeignKey,
     Integer,
     String,
@@ -18,6 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.db_types import py_enum_column
 from app.db import Base
 # Reuse Severity for per-device staging outcome:
 # SUCCESS-like state = PASS (already-downloaded),
@@ -74,7 +74,7 @@ class DeviceStageRun(Base):
     )
 
     outcome: Mapped[Severity] = mapped_column(
-        Enum(Severity, name="severity"),
+        py_enum_column(Severity, name="severity"),
         nullable=False,
         default=Severity.FAIL,
     )

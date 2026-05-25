@@ -23,9 +23,10 @@ write to object storage and column, eventually drop the JSON column).
 import enum
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, String, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.core.db_types import py_enum_column
 from app.db import Base
 
 
@@ -53,7 +54,7 @@ class Snapshot(Base):
     )
 
     kind: Mapped[SnapshotKind] = mapped_column(
-        Enum(SnapshotKind, name="snapshot_kind"), nullable=False
+        py_enum_column(SnapshotKind, name="snapshot_kind"), nullable=False
     )
 
     taken_at: Mapped[datetime] = mapped_column(

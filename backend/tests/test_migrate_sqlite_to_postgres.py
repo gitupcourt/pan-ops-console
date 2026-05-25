@@ -21,7 +21,9 @@ from sqlalchemy import create_engine, text
 from scripts.migrate_sqlite_to_postgres import (
     TABLES,
     _coerce_bools,
+    _coerce_enums,
     _discover_bool_columns,
+    _discover_enum_columns,
     migrate,
 )
 
@@ -142,14 +144,19 @@ def source_db_path():
         "VALUES (1, 'pano1', '10.0.0.100', ?)",
         (fernet.encrypt(b"pano-key"),),
     )
+    # Explicit `source='DIRECT'` to mirror real prod state: SQLAlchemy
+    # storing the enum NAME (uppercase) under the cross-dialect Enum
+    # type on SQLite. The migration script's enum-coercion path
+    # translates this to the Postgres canonical 'direct' at INSERT time.
+    # See pan-ops-console#36.
     conn.execute(
-        "INSERT INTO devices (id, name, hostname, encrypted_api_key, panorama_id) "
-        "VALUES (1, 'dev1', '10.0.0.1', ?, 1)",
+        "INSERT INTO devices (id, name, hostname, encrypted_api_key, panorama_id, source) "
+        "VALUES (1, 'dev1', '10.0.0.1', ?, 1, 'DIRECT')",
         (fernet.encrypt(b"dev-key"),),
     )
     conn.execute(
-        "INSERT INTO devices (id, name, hostname) "
-        "VALUES (2, 'dev2-proxied', '10.0.0.2')"
+        "INSERT INTO devices (id, name, hostname, source) "
+        "VALUES (2, 'dev2-proxied', '10.0.0.2', 'PANORAMA')"
     )
     conn.execute(
         "INSERT INTO sessions (token_hash, user_id, expires_at) "
@@ -467,3 +474,83 @@ def test_apply_with_bool_coercion_writes_correct_types(
         # without erroring. If coercion was off, the dry-run-passing
         # apply-failing pattern from pan-ops-console#34 would reproduce.
         assert totp in (1, True)
+
+
+# ---------- Enum coercion (pan-ops-console#36) ----------
+
+# Note on what's NOT covered here: there's no test for the reflection
+# path of `_discover_enum_columns` against the dest_engine_factory
+# (SQLite). SQLAlchemy's cross-dialect `Enum` type creates a SQLite
+# column with VARCHAR storage + a CHECK constraint, and reflection on
+# the way back returns the column as plain VARCHAR — the .enums values
+# list is dropped. So calling `_discover_enum_columns(sqlite_dest)`
+# returns {} regardless of what enums the schema declares.
+#
+# On Postgres-as-dest (cluster cutover), reflection returns the native
+# postgresql.ENUM type whose `.enums` is the declared member list,
+# which is what the production fix actually exercises. The unit tests
+# below construct enum_cols dicts explicitly; the end-to-end Postgres
+# verification happens manually on the VM (see PR body for transcript).
+
+
+def test_coerce_enums_name_to_value():
+    """Python enum NAMEs from SQLite (uppercase) → Postgres-accepted
+    values (lowercase, the canonical form)."""
+    spec = next(s for s in TABLES if s.name == "devices")
+    enum_cols = {
+        ("devices", "source"): {
+            "DIRECT": "direct", "PANORAMA": "panorama",
+            "direct": "direct", "panorama": "panorama",
+        },
+    }
+    data = {
+        "id": 1, "name": "fw1", "hostname": "10.0.0.1",
+        "source": "DIRECT",        # SQLite-stored Python name
+    }
+    _coerce_enums(spec, data, enum_cols)
+    assert data["source"] == "direct"
+    assert data["id"] == 1            # non-enum columns untouched
+    assert data["name"] == "fw1"
+
+
+def test_coerce_enums_canonical_passes_through():
+    """Already-canonical value stays canonical. Idempotent re-runs."""
+    spec = next(s for s in TABLES if s.name == "devices")
+    enum_cols = {("devices", "source"): {"direct": "direct", "DIRECT": "direct"}}
+    data = {"source": "direct"}
+    _coerce_enums(spec, data, enum_cols)
+    assert data["source"] == "direct"
+
+
+def test_coerce_enums_none_stays_none():
+    """NULL enum column stays NULL — not coerced to anything."""
+    spec = next(s for s in TABLES if s.name == "devices")
+    enum_cols = {("devices", "source"): {"DIRECT": "direct"}}
+    data = {"source": None}
+    _coerce_enums(spec, data, enum_cols)
+    assert data["source"] is None
+
+
+def test_coerce_enums_unknown_value_raises():
+    """Source value not in the mapping → ValueError (loud failure rather
+    than silent data drop or mutation).
+
+    This is the operator-investigation signal: an enum column has a
+    value Postgres won't accept and the script can't safely guess at.
+    """
+    spec = next(s for s in TABLES if s.name == "devices")
+    enum_cols = {("devices", "source"): {"DIRECT": "direct", "PANORAMA": "panorama"}}
+    data = {"source": "GARBAGE"}
+    with pytest.raises(ValueError, match="unknown enum value"):
+        _coerce_enums(spec, data, enum_cols)
+
+
+def test_coerce_enums_skips_non_enum_columns():
+    """A column that the dest doesn't declare as an enum passes through
+    unchanged even if it looks enum-ish."""
+    spec = next(s for s in TABLES if s.name == "users")
+    enum_cols = {}  # nothing on users is an enum
+    data = {"username": "alice", "email": "alice@example.com"}
+    _coerce_enums(spec, data, enum_cols)
+    assert data["username"] == "alice"
+    assert data["email"] == "alice@example.com"

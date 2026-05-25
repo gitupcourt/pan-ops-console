@@ -100,6 +100,34 @@ schema once up-front, discovers which columns are BOOLEAN, and
 coerces int → bool at row-write time. Works transparently on both
 engines (SQLite-as-dest tests hit the no-op path; Postgres-as-dest
 prod hits the coercion path).
+
+## Enum coercion (SQLite → Postgres)
+
+Same shape, different type. SQLite stores Enum columns as TEXT
+containing the Python enum **name** (e.g. `"DIRECT"`). Postgres has
+a real ENUM type whose declared members are the enum **values**
+(e.g. `"direct"`). Postgres won't auto-translate
+(`psycopg.errors.InvalidTextRepresentation`).
+
+The script reflects the dest schema, finds every column whose type
+exposes `.enums` (the SQLAlchemy reflection signature for ENUM-like
+types — covers Postgres ENUM and the cross-dialect Enum + CHECK),
+and builds a mapping that accepts the canonical value plus its
+upper-case / Title-case variants. Coerces at row-write time alongside
+the bool path.
+
+## Re-running after a partial-migration failure
+
+The script commits per-table, not per-migration. If a failure happens
+mid-run, earlier tables are already in the dest. To re-run cleanly:
+
+    python -m scripts.migrate_sqlite_to_postgres --apply --truncate-dest
+
+The `--truncate-dest` flag TRUNCATEs each table CASCADE-style before
+INSERTing. On Postgres it also RESTART IDENTITY so the post-INSERT
+setval lands cleanly. Use this when the dest is known-disposable
+(empty or just the prior partial migration); never on a dest with
+data you care about.
 """
 
 from __future__ import annotations
@@ -297,6 +325,81 @@ def _discover_bool_columns(engine: Engine) -> set[tuple[str, str]]:
     return bool_cols
 
 
+def _discover_enum_columns(engine: Engine) -> dict[tuple[str, str], dict[str, str]]:
+    """Reflect the dest schema and return per-(table, column) value
+    mappings for every enum-like column.
+
+    Mapping accepts:
+      - The canonical value verbatim (passthrough)
+      - The upper-case form (matches Python enum NAMES that SQLite
+        stores under SQLAlchemy's default Enum-as-TEXT behavior)
+      - The Title-case form (defensive — covers a hand-edited source)
+
+    Returns a dict whose key is (table_name, column_name) and whose
+    value is the input → output string map. (table, column) tuples
+    not in the dict are not enum columns. (Option A from
+    pan-ops-console#36.)
+    """
+    md = MetaData()
+    table_names = [spec.name for spec in TABLES]
+    md.reflect(bind=engine, only=table_names, extend_existing=True)
+    out: dict[tuple[str, str], dict[str, str]] = {}
+    for table in md.tables.values():
+        for col in table.columns:
+            valid = getattr(col.type, "enums", None)
+            if not valid:
+                continue
+            mapping: dict[str, str] = {}
+            for v in valid:
+                if not isinstance(v, str):
+                    continue
+                mapping[v] = v               # canonical passthrough
+                mapping[v.upper()] = v       # Python enum NAME (capacity SQLite stores this)
+                mapping[v.lower()] = v       # lower (no-op if already)
+                mapping[v.title()] = v       # defensive: "Direct" → "direct"
+            out[(table.name, col.name)] = mapping
+    log.debug("Discovered %d enum columns: %s", len(out), sorted(out))
+    return out
+
+
+def _coerce_enums(
+    spec: TableSpec,
+    data: dict[str, Any],
+    enum_cols: dict[tuple[str, str], dict[str, str]],
+) -> dict[str, Any]:
+    """Map SQLite-stored enum names (e.g. ``"DIRECT"``) to Postgres-accepted
+    enum values (e.g. ``"direct"``) for every column the dest declares
+    as an ENUM-like type.
+
+    Raises ValueError if the source value doesn't appear in the
+    discovered mapping — that means a schema-data divergence the
+    operator needs to investigate (e.g. a hand-edited row, or a Python
+    enum that no longer includes a previously-stored member). Better
+    to fail loud than to silently DROP / mutate rows.
+
+    None passthrough. Already-canonical values passthrough. Idempotent.
+    """
+    for col_name in spec.columns:
+        key = (spec.name, col_name)
+        if key not in enum_cols:
+            continue
+        if col_name not in data:
+            continue
+        val = data[col_name]
+        if val is None:
+            continue
+        mapping = enum_cols[key]
+        if val in mapping:
+            data[col_name] = mapping[val]
+            continue
+        # Not a string we know how to translate — fail loud.
+        raise ValueError(
+            f"{spec.name}.{col_name}: unknown enum value {val!r} "
+            f"(valid: {sorted(set(mapping.values()))})"
+        )
+    return data
+
+
 def _coerce_bools(
     spec: TableSpec, data: dict[str, Any], bool_cols: set[tuple[str, str]]
 ) -> dict[str, Any]:
@@ -330,6 +433,7 @@ def _migrate_table(
     apply: bool,
     truncate_dest: bool,
     bool_cols: set[tuple[str, str]],
+    enum_cols: dict[tuple[str, str], dict[str, str]],
 ) -> TableResult:
     res = TableResult()
 
@@ -357,6 +461,7 @@ def _migrate_table(
     for row in rows:
         data = _row_to_dict(spec, row)
         _coerce_bools(spec, data, bool_cols)
+        _coerce_enums(spec, data, enum_cols)
 
         for enc_col in spec.encrypted_columns:
             try:
@@ -465,10 +570,14 @@ def migrate(
     total_verified = 0
     total_failed = 0
 
-    # Discover BOOLEAN columns once up-front. Cheap (small reflection set)
-    # and the result is constant for the duration of the migration.
+    # Discover BOOLEAN + ENUM columns once up-front. Cheap (small reflection
+    # set) and the result is constant for the duration of the migration.
     bool_cols = _discover_bool_columns(dest_engine)
-    log.info("Found %d BOOLEAN columns in dest schema", len(bool_cols))
+    enum_cols = _discover_enum_columns(dest_engine)
+    log.info(
+        "Found %d BOOLEAN columns and %d enum columns in dest schema",
+        len(bool_cols), len(enum_cols),
+    )
 
     for spec in TABLES:
         with dest_engine.begin() as conn:
@@ -481,6 +590,7 @@ def migrate(
                 apply=apply,
                 truncate_dest=truncate_dest,
                 bool_cols=bool_cols,
+                enum_cols=enum_cols,
             )
             total_inserted += res.inserted
             total_verified += res.verified_blobs

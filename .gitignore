@@ -1,0 +1,74 @@
+# Environments
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
+frontend/*.tsbuildinfo
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Docker / runtime
+postgres-data/
+redis-data/
+images-data/
+*.sqlite
+*.sqlite3
+*.db
+
+# Secrets / generated
+secrets/
+*.pem
+*.key
+*.crt
+fernet.key
+
+# Alembic local
+backend/alembic/versions/__pycache__/
+
+# Misc
+.cache/
+*.bak
+.commit-msg.tmp
+.tmp_*.sh
+.tmp_*.py
+
+# Celery beat persistent schedule state
+celerybeat-schedule
+celerybeat-schedule.*
+
+# Local-only session brief (not for public repo)
+CLAUDE.md

@@ -83,9 +83,23 @@ def sync_panorama(
                 serial=m.serial,
                 source=DeviceSource.PANORAMA,
                 panorama_id=pano.id,
+                # Panorama-imported devices default to proxying through the
+                # Panorama. The whole point of importing via Panorama (vs.
+                # adding direct) is so the operator doesn't have to mint and
+                # paste a key per device — capacity polling and upgrade
+                # orchestration both reach the device through Panorama's
+                # `target=<serial>` API. Operator can flip to direct
+                # per-device via PATCH if they want to (e.g. for a device
+                # they've decided to manage out-of-band from Panorama).
+                proxy_via_panorama=True,
             )
             db.add(device)
         else:
+            # Existing row — operator may have deliberately set
+            # proxy_via_panorama=False (e.g. to test direct access). Don't
+            # clobber that on re-sync. Only refresh source + panorama_id
+            # in case the device was previously direct-added with the same
+            # serial and is now showing up under Panorama management.
             if m.hostname:
                 device.hostname = m.hostname
             device.source = DeviceSource.PANORAMA

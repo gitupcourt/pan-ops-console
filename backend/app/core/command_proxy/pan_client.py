@@ -1,41 +1,194 @@
-"""PAN-OS device client — capacity-analyzer flavor.
+"""Direct-to-device PAN-OS client wrapper.
 
-Strictly read-only. Two construction paths:
+Built on top of pan-os-python (Firewall / Panorama) and pan-os-upgrade-assurance
+(FirewallProxy + CheckFirewall). Two construction paths:
 
-* `PanDeviceClient.direct(host, api_key, ...)` — talk straight to the firewall.
-* `PanDeviceClient.via_panorama(panorama_host, panorama_api_key, target_serial, ...)`
-  — route ops through Panorama using its target-serial mechanism.
+* `PanDeviceClient.direct(...)`  — talk straight to the firewall's mgmt IP.
+* `PanDeviceClient.via_panorama(...)` — talk to Panorama and ride its
+  target-serial mechanism so the firewall's mgmt plane doesn't need to be
+  reachable from us. Necessary for cloud devices and any device behind NAT.
 
-The capacity poller only needs `op_xml()` (run an arbitrary XML op command and
-get the parsed response) — everything else in the metric catalog is built on
-top of that.
+Both paths produce a working FirewallProxy that:
+- Capacity polling uses via `op_xml(cmd)` for arbitrary XML op commands
+  from the metric catalog.
+- The upgrade module (incoming phase 4c-services) uses via the higher-
+  level methods (run_readiness_checks, take_snapshot, install_software,
+  suspend_ha, ...).
+
+Credential parameter shape: this version was lifted from pan-fw-upgrader
+at phase 4c-services-pan-client and adapted to the merged app's inline
+`encrypted_api_key` storage pattern — factories accept an `api_key`
+string directly, not a `ResolvedCredential` dataclass. The credentials-
+table-vs-inline reconciliation question stays deferred (see CLAUDE.md
+phase-4a design contract).
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
 from panos.errors import PanDeviceError
 from panos.firewall import Firewall as PanosFirewall
 from panos.panorama import Panorama as PanosPanorama
+from panos_upgrade_assurance.check_firewall import CheckFirewall
+from panos_upgrade_assurance.firewall_proxy import FirewallProxy
 
 log = logging.getLogger(__name__)
 
 
-class PanDeviceClient:
-    """Read-only operations against a single firewall — direct or Panorama-proxied."""
+# All readiness check names supported by panos_upgrade_assurance.CheckFirewall.
+ALL_READINESS_CHECKS: list[str] = [
+    "active_support",
+    "arp_entry_exist",
+    "candidate_config",
+    "certificates_requirements",
+    "config_locks",
+    "content_version",
+    "dp_cpu_utilization",
+    "dynamic_updates",
+    "expired_licenses",
+    "free_disk_space",
+    "global_jumbo_frame",
+    "ha",
+    "ip_sec_tunnel_status",
+    "jobs",
+    "mp_cpu_utilization",
+    "mp_mem_utilization",
+    "ntp_sync",
+    "panorama",
+    "planes_clock_sync",
+    "session_exist",
+    "environmentals",
+]
 
-    def __init__(self, device: PanosFirewall):
-        self._device = device
+DEFAULT_READINESS_CHECKS: list[str] = [
+    "ha",
+    "panorama",
+    "candidate_config",
+    "free_disk_space",
+    "expired_licenses",
+    "ntp_sync",
+    "content_version",
+    "dynamic_updates",
+    "jobs",
+]
+
+
+@dataclass
+class SystemInfo:
+    """Fields we want for refreshing a Device row from a probe."""
+
+    hostname: str | None
+    serial: str | None
+    model: str | None
+    sw_version: str | None
+    uptime: str | None
+    app_version: str | None
+    threat_version: str | None
+    av_version: str | None
+    wildfire_version: str | None
+    url_filtering_version: str | None
+    gp_client_version: str | None
+    ha_state: str | None
+    ha_sync_state: str | None
+    ha_peer_serial: str | None
+
+
+def _text(el: ET.Element | None, path: str) -> str | None:
+    if el is None:
+        return None
+    found = el.find(path)
+    return found.text.strip() if found is not None and found.text else None
+
+
+def _friendly_check_error(exc: BaseException) -> str:
+    """Turn raw pan-os-python / urllib exceptions into something operators can act on.
+
+    The library raises a mix of `PanDeviceError`, `URLError`, and bare
+    `OSError` depending on where the failure happens. The default repr is
+    something like "URLError: reason: [Errno 111] Connection refused" —
+    technically correct but the operator has no idea whether to look at
+    DNS, firewall, mgmt-profile, or credentials. We map the common shapes
+    to actionable hints.
+    """
+    msg = str(exc)
+    if "Connection refused" in msg or "[Errno 111]" in msg:
+        return (
+            "Cannot reach device on TCP/443 (connection refused). "
+            "Check that HTTPS management is enabled on the firewall's "
+            "management interface profile and that the worker container "
+            "has a network path to the mgmt IP. "
+            f"Original error: {msg}"
+        )
+    if "timed out" in msg.lower() or "timeout" in msg.lower():
+        return (
+            "Timed out connecting to the device. The mgmt IP may be wrong, "
+            "or a firewall/NAT is dropping packets between the worker and "
+            f"the device. Original error: {msg}"
+        )
+    if "Name or service not known" in msg or "nodename nor servname" in msg:
+        return (
+            "DNS lookup failed for the device hostname. Use the management "
+            f"IP directly, or fix DNS resolution from the worker. Original error: {msg}"
+        )
+    if "401" in msg or "Invalid credential" in msg or "unauthorized" in msg.lower():
+        return (
+            "Authentication rejected by the device. Verify the credential "
+            "(username/password or API key) and that the user has XML API "
+            f"access. Original error: {msg}"
+        )
+    # Distinguish OUR TLS handshake to the firewall from the firewall's
+    # OWN outbound TLS (e.g. it trying to reach updates.paloaltonetworks.com
+    # for the content-version check). The former we can fix with
+    # verify_tls=false; the latter we cannot, and saying so misleads the
+    # operator into changing the wrong setting.
+    low = msg.lower()
+    is_our_handshake = (
+        "certificate verify failed" in low
+        or "self-signed" in low
+        or "self signed" in low
+        or "hostname mismatch" in low
+        or "ssl handshake" in low
+    )
+    is_firewall_outbound = (
+        "failed to check" in low
+        or "upgrade info" in low
+        or "update server" in low
+    )
+    if is_our_handshake and not is_firewall_outbound:
+        return (
+            "TLS handshake to the firewall failed. If the firewall uses a "
+            "self-signed cert, set verify_tls=false on the device. "
+            f"Original error: {msg}"
+        )
+    if is_firewall_outbound:
+        return (
+            "A library check could not reach an external service from the "
+            "firewall (typically updates.paloaltonetworks.com). This is the "
+            "firewall's own outbound connectivity, not the app's TLS to the "
+            "firewall — verify_tls won't help here. Check the device's "
+            "Update Server / Service Route / DNS settings. "
+            f"Original error: {msg}"
+        )
+    return f"Readiness checks failed: {msg}"
+
+
+class PanDeviceClient:
+    """Operations against a single firewall — direct or Panorama-proxied."""
+
+    def __init__(self, proxy: FirewallProxy):
+        self._proxy = proxy
 
     # ---------- factories ----------
 
     @classmethod
     def direct(cls, host: str, api_key: str, *, verify_tls: bool = True) -> "PanDeviceClient":
-        fw = PanosFirewall(host, api_key=api_key)
-        fw.verify_ssl = verify_tls
-        return cls(fw)
+        """Talk straight to the device's mgmt IP/hostname using its API key."""
+        proxy = FirewallProxy(hostname=host, api_key=api_key)
+        proxy.verify_ssl = verify_tls
+        return cls(proxy)
 
     @classmethod
     def via_panorama(
@@ -46,38 +199,410 @@ class PanDeviceClient:
         *,
         verify_tls: bool = True,
     ) -> "PanDeviceClient":
+        """Talk to the device by routing op() calls through Panorama (target=<serial>).
+
+        Build a Panorama with the API key, attach a Firewall(serial=...) child so
+        its op() calls flow through Panorama, then wrap that Firewall in a
+        FirewallProxy so pan-os-upgrade-assurance can use it.
+        """
         pano = PanosPanorama(panorama_host, api_key=panorama_api_key)
         pano.verify_ssl = verify_tls
+
         fw = PanosFirewall(serial=target_serial)
         pano.add(fw)
-        return cls(fw)
+        proxy = FirewallProxy(firewall=fw)
+        return cls(proxy)
 
-    # ---------- the one operation the poller actually needs ----------
+    # ---------- low-level op (capacity polling uses this) ----------
 
     def op_xml(self, xml_cmd: str) -> ET.Element:
-        """Run an arbitrary XML op command and return the parsed response."""
+        """Run an arbitrary XML op command and return the parsed response.
+
+        Capacity polling needs this for every metric in the catalog (each
+        metric is a `(current, max)` pair of XML op commands). Higher-level
+        callers (upgrade orchestrator, precheck) use the typed methods
+        below instead — `op_xml` is the escape hatch for arbitrary commands
+        that don't have a typed wrapper.
+        """
         try:
-            return self._device.op(xml_cmd, cmd_xml=False)
+            return self._proxy.op(xml_cmd, cmd_xml=False)
         except PanDeviceError as exc:
             raise ConnectionError(f"op() failed for cmd {xml_cmd!r}: {exc}") from exc
 
-    def get_system_info(self) -> dict:
-        resp = self.op_xml("<show><system><info></info></system></show>")
-        info = resp.find(".//system")
-        if info is None:
-            return {}
+    # ---------- read-only introspection ----------
 
-        def _t(path: str) -> str | None:
-            el = info.find(path)
-            return el.text.strip() if el is not None and el.text else None
+    def get_system_info(self) -> SystemInfo:
+        """One round-trip to populate everything our DB cares about."""
+        try:
+            sys_resp = self._proxy.op("<show><system><info></info></system></show>", cmd_xml=False)
+            ha_resp = self._proxy.op(
+                "<show><high-availability><state></state></high-availability></show>", cmd_xml=False
+            )
+        except PanDeviceError as exc:
+            raise ConnectionError(f"Device op() failed: {exc}") from exc
 
+        info = sys_resp.find(".//system")
+        ha_state = _text(ha_resp, ".//local-info/state") or _text(ha_resp, ".//state")
+        ha_sync = _text(ha_resp, ".//running-sync") or _text(ha_resp, ".//local-info/state-sync")
+        ha_peer = _text(ha_resp, ".//peer-info/serial-num") or _text(ha_resp, ".//peer/serial")
+        if ha_state in (None, "", "disabled"):
+            ha_state = None
+
+        return SystemInfo(
+            hostname=_text(info, "hostname"),
+            serial=_text(info, "serial"),
+            model=_text(info, "model"),
+            sw_version=_text(info, "sw-version"),
+            uptime=_text(info, "uptime"),
+            app_version=_text(info, "app-version"),
+            threat_version=_text(info, "threat-version"),
+            av_version=_text(info, "av-version"),
+            wildfire_version=_text(info, "wildfire-version"),
+            url_filtering_version=_text(info, "url-filtering-version"),
+            gp_client_version=_text(info, "global-protect-client-package-version"),
+            ha_state=ha_state,
+            ha_sync_state=ha_sync,
+            ha_peer_serial=ha_peer,
+        )
+
+    def get_licenses(self) -> dict | None:
+        """Return `request license info` as a JSON-friendly dict (best effort)."""
+        try:
+            resp = self._proxy.op("<request><license><info></info></license></request>", cmd_xml=False)
+        except PanDeviceError as exc:
+            log.warning("get_licenses failed: %s", exc)
+            return None
+        # Convert the XML subtree to a dict keyed by license name where possible.
+        licenses: dict = {}
+        for entry in resp.findall(".//licenses/entry"):
+            name = _text(entry, "feature") or _text(entry, "name") or ""
+            if not name:
+                continue
+            licenses[name] = {
+                "description": _text(entry, "description"),
+                "serial": _text(entry, "serial"),
+                "issued": _text(entry, "issued"),
+                "expires": _text(entry, "expires"),
+                "expired": (_text(entry, "expired") or "").lower() == "yes",
+                "auth_code": _text(entry, "authcode"),
+            }
+        return licenses or None
+
+    # ---------- pre/post checks via pan-os-upgrade-assurance ----------
+
+    def run_readiness_checks(self, checks: list[str] | None = None) -> dict:
+        names = list(checks or DEFAULT_READINESS_CHECKS)
+        try:
+            results = CheckFirewall(self._proxy).run_readiness_checks(checks_configuration=names)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            # ---- Cloud-managed firewall (Strata Cloud Manager / SCM) ----
+            # `show panorama-status` returns a different shape on SCM-managed
+            # firewalls and pan-os-upgrade-assurance raises
+            # `PanoramaConfigurationMissingException` with this exact wording.
+            # That single failure currently kills the entire bulk run.
+            #
+            # Fix: drop the panorama check and re-run. We synthesize a
+            # passing "not applicable" result for `panorama` afterwards so
+            # the classifier produces a clean badge instead of a missing one.
+            # Two known cases where a single check raising kills the whole
+            # bulk run. In both we drop the offending check, retry, and
+            # synthesize a stand-in result so the classifier produces a clean
+            # row instead of a missing one.
+            drop: str | None = None
+            synth: dict | None = None
+
+            if "Cloud management is enabled" in msg and "panorama" in names:
+                # SCM-managed firewall — see prior commit for the back-story.
+                drop = "panorama"
+                synth = {
+                    "state": True,
+                    "reason": "Cloud-managed firewall (Strata Cloud Manager) — Panorama check not applicable",
+                }
+            elif (
+                "Failed to check Content" in msg
+                or "content upgrade info" in msg
+            ) and "content_version" in names:
+                # The library's content_version check asks the firewall to
+                # phone home to updates.paloaltonetworks.com. When the
+                # firewall has no internet egress (lab, air-gapped, broken
+                # update profile), the library re-raises the SSL/connect
+                # failure and the whole run dies. The check is genuinely
+                # impossible without egress; treat as a warning, not a
+                # blocker.
+                drop = "content_version"
+                synth = {
+                    "state": False,
+                    "reason": (
+                        "Firewall could not reach updates.paloaltonetworks.com "
+                        "to compare content version — check the device's "
+                        "Update Server reachability / Service Route / DNS. "
+                        f"Underlying error: {msg[:200]}"
+                    ),
+                }
+
+            if drop is not None and synth is not None:
+                names = [n for n in names if n != drop]
+                try:
+                    results = CheckFirewall(self._proxy).run_readiness_checks(checks_configuration=names)
+                except Exception as exc2:  # noqa: BLE001
+                    raise ConnectionError(_friendly_check_error(exc2)) from exc2
+                results[drop] = synth
+            else:
+                raise ConnectionError(_friendly_check_error(exc)) from exc
+
+        normalized: dict[str, dict] = {}
+        for name, res in results.items():
+            if isinstance(res, dict):
+                normalized[name] = {
+                    "state": bool(res.get("state")),
+                    "reason": str(res.get("reason", "")),
+                }
+            else:
+                state = getattr(res, "state", None)
+                reason = getattr(res, "reason", "") or ""
+                state_bool = (
+                    bool(state)
+                    if isinstance(state, bool)
+                    else str(state).lower().endswith("success")
+                )
+                normalized[name] = {"state": state_bool, "reason": str(reason)}
+        return normalized
+
+    def take_snapshot(self, snapshots: list[str] | None = None) -> dict:
+        return CheckFirewall(self._proxy).run_snapshots(
+            snapshots_config=list(snapshots) if snapshots else None
+        )
+
+    # ---------- software (download / staging) ----------
+
+    def list_software(self) -> list[dict]:
+        """`request system software info` — return all known versions.
+
+        Each entry: {version, downloaded(bool), current(bool), latest(bool),
+                     uploaded(bool), filename, released_on, size_kb}
+        """
+        try:
+            self._proxy.op("<request><system><software><check></check></software></system></request>", cmd_xml=False)
+        except PanDeviceError:
+            # `check` reaches out to updates.paloaltonetworks.com; ok to ignore failure here,
+            # the next call will still return whatever the device knows about.
+            pass
+        try:
+            resp = self._proxy.op("<request><system><software><info></info></software></system></request>", cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"software info failed: {exc}") from exc
+
+        out: list[dict] = []
+        for entry in resp.findall(".//sw-updates/versions/entry") or resp.findall(".//entry"):
+            out.append({
+                "version": _text(entry, "version"),
+                "downloaded": (_text(entry, "downloaded") or "").lower() == "yes",
+                "current": (_text(entry, "current") or "").lower() == "yes",
+                "latest": (_text(entry, "latest") or "").lower() == "yes",
+                "uploaded": (_text(entry, "uploaded") or "").lower() == "yes",
+                "filename": _text(entry, "filename"),
+                "released_on": _text(entry, "released-on"),
+                "size_kb": _text(entry, "size-kb") or _text(entry, "size"),
+            })
+        return out
+
+    def is_version_downloaded(self, version: str) -> bool:
+        for entry in self.list_software():
+            if entry["version"] == version and (entry["downloaded"] or entry["current"]):
+                return True
+        return False
+
+    def request_software_download(self, version: str) -> str:
+        """Kick off `request system software download version X.Y.Z`. Returns the job id."""
+        cmd = f"<request><system><software><download><version>{version}</version></download></software></system></request>"
+        try:
+            resp = self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"software download request failed: {exc}") from exc
+        return _text(resp, ".//job") or ""
+
+    def get_job_status(self, job_id: str) -> dict:
+        """Poll a software-download (or other) job by id."""
+        cmd = f"<show><jobs><id>{job_id}</id></jobs></show>"
+        try:
+            resp = self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"job status failed: {exc}") from exc
+        job = resp.find(".//job")
+        if job is None:
+            return {"status": "unknown", "progress": "0", "result": "unknown", "details": ""}
+        # Multiple <line> elements under <details> — keep them all so the user
+        # sees the whole story when something goes wrong.
+        detail_lines = [
+            (line.text or "").strip() for line in job.findall("details/line") if line.text
+        ]
         return {
-            "hostname": _t("hostname"),
-            "serial": _t("serial"),
-            "model": _t("model"),
-            "sw_version": _t("sw-version"),
-            "uptime": _t("uptime"),
+            "status": _text(job, "status") or "unknown",     # "ACT", "FIN", "PEND"
+            "progress": _text(job, "progress") or "0",
+            "result": _text(job, "result") or "unknown",     # "OK" / "FAIL"
+            "details": "\n".join(detail_lines),
         }
+
+    def import_software_image(self, local_path: str) -> None:
+        # TODO: SCP-style import for uploaded images
+        raise NotImplementedError
+
+    # ---------- disk space self-help ----------
+
+    def get_disk_space(self) -> list[dict]:
+        """Parse `show system disk-space` into structured rows.
+
+        PAN-OS returns the output of unix `df -h` inside <result>, headers
+        included. We parse it back into a list of dicts so the UI doesn't
+        have to render fixed-width text. Returns:
+          [{"filesystem", "size", "used", "avail", "use_pct", "mounted_on"}, ...]
+
+        Empty list on parse failure — caller is responsible for treating
+        that as "we couldn't tell, don't act on it."
+        """
+        try:
+            resp = self._proxy.op(
+                "<show><system><disk-space></disk-space></system></show>",
+                cmd_xml=False,
+            )
+        except PanDeviceError as exc:
+            raise ConnectionError(f"disk-space query failed: {exc}") from exc
+        text = (resp.find(".//result").text if resp.find(".//result") is not None else None) or ""
+        rows: list[dict] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("filesystem"):
+                continue
+            # df output: Filesystem Size Used Avail Use% Mounted-on
+            parts = line.split()
+            if len(parts) < 6:
+                continue
+            rows.append({
+                "filesystem": parts[0],
+                "size": parts[1],
+                "used": parts[2],
+                "avail": parts[3],
+                "use_pct": parts[4].rstrip("%"),
+                "mounted_on": " ".join(parts[5:]),
+            })
+        return rows
+
+    def delete_software_image(self, version: str) -> None:
+        """`request system software delete version X.Y.Z`.
+
+        Frees disk by removing a previously-downloaded image. Refuses on the
+        device side if you try to delete the running version, so this is
+        safe to call without local guarding (we guard anyway in the caller).
+        """
+        cmd = (
+            f"<request><system><software><delete><version>{version}</version>"
+            f"</delete></software></system></request>"
+        )
+        try:
+            self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"software delete failed: {exc}") from exc
+
+    def request_software_install(self, version: str) -> str:
+        """`request system software install version X.Y.Z` — returns the job id.
+
+        The device installs and reboots; this command itself returns quickly with
+        a job we can poll. After job completion the device is in the middle of
+        rebooting, so subsequent ops will fail until wait_for_ready() succeeds.
+        """
+        cmd = (
+            f"<request><system><software><install><version>{version}</version>"
+            f"</install></software></system></request>"
+        )
+        try:
+            resp = self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"software install request failed: {exc}") from exc
+        return _text(resp, ".//job") or ""
+
+    def suspend_ha(self) -> None:
+        """Take this HA member out of normal HA so it can be upgraded alone."""
+        cmd = "<request><high-availability><state><suspend></suspend></state></high-availability></request>"
+        try:
+            self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"HA suspend failed: {exc}") from exc
+
+    def resume_ha(self) -> None:
+        """Bring this HA member back to functional state after an upgrade."""
+        cmd = "<request><high-availability><state><functional></functional></state></high-availability></request>"
+        try:
+            self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            raise ConnectionError(f"HA resume failed: {exc}") from exc
+
+    def trigger_failover(self) -> None:
+        """Run on the ACTIVE member to hand off to the peer.
+
+        PAN-OS pattern: suspend the active member; the peer takes over.
+        NOTE: callers must verify peer health BEFORE calling this — suspending
+        the active without a healthy peer is an outage.
+        """
+        self.suspend_ha()
+
+    def restart_system(self) -> None:
+        """`request restart system` — reboots the device.
+
+        `request system software install` does not reboot on its own; install
+        the new version, then call this. The op typically returns OK
+        immediately and the device starts rebooting; use wait_for_ready() to
+        poll until the mgmt plane is back.
+        """
+        cmd = "<request><restart><system></system></restart></request>"
+        try:
+            self._proxy.op(cmd, cmd_xml=False)
+        except PanDeviceError as exc:
+            # Some PAN-OS versions terminate the API session mid-restart and
+            # raise here even though the reboot is in progress. Treat as soft;
+            # the caller will wait_for_ready and find out the truth.
+            log.warning("restart_system op raised (often expected at reboot): %s", exc)
+
+    def wait_for_ready(
+        self,
+        timeout_s: int = 1800,
+        poll_interval_s: int = 30,
+        consecutive_oks: int = 3,
+    ) -> None:
+        """Poll until the device's mgmt plane is responsive again post-reboot.
+
+        Requires `consecutive_oks` successful probes in a row (with a poll
+        interval between each) before declaring the device ready — guards
+        against the common boot-time pattern where the API briefly responds
+        and then goes back down as other subsystems initialize. Without
+        this, downstream HA control ops fail with Connection-refused even
+        though wait_for_ready "succeeded."
+
+        Raises TimeoutError if it doesn't come back in `timeout_s`.
+        """
+        import time as _t
+
+        deadline = _t.monotonic() + timeout_s
+        last_exc: Exception | None = None
+        ok_streak = 0
+        while _t.monotonic() < deadline:
+            try:
+                self.get_system_info()
+                ok_streak += 1
+                if ok_streak >= consecutive_oks:
+                    return
+                # Got an OK but haven't met the threshold — wait then probe again.
+                _t.sleep(poll_interval_s)
+            except Exception as exc:  # noqa: BLE001
+                # Any failure resets the streak — the device must be
+                # consistently up, not flapping.
+                ok_streak = 0
+                last_exc = exc
+                _t.sleep(poll_interval_s)
+        raise TimeoutError(
+            f"Device did not stay up (need {consecutive_oks} consecutive successes) "
+            f"in {timeout_s}s; last error: {last_exc}"
+        )
 
 
 def keygen(hostname: str, username: str, password: str, *, verify_tls: bool = True) -> str:

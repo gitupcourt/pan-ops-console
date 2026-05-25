@@ -21,7 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --chown=app:app requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Application source.
 COPY --chown=app:app app ./app
+
+# Alembic migration scripts + config. Required at runtime: lifespan's
+# `alembic upgrade head` needs both alembic.ini (locates the scripts dir)
+# and the alembic/ directory (env.py + versions/). Local docker-compose
+# masks this because it bind-mounts ./backend over /app, but the cluster
+# pod only has what's baked in.
+COPY --chown=app:app alembic.ini ./
+COPY --chown=app:app alembic ./alembic
 
 # /app/data is the SQLite mount point in prod. Pre-create it so the dir
 # exists even if the volume is empty, owned by the runtime user.

@@ -26,6 +26,15 @@ class Panorama(Base):
 
     verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Org-wide opt-in: when True, upgrade orchestration may proxy through this
+    # Panorama for its managed devices (instead of going direct). Carry-forward
+    # from upgrader (phase 4a). Per MIGRATION_NOTES §14, the proxy path also
+    # requires per-device `proxy_via_panorama=True` — the two-layer gate is
+    # intentional. Capacity polling has been doing this proxy by default for
+    # any device whose `proxy_via_panorama=True`; this column lets ops disable
+    # it at the Panorama level when needed.
+    proxy_upgrades: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

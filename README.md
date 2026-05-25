@@ -35,4 +35,27 @@ cp .env.example .env
 docker compose up --build
 ```
 
+## Container security
+
+Both images run as a non-root user (UID `10001`) and the frontend uses `nginxinc/nginx-unprivileged` (listens on `:8080`, not `:80`). This matches Kubernetes PodSecurityStandards `restricted` and is generally considered best practice.
+
+**For the supplied `docker-compose.yml` you don't need to do anything special** — it uses named Docker volumes for state (`capacity-data`, `frontend-node-modules`) so no host bind-mount UID dance is needed.
+
+**If you write your own `docker run` or `docker-compose.yml` and bind-mount a host directory** for `/app/data` (where the SQLite database lives), make sure the host directory is writable by UID 10001:
+
+```bash
+mkdir -p ./data
+sudo chown 10001:10001 ./data
+```
+
+Otherwise the backend container will fail to create or write the database file on startup.
+
+**Ports inside the containers:**
+
+| Component | Port |
+|---|---|
+| Backend API | `8000` |
+| Frontend (prod nginx) | `8080` |
+| Frontend (dev Vite) | `5173` |
+
 See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for Kubernetes, from-source, and configuration details, and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for how the pieces fit together.

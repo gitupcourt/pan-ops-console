@@ -1,0 +1,68 @@
+# Production frontend image.
+#
+# Two stages:
+#   1. node:20-alpine builds the Vite bundle. VITE_API_BASE_URL is set to
+#      empty string so the bundle uses RELATIVE API paths — in the cluster
+#      both /api/* and /* are served from the same hostname
+#      (upgrader.apps.example.com) via separate Ingress paths that
+#      route to the backend Service vs. this nginx Service.
+#   2. nginxinc/nginx-unprivileged:1.27-alpine serves the static assets.
+#      Listens on :8080 (not :80) so no CAP_NET_BIND_SERVICE is needed
+#      and the image satisfies PodSecurityStandards `restricted`.
+#
+# Mirrors the pan-capacity-analyzer pattern intentionally — same shape
+# across all homelab apps keeps the platform-session work uniform.
+
+# ---- Build stage ----
+FROM node:20-alpine AS build
+WORKDIR /app
+
+# Install deps first for layer caching — package.json + lockfile rarely
+# change relative to source files.
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+COPY . .
+
+# Empty base URL => all `api("/api/...")` calls go to the same origin
+# the bundle was loaded from. The cluster Ingress handles routing.
+ARG VITE_API_BASE_URL=""
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+RUN npm run build
+
+# ---- Runtime stage ----
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+USER root
+RUN rm /etc/nginx/conf.d/default.conf
+COPY <<'NGINX' /etc/nginx/conf.d/app.conf
+server {
+  listen 8080;
+  server_name _;
+  root /usr/share/nginx/html;
+  index index.html;
+
+  # Cache static assets aggressively — Vite outputs content-hashed names.
+  location ~* \.(?:js|css|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|ico)$ {
+    expires 7d;
+    add_header Cache-Control "public, max-age=604800, immutable";
+    try_files $uri =404;
+  }
+
+  # SPA fallback: any unmatched path renders the React app's index.html.
+  # React Router takes over from there.
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+
+  # k8s readiness probe target.
+  location /healthz {
+    return 200 "ok";
+    add_header Content-Type text/plain;
+  }
+}
+NGINX
+
+COPY --from=build /app/dist /usr/share/nginx/html
+# Switch back to nginx user (UID 101) — the image's default
+USER 101
+EXPOSE 8080

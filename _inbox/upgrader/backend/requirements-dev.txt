@@ -1,0 +1,5 @@
+# Test-only dependencies. Kept separate so the production image stays slim.
+# Install in the running backend container with:
+#   docker compose exec backend pip install -r requirements-dev.txt
+pytest==8.3.3
+pytest-asyncio==0.24.0

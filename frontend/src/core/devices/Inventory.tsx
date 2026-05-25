@@ -8,8 +8,8 @@ import {
   DeviceInput,
   Panorama,
   PanoramaInput,
-} from "../api";
-import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../components/ui";
+} from "../../api";
+import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../ui/ui";
 
 export default function Inventory() {
   return (

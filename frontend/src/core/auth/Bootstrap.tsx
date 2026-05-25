@@ -1,8 +1,8 @@
 import { FormEvent, useState } from "react";
 
-import { ApiError } from "../api";
-import { useAuth } from "../auth";
-import { Button, Field, Input } from "../components/ui";
+import { ApiError } from "../../api";
+import { Button, Field, Input } from "../ui/ui";
+import { useAuth } from "./AuthContext";
 
 // First-user setup page. Shown when /auth/bootstrap-status returns
 // needs_bootstrap=true. The created user is auto-admin and auto-logged-in.

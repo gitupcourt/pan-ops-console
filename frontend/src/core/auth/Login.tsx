@@ -1,8 +1,8 @@
 import { FormEvent, useState } from "react";
 
-import { ApiError } from "../api";
-import { useAuth } from "../auth";
-import { Button, Field, Input } from "../components/ui";
+import { ApiError } from "../../api";
+import { Button, Field, Input } from "../ui/ui";
+import { useAuth } from "./AuthContext";
 
 export default function Login() {
   const { login, bootstrap } = useAuth();

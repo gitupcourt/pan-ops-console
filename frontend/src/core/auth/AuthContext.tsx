@@ -6,7 +6,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createContext, ReactNode, useContext } from "react";
 
-import { api, ApiError, BootstrapStatus, User } from "./api";
+import { api, ApiError, BootstrapStatus, User } from "../../api";
 
 type AuthState = {
   user: User | null;

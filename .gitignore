@@ -26,9 +26,6 @@ data/
 .DS_Store
 Thumbs.db
 
-# Local-only session brief (operational truth, kept out of public repo)
-CLAUDE.md
-
 # Node / frontend
 node_modules/
 dist/

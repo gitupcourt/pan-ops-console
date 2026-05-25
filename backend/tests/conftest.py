@@ -48,21 +48,28 @@ _FAKE_CATALOG.write_text("version: 1\nmetrics: []\n", encoding="utf-8")
 
 @pytest.fixture
 def client():
-    """Fresh TestClient per test, with empty DB tables.
+    """Fresh TestClient per test, with an empty schema produced by alembic.
 
     Subtle: simply unlinking the .db file between tests doesn't isolate
     them, because the SQLAlchemy engine + connection pool that the app
     imported at module load is still pointing at the original file
     inode. On Linux, deleting a file with open file handles leaves the
-    data alive for those handles. The reliable reset is to issue a
-    SQL-level drop+create through the existing engine.
+    data alive for those handles. The reliable reset is to drop every
+    table (including alembic_version) at the SQL level, then let the
+    app's lifespan run `alembic upgrade head` to recreate the schema —
+    which is what prod does, so the test path mirrors prod exactly.
     """
     from fastapi.testclient import TestClient
+    from sqlalchemy import text
 
-    # Force a clean schema. drop_all is a no-op on the first run.
+    # Force a clean schema across every test. Drop SQLAlchemy-tracked
+    # tables, then explicitly drop alembic_version (which Base doesn't
+    # know about). Order matters: alembic_version has no FKs into our
+    # tables so dropping it last is fine.
     from app.db import Base, engine
     Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
 
     from app.main import app
 

@@ -14,11 +14,11 @@ from app.config import get_settings
 from app.core.auth.deps import current_user
 from app.core.auth.routes import auth, providers, users
 from app.core.devices.routes import devices
+from app.core.migrations import run_migrations
 from app.core.panorama.routes import panoramas
-from app.db import Base, engine
 
 # Importing each module's models package registers every table on
-# Base.metadata so lifespan's create_all sees them.
+# Base.metadata so alembic's autogenerate sees them.
 from app.capacity import models as _capacity_models  # noqa: F401
 from app.core.auth import models as _auth_models  # noqa: F401
 from app.core.devices import models as _devices_models  # noqa: F401
@@ -30,9 +30,11 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Dev convenience: create tables if they don't exist. Switch to Alembic
-    # before this app sees real upgrades-in-place.
-    Base.metadata.create_all(bind=engine)
+    # Run schema migrations on every startup. Idempotent — no-op at head.
+    # Has built-in guards for: empty migration stubs (§3.2 trap) and the
+    # first-run-against-legacy-create_all-schema case (stamps instead of
+    # re-creating). See app/core/migrations.py.
+    run_migrations()
     scheduler.start()
     try:
         yield

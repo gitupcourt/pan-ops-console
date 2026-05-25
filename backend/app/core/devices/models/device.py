@@ -16,7 +16,18 @@ collector to write `current_version` and drop `sw_version`.
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, LargeBinary, String, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    LargeBinary,
+    String,
+    false,
+    func,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.devices.models.enums import DeviceSource, HARole
@@ -40,7 +51,10 @@ class Device(Base):
     current_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     source: Mapped[DeviceSource] = mapped_column(
-        Enum(DeviceSource, name="device_source"), default=DeviceSource.DIRECT, nullable=False
+        Enum(DeviceSource, name="device_source"),
+        default=DeviceSource.DIRECT,
+        server_default="direct",
+        nullable=False,
     )
     panorama_id: Mapped[int | None] = mapped_column(
         ForeignKey("panoramas.id"), nullable=True
@@ -53,13 +67,19 @@ class Device(Base):
     # CLAUDE.md. Current state: inline (capacity pattern preserved).
     encrypted_api_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
-    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    verify_tls: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
     # When True, all metric ops route through the linked Panorama via
     # target-serial. The Panorama's key is used; this device's own key (if any)
     # is ignored.
-    proxy_via_panorama: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    proxy_via_panorama: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
 
-    polling_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    polling_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
 
     # ----- HA pairing (carry-forward from upgrader) -----
     # ha_role: upgrade-orchestrator's view (standalone/active/passive).
@@ -72,7 +92,10 @@ class Device(Base):
         "Device", remote_side="Device.id", lazy="joined", post_update=True
     )
     ha_role: Mapped[HARole] = mapped_column(
-        Enum(HARole, name="ha_role"), default=HARole.UNKNOWN, nullable=False
+        Enum(HARole, name="ha_role"),
+        default=HARole.UNKNOWN,
+        server_default="unknown",
+        nullable=False,
     )
     ha_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
     ha_sync_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -86,7 +109,9 @@ class Device(Base):
     # "device is currently reachable per Panorama"). `last_seen_at` is the
     # last time we successfully *talked* to the device directly. Two
     # different signals, both meaningful — don't conflate.
-    connected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    connected: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     uptime: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # ----- Staging / image management -----

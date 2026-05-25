@@ -7,7 +7,7 @@ reusable credentials store — see commit history for the design rationale.
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, LargeBinary, String, func
+from sqlalchemy import Boolean, DateTime, LargeBinary, String, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -24,7 +24,9 @@ class Panorama(Base):
     # running keygen() against this host with username+password once.
     encrypted_api_key: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
 
-    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    verify_tls: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
 
     # Org-wide opt-in: when True, upgrade orchestration may proxy through this
     # Panorama for its managed devices (instead of going direct). Carry-forward
@@ -33,14 +35,18 @@ class Panorama(Base):
     # intentional. Capacity polling has been doing this proxy by default for
     # any device whose `proxy_via_panorama=True`; this column lets ops disable
     # it at the Panorama level when needed.
-    proxy_upgrades: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    proxy_upgrades: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    reachable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    reachable: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=true(), nullable=False
+    )
     last_reachability_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

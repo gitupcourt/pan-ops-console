@@ -112,11 +112,15 @@ def test_ha_peer_self_fk_works(client, db):
         assert peer_b == a
 
 
-def test_panorama_proxy_upgrades_defaults_false(client, db):
-    """The new panoramas.proxy_upgrades column has a server_default of
-    false, so existing rows (and new ones that don't specify it) get
-    safe-by-default behavior — no accidental proxy enable on upgrade
-    paths the operator hasn't opted into."""
+def test_panorama_proxy_upgrades_defaults_true(client, db):
+    """The panoramas.proxy_upgrades column has a server_default of true
+    (post-PR-#45 — the proxy-by-default policy codified in CLAUDE.md).
+
+    Was previously server_default=false in migration 0002. Migration
+    0005 flips both the column default and any existing False rows to
+    True. New rows inserted without specifying proxy_upgrades pick up
+    the new default automatically.
+    """
     with db.bind.begin() as conn:
         conn.execute(
             text(
@@ -129,4 +133,4 @@ def test_panorama_proxy_upgrades_defaults_false(client, db):
             text("SELECT proxy_upgrades FROM panoramas WHERE name = 'legacy-pano'")
         ).scalar_one()
 
-    assert pu in (False, 0)
+    assert pu in (True, 1)

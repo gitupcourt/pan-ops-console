@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.capacity.services.catalog import MetricSpec, Sources
 from app.capacity.services.storage import SamplePoint, SampleStore
-from app.core.command_proxy import build_client_with_fallback
+from app.core.command_proxy.builder import build_client_with_fallback
 from app.core.devices.models.device import Device
 
 log = logging.getLogger(__name__)

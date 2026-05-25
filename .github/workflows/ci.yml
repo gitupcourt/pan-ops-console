@@ -69,16 +69,29 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build backend image
         run: docker build -t pan-ops-console-backend:smoke backend/
-      - name: Import app.main inside the image
+      - name: Import app.main + operational scripts inside the image
+        # Covers two classes of bug:
+        #   1. Source modules missing from the image (alembic/ caught
+        #      via `import app.main` since lifespan imports alembic config).
+        #   2. Operational script modules invoked as `python -m
+        #      scripts.<name>` from a Job pod at cutover — these are
+        #      NOT imported by app.main, so they need their own import
+        #      check or the gap only shows up when an operator tries
+        #      to run the Job. See pan-ops-console#32.
         run: |
           docker run --rm \
             -e FERNET_KEY="0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs=" \
             pan-ops-console-backend:smoke \
-            python -c "import app.main; print('app.main imported OK')"
-      - name: Verify alembic.ini + alembic/ are present in image
+            python -c "
+          import app.main
+          import scripts.migrate_sqlite_to_postgres
+          import scripts.rotate_fernet
+          print('app.main + scripts.migrate_sqlite_to_postgres + scripts.rotate_fernet imported OK')
+          "
+      - name: Verify alembic.ini + alembic/ + scripts/ are present in image
         run: |
           docker run --rm pan-ops-console-backend:smoke \
-            sh -c "test -f /app/alembic.ini && test -d /app/alembic && echo 'alembic assets present'"
+            sh -c "test -f /app/alembic.ini && test -d /app/alembic && test -d /app/scripts && echo 'alembic + scripts assets present'"
 
   # =====================================================================
   # Frontend type-check. Catches TS strict-mode errors (unused imports,

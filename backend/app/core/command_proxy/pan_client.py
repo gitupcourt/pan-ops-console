@@ -180,7 +180,7 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
     msg = str(exc)
     if "Connection refused" in msg or "[Errno 111]" in msg:
         return (
-            f"{context}: cannot reach device on TCP/443 (connection refused). "
+            f"{context}: Cannot reach device on TCP/443 (connection refused). "
             "Check that HTTPS management is enabled on the firewall's "
             "management interface profile and that the worker container "
             "has a network path to the mgmt IP. "
@@ -188,7 +188,7 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
         )
     if "timed out" in msg.lower() or "timeout" in msg.lower():
         return (
-            f"{context}: timed out connecting to the device. The mgmt IP "
+            f"{context}: Timed out connecting to the device. The mgmt IP "
             "may be wrong, or a firewall/NAT is dropping packets between "
             f"the worker and the device. Original error: {msg}"
         )
@@ -207,7 +207,7 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
         )
     if "401" in msg or "Invalid credential" in msg or "unauthorized" in msg.lower():
         return (
-            f"{context}: authentication rejected by the device. Verify the "
+            f"{context}: Authentication rejected by the device. Verify the "
             "credential (username/password or API key) and that the user "
             f"has XML API access. Original error: {msg}"
         )
@@ -237,7 +237,7 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
         )
     if is_firewall_outbound:
         return (
-            f"{context}: a library check could not reach an external service "
+            f"{context}: A library check could not reach an external service "
             "from the firewall (typically updates.paloaltonetworks.com). "
             "This is the firewall's own outbound connectivity, not the "
             "app's TLS to the firewall — verify_tls won't help here. Check "

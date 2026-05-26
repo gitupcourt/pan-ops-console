@@ -69,7 +69,7 @@ celery = Celery(
         # Modules that define @celery.task functions. Adding a new task
         # module means listing it here so the worker imports it at boot.
         "app.capacity.tasks",
-        # Phase 4d will add: "app.upgrade.tasks"
+        "app.upgrade.tasks",
     ],
 )
 

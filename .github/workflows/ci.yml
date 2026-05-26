@@ -104,6 +104,64 @@ jobs:
             sh -c "test -f /app/alembic.ini && test -d /app/alembic && test -d /app/scripts && echo 'alembic + scripts assets present'"
 
   # =====================================================================
+  # Postgres migration smoke — actually runs `alembic upgrade head`
+  # against an ephemeral Postgres so dialect-specific DDL traps surface
+  # in CI instead of at deploy time.
+  #
+  # Backstory (#100 / phase 12a): migration 0006 created an ENUM type
+  # via raw DO-block, then used `sa.Enum(name, create_type=False)` on
+  # the column. SQLAlchemy's `_on_table_create` event ignored the local
+  # create_type=False (because the model-level Enum already on
+  # Base.metadata shadowed it) and tried `CREATE TYPE` again at table-
+  # create time → DuplicateObject → backend CrashLoopBackOff.
+  #
+  # Neither pytest nor `import app.main` would have caught this — both
+  # exercise the ORM + import surface but never actually emit the DDL
+  # against Postgres. This job does.
+  # =====================================================================
+  smoke-postgres-migrations:
+    name: postgres migration smoke
+    needs: [smoke-backend-image]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: panops
+          POSTGRES_PASSWORD: smoke
+          POSTGRES_DB: panops
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t pan-ops-console-backend:smoke backend/
+      - name: alembic upgrade head against Postgres
+        run: |
+          docker run --rm \
+            --network host \
+            -e FERNET_KEY="0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs=" \
+            -e DATABASE_URL="postgresql+psycopg://panops:smoke@127.0.0.1:5432/panops" \
+            pan-ops-console-backend:smoke \
+            alembic upgrade head
+      - name: Verify head is the expected revision
+        # Catches the "branched migrations" / "wrong down_revision" class
+        # of bug where the chain is fine to upgrade but doesn't end where
+        # it should.
+        run: |
+          docker run --rm \
+            --network host \
+            -e FERNET_KEY="0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs=" \
+            -e DATABASE_URL="postgresql+psycopg://panops:smoke@127.0.0.1:5432/panops" \
+            pan-ops-console-backend:smoke \
+            alembic current
+
+  # =====================================================================
   # Frontend type-check. Catches TS strict-mode errors (unused imports,
   # implicit any, type mismatches) in ~10s on every PR — cheap insurance
   # so we don't discover them 90 seconds into the docker prod build on
@@ -136,7 +194,7 @@ jobs:
   # and only after both test jobs pass. PRs skip this entirely.
   # =====================================================================
   ship:
-    needs: [test-backend, test-frontend, smoke-backend-image]
+    needs: [test-backend, test-frontend, smoke-backend-image, smoke-postgres-migrations]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       contents: read

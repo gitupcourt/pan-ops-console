@@ -25,6 +25,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "0006"
@@ -35,11 +36,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    is_pg = bind.dialect.name == "postgresql"
 
     # On Postgres, create the alert_severity ENUM up-front so multiple
     # CREATE TABLEs referencing it don't race to CREATE TYPE. On
     # SQLite the per-column Enum just emits a VARCHAR + CHECK.
-    if bind.dialect.name == "postgresql":
+    if is_pg:
         op.execute(
             "DO $$ BEGIN "
             "CREATE TYPE alert_severity AS ENUM ('warning', 'critical'); "
@@ -47,19 +49,40 @@ def upgrade() -> None:
             "END $$;"
         )
 
-    severity_col = sa.Enum(
-        "warning",
-        "critical",
-        name="alert_severity",
-        create_type=False,
-    )
+    # IMPORTANT — same trap migration 0003 documented:
+    # `sa.Enum(..., create_type=False)` does NOT reliably suppress
+    # auto-create on Postgres. The model-level Enum already registered
+    # on `Base.metadata` (via the AlertRule + Alert ORM classes that
+    # alembic's env.py imports) shadows the local one inside the table
+    # render path, and the column's `_on_table_create` event fires
+    # `CreateEnumType` regardless of the local create_type flag. This
+    # blew up phase 12a's first deploy attempt (#100) with `DuplicateObject:
+    # type "alert_severity" already exists` after the DO-block had just
+    # created the type — whole migration rolled back, CrashLoopBackOff.
+    #
+    # `postgresql.ENUM(..., create_type=False)` IS honored. On SQLite we
+    # fall back to `sa.Enum` so the VARCHAR + CHECK emulation kicks in
+    # (SQLite has no native enum types).
+    #
+    # A fresh column instance is built per-table to avoid the SQLAlchemy
+    # gotcha where reusing a single Enum instance across multiple tables
+    # can leave dangling event-listener state.
+    def _severity_col() -> sa.Enum:
+        if is_pg:
+            return postgresql.ENUM(
+                "warning",
+                "critical",
+                name="alert_severity",
+                create_type=False,
+            )
+        return sa.Enum("warning", "critical", name="alert_severity")
 
     op.create_table(
         "alert_rules",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("name", sa.String(length=128), nullable=False),
         sa.Column("metric", sa.String(length=64), nullable=True),
-        sa.Column("severity", severity_col, nullable=False),
+        sa.Column("severity", _severity_col(), nullable=False),
         sa.Column("threshold_pct", sa.Integer(), nullable=False),
         sa.Column(
             "enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")
@@ -93,7 +116,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column("metric", sa.String(length=64), nullable=False),
-        sa.Column("severity", severity_col, nullable=False),
+        sa.Column("severity", _severity_col(), nullable=False),
         sa.Column("threshold_pct", sa.Integer(), nullable=False),
         sa.Column("current_value", sa.Float(), nullable=False),
         sa.Column("max_value", sa.Float(), nullable=True),

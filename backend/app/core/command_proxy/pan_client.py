@@ -161,20 +161,26 @@ def _text(el: ET.Element | None, path: str) -> str | None:
     return found.text.strip() if found is not None and found.text else None
 
 
-def _friendly_check_error(exc: BaseException) -> str:
-    """Turn raw pan-os-python / urllib exceptions into something operators can act on.
+def _friendly_check_error(exc: BaseException, *, context: str = "Readiness checks") -> str:
+    """Turn raw pan-os-python / httpx / urllib exceptions into something operators can act on.
 
-    The library raises a mix of `PanDeviceError`, `URLError`, and bare
-    `OSError` depending on where the failure happens. The default repr is
-    something like "URLError: reason: [Errno 111] Connection refused" —
-    technically correct but the operator has no idea whether to look at
-    DNS, firewall, mgmt-profile, or credentials. We map the common shapes
-    to actionable hints.
+    The library raises a mix of `PanDeviceError`, `URLError`, `httpx.ConnectError`,
+    `ssl.SSLError`, and bare `OSError` depending on where the failure happens. The
+    default repr is something like "URLError: reason: [Errno 111] Connection refused"
+    or "[Errno -2] Name or service not known" — technically correct but the operator
+    has no idea whether to look at DNS, firewall, mgmt-profile, or credentials. We
+    map the common shapes to actionable hints.
+
+    `context` is a short noun phrase describing what was being attempted —
+    "Readiness checks" (default), "Authentication" (from keygen), "Probe", etc.
+    It's used in the fallback message AND prepended to specific-case messages
+    so an operator reading the error knows whether the failure was during
+    auth setup or during routine ops.
     """
     msg = str(exc)
     if "Connection refused" in msg or "[Errno 111]" in msg:
         return (
-            "Cannot reach device on TCP/443 (connection refused). "
+            f"{context}: Cannot reach device on TCP/443 (connection refused). "
             "Check that HTTPS management is enabled on the firewall's "
             "management interface profile and that the worker container "
             "has a network path to the mgmt IP. "
@@ -182,20 +188,35 @@ def _friendly_check_error(exc: BaseException) -> str:
         )
     if "timed out" in msg.lower() or "timeout" in msg.lower():
         return (
-            "Timed out connecting to the device. The mgmt IP may be wrong, "
-            "or a firewall/NAT is dropping packets between the worker and "
-            f"the device. Original error: {msg}"
+            f"{context}: Timed out connecting to the device. The mgmt IP "
+            "may be wrong, or a firewall/NAT is dropping packets between "
+            f"the worker and the device. Original error: {msg}"
         )
-    if "Name or service not known" in msg or "nodename nor servname" in msg:
+    if (
+        "Name or service not known" in msg
+        or "nodename nor servname" in msg
+        # httpx wraps DNS failures in ConnectError("[Errno ...]") — match the errno too.
+        or "[Errno -2]" in msg
+        or "[Errno -3]" in msg
+    ):
         return (
-            "DNS lookup failed for the device hostname. Use the management "
-            f"IP directly, or fix DNS resolution from the worker. Original error: {msg}"
+            f"{context}: DNS lookup failed for the device hostname. "
+            "Either the hostname isn't in DNS, the cluster's DNS resolver "
+            "can't reach it, or there's a typo. Try the management IP "
+            f"directly, or add the hostname to DNS. Original error: {msg}"
         )
-    if "401" in msg or "Invalid credential" in msg or "unauthorized" in msg.lower():
+    if (
+        "401" in msg
+        # Case-insensitive — PAN-OS returns "Invalid Credential" (capital C),
+        # while the existing test fixture used "Invalid credential" (lower c).
+        # Match either to cover both shapes that arrive in practice.
+        or "invalid credential" in msg.lower()
+        or "unauthorized" in msg.lower()
+    ):
         return (
-            "Authentication rejected by the device. Verify the credential "
-            "(username/password or API key) and that the user has XML API "
-            f"access. Original error: {msg}"
+            f"{context}: Authentication rejected by the device. Verify the "
+            "credential (username/password or API key) and that the user "
+            f"has XML API access. Original error: {msg}"
         )
     # Distinguish OUR TLS handshake to the firewall from the firewall's
     # OWN outbound TLS (e.g. it trying to reach updates.paloaltonetworks.com
@@ -217,20 +238,20 @@ def _friendly_check_error(exc: BaseException) -> str:
     )
     if is_our_handshake and not is_firewall_outbound:
         return (
-            "TLS handshake to the firewall failed. If the firewall uses a "
-            "self-signed cert, set verify_tls=false on the device. "
-            f"Original error: {msg}"
+            f"{context}: TLS handshake to the firewall failed. If the "
+            "firewall uses a self-signed cert, set verify_tls=false on "
+            f"the device. Original error: {msg}"
         )
     if is_firewall_outbound:
         return (
-            "A library check could not reach an external service from the "
-            "firewall (typically updates.paloaltonetworks.com). This is the "
-            "firewall's own outbound connectivity, not the app's TLS to the "
-            "firewall — verify_tls won't help here. Check the device's "
-            "Update Server / Service Route / DNS settings. "
+            f"{context}: A library check could not reach an external service "
+            "from the firewall (typically updates.paloaltonetworks.com). "
+            "This is the firewall's own outbound connectivity, not the "
+            "app's TLS to the firewall — verify_tls won't help here. Check "
+            "the device's Update Server / Service Route / DNS settings. "
             f"Original error: {msg}"
         )
-    return f"Readiness checks failed: {msg}"
+    return f"{context} failed: {msg}"
 
 
 class PanDeviceClient:
@@ -674,18 +695,38 @@ class PanDeviceClient:
 
 
 def keygen(hostname: str, username: str, password: str, *, verify_tls: bool = True) -> str:
-    """Exchange username+password for a long-lived API key (works for fw or Panorama)."""
+    """Exchange username+password for a long-lived API key (works for fw or Panorama).
+
+    Wraps the underlying httpx call in `_friendly_check_error` so the
+    operator sees an actionable hint ("DNS lookup failed for the device
+    hostname...") instead of the raw OS / library exception
+    ("[Errno -2] Name or service not known"). The context kwarg
+    differentiates this caller in the friendly message — the operator
+    knows the failure was during initial auth setup, not during
+    ongoing polling.
+
+    See pan-ops-console#46 — operator surfaced the DNS error as
+    "not entirely useful or friendly for the average user."
+    """
     import httpx
 
     url = f"https://{hostname}/api/"
     params = {"type": "keygen", "user": username, "password": password}
-    with httpx.Client(verify=verify_tls, timeout=15.0) as client:
-        resp = client.get(url, params=params)
-    resp.raise_for_status()
+    try:
+        with httpx.Client(verify=verify_tls, timeout=15.0) as client:
+            resp = client.get(url, params=params)
+        resp.raise_for_status()
+    except (httpx.HTTPError, OSError) as exc:
+        raise ValueError(_friendly_check_error(exc, context="Authentication")) from exc
     root = ET.fromstring(resp.text)
     if root.get("status") != "success":
         msg = root.findtext(".//msg") or resp.text
-        raise ValueError(f"keygen failed: {msg}")
+        # PAN-OS responded but rejected the request. _friendly_check_error
+        # handles the common shapes (Invalid Credential, 401, etc.) — fall
+        # through so "Authentication: ..." prefixed message wraps it.
+        raise ValueError(
+            _friendly_check_error(Exception(msg), context="Authentication")
+        )
     key = root.findtext(".//key")
     if not key:
         raise ValueError("keygen succeeded but response had no <key>")

@@ -51,7 +51,12 @@ def _resolve_auth(
     try:
         return mint_key(host, auth.username, auth.password, verify_tls=verify_tls)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"keygen failed: {exc}") from exc
+        # `mint_key` → `keygen` already routes through _friendly_check_error
+        # and the ValueError carries a context-tagged operator message
+        # (e.g. "Authentication: DNS lookup failed for the device hostname.
+        # ..."). Just surface it directly — wrapping with "keygen failed:"
+        # would double the prefix.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("", response_model=list[DeviceRead])

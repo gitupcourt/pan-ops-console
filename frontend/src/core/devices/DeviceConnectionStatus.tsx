@@ -2,13 +2,6 @@ import clsx from "clsx";
 
 import { Device } from "../../api";
 
-// Stale threshold for "Last seen" coloring on connected devices. Anything
-// fresher than this in green; older slips to amber even when `connected`
-// is still true — because if Panorama's sync hasn't refreshed in a
-// while, the connected flag itself is stale data and shouldn't read as
-// definitively-online.
-const STALE_MS = 15 * 60 * 1000; // 15 minutes
-
 function relTime(iso: string | null): string {
   if (!iso) return "never";
   const ms = Date.now() - new Date(iso).getTime();
@@ -39,51 +32,45 @@ type Props = {
  * `direct` case is intentionally a no-op; callers can render alternative
  * direct-aware status (e.g. last_poll_at freshness) themselves.
  *
+ * Two states only: `online` and `disconnected`. We previously had a third
+ * `stale` state coloured amber when `last_seen_at` was > 15 minutes ago,
+ * meant to convey "Panorama hasn't refreshed this in a while, treat
+ * `connected` as uncertain." That heuristic was wrong in practice because
+ * the merged app does NOT yet run a scheduled Panorama sync — the sync
+ * only fires on operator action (manual "Sync now" / device-import). So
+ * `last_seen_at` becomes "stale" by the 15-min mark on EVERY device, the
+ * moment an operator stops clicking the sync button — turning the badge
+ * into permanent amber noise that doesn't correlate with actual device
+ * health.
+ *
+ * When scheduled Panorama sync lands (future work — needs a celery beat
+ * entry alongside `capacity.poll_all`), reintroducing a stale state will
+ * become meaningful again: `last_seen_at` older than 2× the sync
+ * interval = sync is itself failing. Until then, just trust `connected`
+ * and don't paint amber on top of it.
+ *
  * Variants:
- *   - "pill" (default): full text badge for use in tables, e.g. next to
- *     a device name.
- *   - "dot": compact 6px dot for use inline with very limited space
- *     (e.g. inside a dropdown <option> — though `<option>` styling is
- *     limited so this is mostly for future use).
- *   - "banner": full-width rose/amber/emerald banner with the rich
- *     last-seen context, for the dashboard header.
+ *   - "pill" (default): full text badge for use in tables.
+ *   - "dot": compact 6px dot for tight spaces.
+ *   - "banner": full-width warning for the dashboard header when the
+ *     selected device is disconnected.
  */
 export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
   // Direct devices: no-op (see component doc).
   if (device.source !== "panorama") return null;
 
   const lastSeen = device.last_seen_at ?? device.last_refresh_at;
-  const lastSeenMs = lastSeen ? Date.now() - new Date(lastSeen).getTime() : null;
-  const isStaleSync = lastSeenMs != null && lastSeenMs > STALE_MS;
-
-  // Three states:
-  //   ok       — Panorama-reported connected AND last_seen_at is fresh
-  //   stale    — Panorama-reported connected but last_seen_at is old
-  //              (Panorama itself hasn't synced in a while; the "connected"
-  //              boolean may be stale data, so treat as uncertain)
-  //   offline  — Panorama explicitly reports disconnected
-  const state: "ok" | "stale" | "offline" = device.connected
-    ? isStaleSync
-      ? "stale"
-      : "ok"
-    : "offline";
+  const state: "ok" | "offline" = device.connected ? "ok" : "offline";
 
   if (variant === "dot") {
-    const dotColor =
-      state === "ok"
-        ? "bg-emerald-400"
-        : state === "stale"
-          ? "bg-amber-400"
-          : "bg-rose-400";
+    const dotColor = state === "ok" ? "bg-emerald-400" : "bg-rose-400";
     return (
       <span
         className={clsx("inline-block w-1.5 h-1.5 rounded-full mr-1.5", dotColor)}
         title={
           state === "ok"
-            ? `Panorama reports device as connected (last seen ${relTime(lastSeen)})`
-            : state === "stale"
-              ? `Panorama reports connected but sync data is stale (last seen ${relTime(lastSeen)})`
-              : `Panorama reports device as disconnected (last seen ${relTime(lastSeen)})`
+            ? `Panorama reports device as connected (last refresh ${relTime(lastSeen)})`
+            : `Panorama reports device as disconnected (last refresh ${relTime(lastSeen)})`
         }
       />
     );
@@ -91,25 +78,16 @@ export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
 
   if (variant === "banner") {
     if (state === "ok") return null; // No banner needed when everything's fine.
-    const wrap =
-      state === "offline"
-        ? "border-rose-700 bg-rose-900/30 text-rose-200"
-        : "border-amber-700 bg-amber-900/20 text-amber-200";
-    const headline =
-      state === "offline"
-        ? "Device is disconnected"
-        : "Device sync data is stale";
     return (
-      <div className={clsx("rounded border px-3 py-2 text-xs", wrap)}>
-        <div className="font-semibold">{headline}</div>
+      <div className="rounded border border-rose-700 bg-rose-900/30 text-rose-200 px-3 py-2 text-xs">
+        <div className="font-semibold">Device is disconnected</div>
         <div className="mt-0.5 text-[11px]">
-          {state === "offline"
-            ? "Panorama reports this device as not connected — polling is paused until Panorama sees the device come back online."
-            : "Panorama hasn't refreshed this device's state recently; the displayed metrics may not reflect current device status."}
+          Panorama reports this device as not connected — polling is paused
+          until Panorama sees the device come back online.
           {lastSeen && (
             <>
               {" "}
-              Last seen <span className="font-mono">{relTime(lastSeen)}</span>.
+              Last sync refresh <span className="font-mono">{relTime(lastSeen)}</span>.
             </>
           )}
         </div>
@@ -121,11 +99,8 @@ export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
   const colors =
     state === "ok"
       ? "border-emerald-700 bg-emerald-900/30 text-emerald-300"
-      : state === "stale"
-        ? "border-amber-700 bg-amber-900/30 text-amber-300"
-        : "border-rose-700 bg-rose-900/30 text-rose-300";
-  const label =
-    state === "ok" ? "online" : state === "stale" ? "stale" : "disconnected";
+      : "border-rose-700 bg-rose-900/30 text-rose-300";
+  const label = state === "ok" ? "online" : "disconnected";
 
   return (
     <span
@@ -135,10 +110,8 @@ export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
       )}
       title={
         state === "ok"
-          ? `Panorama reports device as connected (last seen ${relTime(lastSeen)})`
-          : state === "stale"
-            ? `Panorama reports connected but sync data is stale (last seen ${relTime(lastSeen)})`
-            : `Panorama reports device as disconnected (last seen ${relTime(lastSeen)})`
+          ? `Panorama reports device as connected (last refresh ${relTime(lastSeen)})`
+          : `Panorama reports device as disconnected (last refresh ${relTime(lastSeen)})`
       }
     >
       {label}

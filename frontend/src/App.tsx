@@ -2,6 +2,7 @@ import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
 
 import CapacityAnalyzer from "./capacity/CapacityAnalyzer";
+import CapacityTable from "./capacity/CapacityTable";
 import Dashboard from "./capacity/Dashboard";
 import { useAuth } from "./core/auth/AuthContext";
 import Bootstrap from "./core/auth/Bootstrap";
@@ -62,10 +63,7 @@ export default function App() {
                 heat-map's tile click doesn't 404. */}
             <Route path="/capacity" element={<CapacityAnalyzer />} />
             <Route path="/capacity/device" element={<Dashboard />} />
-            <Route
-              path="/capacity/table"
-              element={<CapacityTablePlaceholder />}
-            />
+            <Route path="/capacity/table" element={<CapacityTable />} />
             <Route
               path="/capacity/trend/:deviceId/:metric"
               element={<CapacityTrendPlaceholder />}
@@ -133,25 +131,11 @@ function NotAuthorized() {
 }
 
 /**
- * Placeholders for routes the heat-map's tile click navigates to but
- * that don't have a real implementation yet. Phase 10 replaces
- * CapacityTablePlaceholder with the table view; phase 11 replaces
- * CapacityTrendPlaceholder with the time-series chart. Including the
- * routes today means the phase-9 heat map's "click a tile" doesn't
- * dead-end on operator confusion.
+ * Placeholder for the phase-11 trend view. The heat-map tile click +
+ * the capacity table's metric-name click both navigate here; phase 11
+ * fills in the historical chart + predicted-date overlay. Until then
+ * the route exists so the affordance doesn't dead-end.
  */
-function CapacityTablePlaceholder() {
-  return (
-    <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
-      <p>Capacity table view ships in phase 10.</p>
-      <p className="mt-2 text-xs">
-        The heat-map tile you clicked passed its filters through this URL —
-        once the table view lands, it'll honour them automatically.
-      </p>
-    </div>
-  );
-}
-
 function CapacityTrendPlaceholder() {
   return (
     <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">

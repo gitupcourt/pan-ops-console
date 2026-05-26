@@ -10,15 +10,25 @@ execute.
 The bug bites in exactly one scenario:
 
   1. DB was built by an older app version that called
-     `Base.metadata.create_all(engine)` (pre-alembic).
+     `Base.metadata.create_all(engine)` against the *baseline-era*
+     models (pre-alembic, or right at 0001).
   2. New app version with alembic + post-baseline migrations boots.
   3. `_db_has_legacy_schema_without_alembic_version()` returns True
      (marker tables present, no alembic_version).
-  4. Stamp + upgrade should converge the DB to HEAD.
+  4. Stamp baseline + upgrade should converge the DB to HEAD.
 
 Fresh-empty DBs (no marker tables) hit the other branch and run
 `alembic upgrade head` from the base anyway, so they were never
 broken by the original bug; they're covered by other tests.
+
+Critical setup detail: the simulation needs the DB at the **baseline**
+schema specifically — not at HEAD with alembic_version stripped. The
+naive "drop alembic_version from a HEAD DB" makes a state that no real
+deployment ever produces (HEAD-shaped tables + no version row), and
+running the fix against it tries to apply 0002+ on top of an already-
+0005 schema. That collides with SQLite's batch_alter_table temp-table
+left behind by the first 0005 run. Correct simulation: roll the schema
+back to "just 0001 ran", then drop alembic_version.
 """
 
 from __future__ import annotations
@@ -26,29 +36,59 @@ from __future__ import annotations
 from sqlalchemy import inspect, text
 
 
-def test_legacy_create_all_db_gets_stamped_at_baseline_then_upgraded(client, db):
-    """End-to-end: simulate a legacy create_all DB, run run_migrations(),
-    confirm we end up at HEAD with post-baseline columns present.
+def _reset_to_legacy_baseline(engine, cfg):
+    """Bring the DB to the "real legacy" state: 0001-era schema, no version row.
 
-    The `client` fixture already runs the app's lifespan which calls
-    `run_migrations()` — so by the time we get here the DB is at HEAD
-    via the normal (non-legacy) path. We tear that down to the legacy
-    shape (drop alembic_version), then call run_migrations() again to
-    exercise the legacy branch.
+    Steps:
+      1. Drop every SQLAlchemy-tracked table AND alembic_version. This
+         strips both the schema and any version tracking.
+      2. Run `command.upgrade(cfg, "0001")` to apply only the baseline
+         migration. This is exactly what an old app version pinned at
+         0001 (or a `create_all` against baseline-era models) would have
+         produced — but driven through alembic so the result is precise
+         and version-tracked.
+      3. Drop alembic_version one more time so the DB now has 0001-era
+         schema + nothing in alembic_version — the legacy shape the bug
+         applies to.
+
+    Importantly, this is what every test in this file relies on, and it
+    matches the production scenario the platform-session Claude actually
+    diagnosed in their rollback investigation.
     """
-    from app.core.migrations import run_migrations
-    from app.db import engine
+    from alembic import command
 
-    # Tear down to "legacy" shape: keep the tables (so the marker check
-    # finds them) but drop alembic_version. After this, the DB looks
-    # exactly like a pre-alembic create_all output.
+    from app.db import Base
+
+    # 1. Wipe everything.
+    Base.metadata.drop_all(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        # Batch mode on SQLite can leave _alembic_tmp_<table> stragglers
+        # if a previous run was interrupted; clear them too so 0005's
+        # batch_alter_table doesn't trip "table already exists" on the
+        # next attempt.
+        for tbl in ("panoramas", "devices", "samples", "users"):
+            conn.execute(text(f"DROP TABLE IF EXISTS _alembic_tmp_{tbl}"))
+
+    # 2. Apply only 0001.
+    command.upgrade(cfg, "0001")
+
+    # 3. Strip the version row so the helper detects the legacy state.
     with engine.begin() as conn:
         conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
 
+
+def test_legacy_create_all_db_gets_stamped_at_baseline_then_upgraded(client, db):
+    """End-to-end: set up the actual legacy state, run run_migrations(),
+    confirm we end up at HEAD with post-baseline columns present."""
+    from app.core.migrations import _alembic_config, run_migrations
+    from app.db import engine
+
+    _reset_to_legacy_baseline(engine, _alembic_config())
+
     inspector = inspect(engine)
     assert "alembic_version" not in inspector.get_table_names()
-    # Marker tables are present (they came from the lifespan-applied
-    # migrations earlier in this fixture).
+    # Marker tables present from the 0001 baseline migration.
     assert "devices" in inspector.get_table_names()
     assert "panoramas" in inspector.get_table_names()
 
@@ -66,7 +106,6 @@ def test_legacy_create_all_db_gets_stamped_at_baseline_then_upgraded(client, db)
 
     # The head id is what ScriptDirectory.get_current_head() returns —
     # don't hardcode the value, derive it the same way the runner does.
-    from app.core.migrations import _alembic_config
     from alembic.script import ScriptDirectory
 
     head = ScriptDirectory.from_config(_alembic_config()).get_current_head()
@@ -122,11 +161,10 @@ def test_legacy_branch_writes_post_baseline_columns(client, db):
     devices.current_version` the first time an ORM query touched it —
     exactly the symptom the platform-session diagnostic captured.
     """
-    from app.core.migrations import run_migrations
+    from app.core.migrations import _alembic_config, run_migrations
     from app.db import engine
 
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+    _reset_to_legacy_baseline(engine, _alembic_config())
 
     run_migrations()
 

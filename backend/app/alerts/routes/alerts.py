@@ -1,26 +1,31 @@
-"""Alerts query endpoints.
+"""Alerts query + state endpoints.
 
-Phase 12a: read-only — list active alerts + summary counts for the
-home dashboard frame. Phase 12b will add POST /alerts/{id}/acknowledge.
+Phase 12a shipped read-only listing + summary. Phase 12b adds the
+operator-action surface: acknowledge / unacknowledge an alert (silence
+without resolving the underlying capacity issue).
 
-The response shape mirrors what the frontend was already coded
-against during phase 8's scaffold (the previously-pinned `AlertRead`).
-That contract is preserved so HomeDashboard's existing import doesn't
-break — only the data source changes from `[]` to a real query.
+Ack semantics: acknowledged_at is independent of cleared_at. An ack'd
+alert that's still firing stays "active" for poll-loop evaluation (so
+the alert row keeps updating its last_seen_at + pct snapshot), it
+just doesn't draw the operator's eye on the home dashboard frame.
+When the value finally drops and the alert clears, the ack stays
+recorded as history.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.alerts.models.alert import Alert
 from app.alerts.models.enums import AlertSeverity
+from app.core.auth.deps import current_user
+from app.core.auth.models.user import User
 from app.core.devices.models.device import Device
 from app.db import get_db
 
@@ -42,6 +47,10 @@ class AlertRead(BaseModel):
     last_seen_at: datetime
     cleared_at: datetime | None
     acknowledged_at: datetime | None
+    # Username of the operator who ack'd; null when not acknowledged.
+    # Surfaced from the users join so the UI can show "ack'd by alice"
+    # without a separate /users fetch.
+    acknowledged_by: str | None
 
 
 class AlertsSummary(BaseModel):
@@ -70,11 +79,14 @@ def list_alerts(
     show. `state=all` includes cleared history for the (eventual)
     audit/timeline view.
     """
-    # Join devices so we can return device_name without a per-row
-    # lookup, matching the AlertRead contract.
+    # Join devices for device_name. Outer-join users so the ack'd-by
+    # username comes back in the same query — users.id may be NULL if
+    # the alert isn't acknowledged yet, OR if the acking user was
+    # later deleted (FK is SET NULL).
     stmt = (
-        select(Alert, Device.name)
+        select(Alert, Device.name, User.username)
         .join(Device, Device.id == Alert.device_id)
+        .join(User, User.id == Alert.acknowledged_by_user_id, isouter=True)
         .order_by(Alert.last_seen_at.desc())
         .limit(limit)
     )
@@ -102,8 +114,9 @@ def list_alerts(
             last_seen_at=a.last_seen_at,
             cleared_at=a.cleared_at,
             acknowledged_at=a.acknowledged_at,
+            acknowledged_by=ack_username,
         )
-        for a, device_name in rows
+        for a, device_name, ack_username in rows
     ]
 
 
@@ -133,6 +146,77 @@ def alerts_summary(db: Session = Depends(get_db)) -> AlertsSummary:
         warning=warning,
         acknowledged=acknowledged,
         total_active=critical + warning,
+    )
+
+
+@router.post("/{alert_id}/acknowledge", response_model=AlertRead)
+def acknowledge_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+) -> AlertRead:
+    """Silence an active alert without resolving the underlying issue.
+
+    Idempotent — calling on an already-ack'd alert updates the ack to
+    the current operator + now(). That's intentional: operators
+    re-confirming acknowledgement (e.g. after a shift change) leaves a
+    fresh trail in the timestamps.
+    """
+    alert = db.get(Alert, alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+    alert.acknowledged_at = datetime.now(timezone.utc)
+    alert.acknowledged_by_user_id = user.id
+    db.commit()
+    return _alert_to_read(db, alert)
+
+
+@router.post("/{alert_id}/unacknowledge", response_model=AlertRead)
+def unacknowledge_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),  # noqa: ARG001 — auth-only
+) -> AlertRead:
+    """Clear the ack. Useful when an operator hits "ack" by mistake or
+    wants to put a still-firing alert back into the active-attention
+    bucket on the home dashboard."""
+    alert = db.get(Alert, alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail="alert not found")
+    alert.acknowledged_at = None
+    alert.acknowledged_by_user_id = None
+    db.commit()
+    return _alert_to_read(db, alert)
+
+
+def _alert_to_read(db: Session, a: Alert) -> AlertRead:
+    """Hydrate a single Alert row to the AlertRead shape used by the
+    list endpoint. Used by the ack/unack endpoints which return the
+    updated row to the caller.
+    """
+    device = db.get(Device, a.device_id)
+    device_name = device.name if device else f"device#{a.device_id}"
+    ack_user_name: str | None = None
+    if a.acknowledged_by_user_id is not None:
+        u = db.get(User, a.acknowledged_by_user_id)
+        if u is not None:
+            ack_user_name = u.username
+    return AlertRead(
+        id=a.id,
+        severity=a.severity.value,
+        alert_name=_alert_name(a),
+        device_id=a.device_id,
+        device_name=device_name,
+        metric=a.metric,
+        threshold_pct=a.threshold_pct,
+        current_value=a.current_value,
+        max_value=a.max_value,
+        pct=a.pct,
+        first_seen_at=a.first_seen_at,
+        last_seen_at=a.last_seen_at,
+        cleared_at=a.cleared_at,
+        acknowledged_at=a.acknowledged_at,
+        acknowledged_by=ack_user_name,
     )
 
 

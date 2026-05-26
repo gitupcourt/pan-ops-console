@@ -1,22 +1,26 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 
-import { api, AlertRead, AlertRuleRead, AlertSeverity } from "../api";
-import { Card, CardHeader, Select } from "../core/ui/ui";
+import {
+  api,
+  AlertRead,
+  AlertRuleCreate,
+  AlertRuleRead,
+  AlertRuleUpdate,
+  AlertSeverity,
+} from "../api";
+import { Button, Card, CardHeader, Input, Select } from "../core/ui/ui";
 
 /**
  * Alerts page at `/alerts`.
  *
- * Phase 12a — read-only listing of currently-firing alerts plus the
- * active rule table (so operators can see "what would fire and at
- * what threshold" without needing the rules-management UI yet). Phase
- * 12b will layer in acknowledge actions and the rules CRUD UI.
- *
- * The table is intentionally simple: one row per active alert, grouped
- * by severity (critical first, then warning). Each row links to the
- * trend view for the (device, metric) so operators can see the path
- * that led to the breach.
+ * Phase 12b — full operator surface:
+ *   - List active alerts grouped by severity; each row has an
+ *     Acknowledge / Unacknowledge button so noisy alerts can be
+ *     silenced without resolving the underlying capacity issue.
+ *   - Manage alert rules inline: edit threshold, toggle enabled,
+ *     delete, or add a new rule. Per-metric overrides supported.
  *
  * URL params:
  *   ?state=active|all       — default "active"
@@ -53,8 +57,7 @@ export default function AlertsPage() {
   const rules = rulesQ.data ?? [];
 
   // Group active alerts by severity. Critical first so the eye lands
-  // on the worst stuff. Each group sorted by pct desc — biggest
-  // offender at the top of its group.
+  // on the worst stuff. Each group sorted by pct desc.
   const grouped = useMemo(() => {
     const crit = alerts
       .filter((a) => a.severity === "critical")
@@ -125,16 +128,12 @@ export default function AlertsPage() {
         )}
       </Card>
 
-      <Card>
-        <CardHeader
-          title="Configured thresholds"
-          description="Rules that the evaluator runs after every poll. Edit in phase 12b."
-        />
-        <RulesTable rules={rules} isLoading={rulesQ.isLoading} />
-      </Card>
+      <RulesCard rules={rules} isLoading={rulesQ.isLoading} />
     </div>
   );
 }
+
+// ----- alerts table -----
 
 function AlertGroup({
   label,
@@ -168,45 +167,12 @@ function AlertGroup({
             <th className="text-left px-4 py-2 font-medium">Threshold</th>
             <th className="text-left px-4 py-2 font-medium">First seen</th>
             <th className="text-left px-4 py-2 font-medium">Last seen</th>
+            <th className="text-left px-4 py-2 font-medium">Acknowledge</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((a) => (
-            <tr
-              key={a.id}
-              className="border-b border-zinc-800/40 hover:bg-zinc-900/30"
-            >
-              <td className="px-4 py-2 text-xs">
-                <NavLink
-                  to={`/capacity/device/${a.device_id}`}
-                  className="text-blue-400 hover:text-blue-300"
-                >
-                  {a.device_name}
-                </NavLink>
-              </td>
-              <td className="px-4 py-2 text-xs">
-                <NavLink
-                  to={`/capacity/trend/${a.device_id}/${encodeURIComponent(a.metric)}`}
-                  className="text-blue-400 hover:text-blue-300"
-                >
-                  {a.metric}
-                </NavLink>
-              </td>
-              <td className="px-4 py-2 text-xs text-zinc-300 tabular-nums">
-                {a.pct == null
-                  ? "—"
-                  : `${a.pct.toFixed(a.pct < 10 ? 1 : 0)}%`}
-              </td>
-              <td className="px-4 py-2 text-xs text-zinc-500 tabular-nums">
-                {a.threshold_pct}%
-              </td>
-              <td className="px-4 py-2 text-xs text-zinc-500">
-                {fmtTime(a.first_seen_at)}
-              </td>
-              <td className="px-4 py-2 text-xs text-zinc-500">
-                {fmtTime(a.last_seen_at)}
-              </td>
-            </tr>
+            <AlertRow key={a.id} alert={a} />
           ))}
         </tbody>
       </table>
@@ -214,68 +180,382 @@ function AlertGroup({
   );
 }
 
-function RulesTable({
+function AlertRow({ alert: a }: { alert: AlertRead }) {
+  const qc = useQueryClient();
+  const ackMutation = useMutation({
+    mutationFn: () => api.acknowledgeAlert(a.id),
+    onSuccess: () => {
+      // Both the list and the home-dashboard summary need to refresh.
+      qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["alerts-summary"] });
+    },
+  });
+  const unackMutation = useMutation({
+    mutationFn: () => api.unacknowledgeAlert(a.id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["alerts"] });
+      qc.invalidateQueries({ queryKey: ["alerts-summary"] });
+    },
+  });
+  return (
+    <tr className="border-b border-zinc-800/40 hover:bg-zinc-900/30">
+      <td className="px-4 py-2 text-xs">
+        <NavLink
+          to={`/capacity/device/${a.device_id}`}
+          className="text-blue-400 hover:text-blue-300"
+        >
+          {a.device_name}
+        </NavLink>
+      </td>
+      <td className="px-4 py-2 text-xs">
+        <NavLink
+          to={`/capacity/trend/${a.device_id}/${encodeURIComponent(a.metric)}`}
+          className="text-blue-400 hover:text-blue-300"
+        >
+          {a.metric}
+        </NavLink>
+      </td>
+      <td className="px-4 py-2 text-xs text-zinc-300 tabular-nums">
+        {a.pct == null ? "—" : `${a.pct.toFixed(a.pct < 10 ? 1 : 0)}%`}
+      </td>
+      <td className="px-4 py-2 text-xs text-zinc-500 tabular-nums">
+        {a.threshold_pct}%
+      </td>
+      <td className="px-4 py-2 text-xs text-zinc-500">{fmtTime(a.first_seen_at)}</td>
+      <td className="px-4 py-2 text-xs text-zinc-500">{fmtTime(a.last_seen_at)}</td>
+      <td className="px-4 py-2 text-xs">
+        {a.acknowledged_at ? (
+          <div className="flex items-center gap-2">
+            <span className="text-emerald-400" title={`acknowledged ${fmtTime(a.acknowledged_at)}`}>
+              ✓ {a.acknowledged_by ?? "—"}
+            </span>
+            <button
+              onClick={() => unackMutation.mutate()}
+              disabled={unackMutation.isPending}
+              className="text-[10px] text-zinc-500 hover:text-zinc-300 underline"
+            >
+              {unackMutation.isPending ? "…" : "unack"}
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => ackMutation.mutate()}
+            disabled={ackMutation.isPending}
+            className="text-[11px] px-2 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800/60 disabled:opacity-50"
+          >
+            {ackMutation.isPending ? "Ack'ing…" : "Acknowledge"}
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+// ----- rules section -----
+
+function RulesCard({
   rules,
   isLoading,
 }: {
   rules: AlertRuleRead[];
   isLoading: boolean;
 }) {
-  if (isLoading) {
-    return <div className="p-4 text-center text-xs text-zinc-500">Loading…</div>;
-  }
-  if (rules.length === 0) {
-    return (
-      <div className="p-4 text-center text-xs text-zinc-500">
-        No rules configured. The migration seeds default warning/critical
-        rules on first boot — if you're seeing this, something's wrong.
-      </div>
-    );
-  }
+  const [adding, setAdding] = useState(false);
   return (
-    <table className="w-full text-sm">
-      <thead className="text-[11px] uppercase text-zinc-500 border-b border-zinc-800">
-        <tr>
-          <th className="text-left px-4 py-2 font-medium">Name</th>
-          <th className="text-left px-4 py-2 font-medium">Scope</th>
-          <th className="text-left px-4 py-2 font-medium">Severity</th>
-          <th className="text-left px-4 py-2 font-medium">Threshold</th>
-          <th className="text-left px-4 py-2 font-medium">Enabled</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rules.map((r) => (
-          <tr
-            key={r.id}
-            className="border-b border-zinc-800/40 hover:bg-zinc-900/30"
-          >
-            <td className="px-4 py-2 text-xs text-zinc-200">{r.name}</td>
-            <td className="px-4 py-2 text-xs">
-              {r.metric == null ? (
-                <span className="text-zinc-500 italic">all metrics</span>
-              ) : (
-                <span className="text-zinc-300">{r.metric}</span>
-              )}
-            </td>
-            <td className="px-4 py-2 text-xs">
-              <SeverityBadge severity={r.severity} />
-            </td>
-            <td className="px-4 py-2 text-xs text-zinc-300 tabular-nums">
-              {r.threshold_pct}%
-            </td>
-            <td className="px-4 py-2 text-xs">
-              {r.enabled ? (
-                <span className="text-emerald-400">enabled</span>
-              ) : (
-                <span className="text-zinc-500">disabled</span>
-              )}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <Card>
+      <CardHeader
+        title="Configured thresholds"
+        description="Rules the evaluator runs after every poll. Per-metric rules override the global default at the same severity."
+        action={
+          !adding && (
+            <button
+              onClick={() => setAdding(true)}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              + Add rule
+            </button>
+          )
+        }
+      />
+      {adding && (
+        <AddRuleForm
+          onClose={() => setAdding(false)}
+        />
+      )}
+      {isLoading ? (
+        <div className="p-4 text-center text-xs text-zinc-500">Loading…</div>
+      ) : rules.length === 0 ? (
+        <div className="p-4 text-center text-xs text-zinc-500">
+          No rules configured. Click "Add rule" above to create one.
+        </div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="text-[11px] uppercase text-zinc-500 border-b border-zinc-800">
+            <tr>
+              <th className="text-left px-4 py-2 font-medium">Name</th>
+              <th className="text-left px-4 py-2 font-medium">Scope</th>
+              <th className="text-left px-4 py-2 font-medium">Severity</th>
+              <th className="text-left px-4 py-2 font-medium">Threshold</th>
+              <th className="text-left px-4 py-2 font-medium">Enabled</th>
+              <th className="text-left px-4 py-2 font-medium w-20"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rules.map((r) => (
+              <RuleRow key={r.id} rule={r} />
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
   );
 }
+
+function RuleRow({ rule: r }: { rule: AlertRuleRead }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draftName, setDraftName] = useState(r.name);
+  const [draftThreshold, setDraftThreshold] = useState(r.threshold_pct);
+
+  const onSuccess = () =>
+    qc.invalidateQueries({ queryKey: ["alert-rules"] });
+
+  const updateMutation = useMutation({
+    mutationFn: (body: AlertRuleUpdate) => api.updateAlertRule(r.id, body),
+    onSuccess,
+  });
+  const deleteMutation = useMutation({
+    mutationFn: () => api.deleteAlertRule(r.id),
+    onSuccess,
+  });
+
+  const toggleEnabled = () =>
+    updateMutation.mutate({ enabled: !r.enabled });
+
+  const save = () => {
+    const patch: AlertRuleUpdate = {};
+    if (draftName !== r.name) patch.name = draftName;
+    if (draftThreshold !== r.threshold_pct) patch.threshold_pct = draftThreshold;
+    if (Object.keys(patch).length > 0) {
+      updateMutation.mutate(patch, {
+        onSuccess: () => {
+          onSuccess();
+          setEditing(false);
+        },
+      });
+    } else {
+      setEditing(false);
+    }
+  };
+
+  const cancel = () => {
+    setDraftName(r.name);
+    setDraftThreshold(r.threshold_pct);
+    setEditing(false);
+  };
+
+  const remove = () => {
+    // Window confirm — keep it minimal. If the operator wants a richer
+    // confirm dialog we can add one later, but for a destructive op
+    // on rule config (which can be re-added) this is fine.
+    if (
+      window.confirm(
+        `Delete rule "${r.name}"? Historical alerts that fired against this rule keep their snapshotted threshold.`,
+      )
+    ) {
+      deleteMutation.mutate();
+    }
+  };
+
+  return (
+    <tr className="border-b border-zinc-800/40 hover:bg-zinc-900/30">
+      <td className="px-4 py-2 text-xs text-zinc-200">
+        {editing ? (
+          <Input
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            className="text-xs w-40"
+          />
+        ) : (
+          r.name
+        )}
+      </td>
+      <td className="px-4 py-2 text-xs">
+        {r.metric == null ? (
+          <span className="text-zinc-500 italic">all metrics</span>
+        ) : (
+          <span className="text-zinc-300">{r.metric}</span>
+        )}
+      </td>
+      <td className="px-4 py-2 text-xs">
+        <SeverityBadge severity={r.severity} />
+      </td>
+      <td className="px-4 py-2 text-xs text-zinc-300 tabular-nums">
+        {editing ? (
+          <Input
+            type="number"
+            min={1}
+            max={100}
+            value={draftThreshold}
+            onChange={(e) => setDraftThreshold(Number(e.target.value))}
+            className="text-xs w-16"
+          />
+        ) : (
+          `${r.threshold_pct}%`
+        )}
+      </td>
+      <td className="px-4 py-2 text-xs">
+        <button
+          onClick={toggleEnabled}
+          disabled={updateMutation.isPending}
+          className={
+            "text-[10px] px-2 py-0.5 rounded border " +
+            (r.enabled
+              ? "border-emerald-800/60 text-emerald-400 hover:bg-emerald-900/20"
+              : "border-zinc-700 text-zinc-500 hover:bg-zinc-800/60")
+          }
+        >
+          {r.enabled ? "enabled" : "disabled"}
+        </button>
+      </td>
+      <td className="px-4 py-2 text-xs">
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={save}
+              disabled={updateMutation.isPending}
+              className="text-[11px] text-blue-400 hover:text-blue-300 disabled:opacity-50"
+            >
+              save
+            </button>
+            <button
+              onClick={cancel}
+              className="text-[11px] text-zinc-500 hover:text-zinc-300"
+            >
+              cancel
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setEditing(true)}
+              className="text-[11px] text-zinc-400 hover:text-zinc-200"
+            >
+              edit
+            </button>
+            <button
+              onClick={remove}
+              disabled={deleteMutation.isPending}
+              className="text-[11px] text-rose-500 hover:text-rose-300 disabled:opacity-50"
+            >
+              delete
+            </button>
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function AddRuleForm({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [metric, setMetric] = useState("");
+  const [severity, setSeverity] = useState<AlertSeverity>("warning");
+  const [threshold, setThreshold] = useState(80);
+  const [error, setError] = useState<string | null>(null);
+
+  const createMutation = useMutation({
+    mutationFn: (body: AlertRuleCreate) => api.createAlertRule(body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["alert-rules"] });
+      onClose();
+    },
+    onError: (e: unknown) => {
+      setError(e instanceof Error ? e.message : "Failed to create rule");
+    },
+  });
+
+  const submit = () => {
+    setError(null);
+    if (!name.trim()) {
+      setError("Name is required.");
+      return;
+    }
+    createMutation.mutate({
+      name: name.trim(),
+      // Empty string in the UI = global default. The API expects null
+      // for the "all metrics" scope.
+      metric: metric.trim() === "" ? null : metric.trim(),
+      severity,
+      threshold_pct: threshold,
+      enabled: true,
+    });
+  };
+
+  return (
+    <div className="px-4 py-3 border-b border-zinc-800 bg-zinc-900/40 space-y-3">
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+          Name
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Tight policy budget"
+            className="text-xs w-48"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+          Metric <span className="text-zinc-600">(blank = all metrics)</span>
+          <Input
+            value={metric}
+            onChange={(e) => setMetric(e.target.value)}
+            placeholder="e.g. address_objects"
+            className="text-xs w-48"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+          Severity
+          <Select
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value as AlertSeverity)}
+            className="text-xs"
+          >
+            <option value="warning">Warning</option>
+            <option value="critical">Critical</option>
+          </Select>
+        </label>
+        <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+          Threshold %
+          <Input
+            type="number"
+            min={1}
+            max={100}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+            className="text-xs w-20"
+          />
+        </label>
+        <div className="flex items-center gap-2 pb-0.5">
+          <Button onClick={submit} disabled={createMutation.isPending}>
+            {createMutation.isPending ? "Saving…" : "Add rule"}
+          </Button>
+          <button
+            onClick={onClose}
+            className="text-xs text-zinc-500 hover:text-zinc-300"
+          >
+            cancel
+          </button>
+        </div>
+      </div>
+      {error && (
+        <div className="text-xs text-rose-400">{error}</div>
+      )}
+    </div>
+  );
+}
+
+// ----- shared -----
 
 function SeverityBadge({ severity }: { severity: AlertSeverity }) {
   const cls =

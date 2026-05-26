@@ -401,6 +401,21 @@ export type AlertRead = {
   last_seen_at: string;
   cleared_at: string | null;
   acknowledged_at: string | null;
+  acknowledged_by: string | null;
+};
+
+export type AlertRuleCreate = {
+  name: string;
+  metric: string | null;
+  severity: AlertSeverity;
+  threshold_pct: number;
+  enabled?: boolean;
+};
+
+export type AlertRuleUpdate = {
+  name?: string;
+  threshold_pct?: number;
+  enabled?: boolean;
 };
 
 export type AlertsSummary = {
@@ -610,5 +625,21 @@ export const api = {
     return j<AlertRead[]>(`/alerts${suffix ? "?" + suffix : ""}`);
   },
   getAlertsSummary: () => j<AlertsSummary>("/alerts/summary"),
+  acknowledgeAlert: (alertId: number) =>
+    j<AlertRead>(`/alerts/${alertId}/acknowledge`, { method: "POST" }),
+  unacknowledgeAlert: (alertId: number) =>
+    j<AlertRead>(`/alerts/${alertId}/unacknowledge`, { method: "POST" }),
   listAlertRules: () => j<AlertRuleRead[]>("/alerts/rules"),
+  createAlertRule: (body: AlertRuleCreate) =>
+    j<AlertRuleRead>("/alerts/rules", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateAlertRule: (ruleId: number, body: AlertRuleUpdate) =>
+    j<AlertRuleRead>(`/alerts/rules/${ruleId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteAlertRule: (ruleId: number) =>
+    j<void>(`/alerts/rules/${ruleId}`, { method: "DELETE" }),
 };

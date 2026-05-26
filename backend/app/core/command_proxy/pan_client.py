@@ -205,7 +205,14 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
             "can't reach it, or there's a typo. Try the management IP "
             f"directly, or add the hostname to DNS. Original error: {msg}"
         )
-    if "401" in msg or "Invalid credential" in msg or "unauthorized" in msg.lower():
+    if (
+        "401" in msg
+        # Case-insensitive — PAN-OS returns "Invalid Credential" (capital C),
+        # while the existing test fixture used "Invalid credential" (lower c).
+        # Match either to cover both shapes that arrive in practice.
+        or "invalid credential" in msg.lower()
+        or "unauthorized" in msg.lower()
+    ):
         return (
             f"{context}: Authentication rejected by the device. Verify the "
             "credential (username/password or API key) and that the user "

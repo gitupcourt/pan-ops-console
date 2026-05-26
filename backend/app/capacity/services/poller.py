@@ -42,12 +42,66 @@ def _is_known_offline(device: Device) -> bool:
     return device.source == DeviceSource.PANORAMA and not device.connected
 
 
+def _lazy_populate_device_metadata(db: Session, device: Device, client) -> None:
+    """Fill in `device.model` (and adjacent metadata) on the first
+    successful poll of a freshly-added direct device.
+
+    Direct-added devices land in the DB with `model = NULL` because the
+    poller doesn't gather it and the operator may never have clicked
+    "Test" (which calls `get_system_info` and populates these fields).
+    That leaves them missing from the Capacity Analyzer heat-map (which
+    groups by model — null-model devices were dropped) and from any
+    UI that surfaces model badges.
+
+    This lazy-populate runs ONLY when `device.model is None` so the cost
+    is one-time per device: an extra `get_system_info()` round-trip on
+    the device's first successful poll cycle. Once `model` is set the
+    branch never fires again.
+
+    Best-effort: if the probe fails we swallow the exception and let the
+    regular metric polling proceed. The next poll cycle will retry.
+    Panorama-imported devices get `model` from the sync flow, so this
+    is effectively direct-device-only in practice.
+    """
+    if device.model:
+        return
+    try:
+        info = client.get_system_info()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "Could not probe %s for metadata (model/serial/version): %s",
+            device.name, exc,
+        )
+        return
+    if info.model:
+        device.model = info.model
+    if info.serial and not device.serial:
+        device.serial = info.serial
+    if info.sw_version:
+        device.current_version = info.sw_version
+        device.sw_version = info.sw_version  # transitional dup; see Device model
+    if info.hostname and not device.hostname:
+        device.hostname = info.hostname
+    db.commit()
+    log.info(
+        "Populated metadata for %s on first poll: model=%s sw=%s",
+        device.name, info.model, info.sw_version,
+    )
+
+
 def poll_device(
     db: Session, device: Device, metrics: list[MetricSpec]
 ) -> list[SamplePoint]:
     client, route = build_client_with_fallback(db, device)
     if route == "direct" and device.proxy_via_panorama:
         log.info("Polling %s direct (Panorama proxy unavailable)", device.name)
+
+    # First-poll metadata heal: if we got a working client and the device
+    # has never had its model recorded, grab system-info now. Cheap
+    # one-time cost per device; downstream views (Capacity heat-map, UI
+    # model badges) get correct labels without operator action.
+    _lazy_populate_device_metadata(db, device, client)
+
     now = datetime.now(timezone.utc)
     out: list[SamplePoint] = []
 

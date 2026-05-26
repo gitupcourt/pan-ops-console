@@ -9,6 +9,8 @@ import Profile from "./core/auth/Profile";
 import Providers from "./core/auth/Providers";
 import Users from "./core/auth/Users";
 import Inventory from "./core/devices/Inventory";
+import JobDetail from "./upgrade/JobDetail";
+import UpgradeJobs from "./upgrade/UpgradeJobs";
 
 export default function App() {
   const { user, bootstrap, isBootstrapLoading, isLoading } = useAuth();
@@ -37,6 +39,7 @@ export default function App() {
             <nav className="flex items-center gap-4 text-sm">
               <NavTab to="/">Dashboard</NavTab>
               <NavTab to="/inventory">Inventory</NavTab>
+              <NavTab to="/upgrade">Upgrade</NavTab>
               {user.is_admin && <NavTab to="/users">Users</NavTab>}
               {user.is_admin && <NavTab to="/providers">Providers</NavTab>}
             </nav>
@@ -48,6 +51,8 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/inventory" element={<Inventory />} />
+            <Route path="/upgrade" element={<UpgradeJobs />} />
+            <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />
             <Route path="/users" element={user.is_admin ? <Users /> : <NotAuthorized />} />
             <Route path="/providers" element={user.is_admin ? <Providers /> : <NotAuthorized />} />
             <Route path="/profile" element={<Profile />} />

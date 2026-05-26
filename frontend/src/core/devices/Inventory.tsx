@@ -10,6 +10,7 @@ import {
   PanoramaInput,
 } from "../../api";
 import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../ui/ui";
+import { DeviceConnectionStatus } from "./DeviceConnectionStatus";
 
 export default function Inventory() {
   return (
@@ -410,7 +411,12 @@ function DevicesSection() {
             {devs.map((d) => (
               <Fragment key={d.id}>
                 <tr className="border-b border-zinc-800/50 align-top">
-                  <td className="px-4 py-2 text-zinc-100">{d.name}</td>
+                  <td className="px-4 py-2 text-zinc-100">
+                    <div className="flex items-center gap-2">
+                      <span>{d.name}</span>
+                      <DeviceConnectionStatus device={d} />
+                    </div>
+                  </td>
                   <td className="px-4 py-2 text-zinc-400">{d.ip_address ?? d.hostname}</td>
                   <td className="px-4 py-2 text-zinc-400">{d.model ?? "—"}</td>
                   <td className="px-4 py-2 text-zinc-500 text-xs">

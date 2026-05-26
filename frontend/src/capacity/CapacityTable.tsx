@@ -171,7 +171,6 @@ export default function CapacityTable() {
           <>
             <CategorySection
               label="Configuration Resource"
-              category="config"
               rows={byCategory.config}
               onMetricClick={(deviceId, metricName) =>
                 navigate(`/capacity/trend/${deviceId}/${encodeURIComponent(metricName)}`)
@@ -179,7 +178,6 @@ export default function CapacityTable() {
             />
             <CategorySection
               label="System Resource"
-              category="system"
               rows={byCategory.system}
               onMetricClick={(deviceId, metricName) =>
                 navigate(`/capacity/trend/${deviceId}/${encodeURIComponent(metricName)}`)
@@ -187,7 +185,6 @@ export default function CapacityTable() {
             />
             <CategorySection
               label="Traffic Resource"
-              category="traffic"
               rows={byCategory.traffic}
               onMetricClick={(deviceId, metricName) =>
                 navigate(`/capacity/trend/${deviceId}/${encodeURIComponent(metricName)}`)
@@ -204,12 +201,10 @@ export default function CapacityTable() {
 
 function CategorySection({
   label,
-  category,
   rows,
   onMetricClick,
 }: {
   label: string;
-  category: MetricCategory;
   rows: CapacityTableRow[];
   onMetricClick: (deviceId: number, metric: string) => void;
 }) {

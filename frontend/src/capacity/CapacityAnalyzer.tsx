@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { api, HeatmapCell, MetricCategory } from "../api";
 import { Button, Card, CardHeader, Select } from "../core/ui/ui";
+import { CapacityViewToggle } from "./CapacityViewToggle";
 import { HeatMapTile } from "./HeatMapTile";
 
 /**
@@ -31,14 +33,27 @@ import { HeatMapTile } from "./HeatMapTile";
  *   - Multicolor / Monochrome view toggle
  */
 export default function CapacityAnalyzer() {
-  // Filter state. All optional; if everything is unset we show the full grid.
-  const [metricFilter, setMetricFilter] = useState<string>("");
-  const [modelFilter, setModelFilter] = useState<string>("");
-  const [deviceGroup, setDeviceGroup] = useState<string>("");
-  const [templateStack, setTemplateStack] = useState<string>("");
+  // Filter state lives in URL search params so it survives the
+  // view-toggle navigate (heat-map → table → heat-map) and so
+  // operators can copy/paste a filtered view link. Heat-map-only UI
+  // state (Capacity Filter slider, color scheme) stays as local
+  // state — those controls don't have a counterpart in the table
+  // view and don't need to be sharable.
+  const [params, setParams] = useSearchParams();
+  const metricFilter = params.get("metric") ?? "";
+  const modelFilter = params.get("model") ?? "";
+  const deviceGroup = params.get("device_group") ?? "";
+  const templateStack = params.get("template_stack") ?? "";
   const [pctMin, setPctMin] = useState<number>(0);
   const [pctMax, setPctMax] = useState<number>(100);
   const [colorScheme, setColorScheme] = useState<"multi" | "mono">("multi");
+
+  const updateFilter = (key: string, value: string) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value);
+    else next.delete(key);
+    setParams(next);
+  };
 
   const heatmapQ = useQuery({
     queryKey: ["capacity-heatmap", deviceGroup, templateStack],
@@ -70,10 +85,7 @@ export default function CapacityAnalyzer() {
   }, [cells, metricFilter, modelFilter, pctMin, pctMax]);
 
   const reset = () => {
-    setMetricFilter("");
-    setModelFilter("");
-    setDeviceGroup("");
-    setTemplateStack("");
+    setParams(new URLSearchParams());
     setPctMin(0);
     setPctMax(100);
   };
@@ -86,16 +98,19 @@ export default function CapacityAnalyzer() {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold text-zinc-100">
-        Capacity Analyzer
-      </h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold text-zinc-100">
+          Capacity Analyzer
+        </h2>
+        <CapacityViewToggle view="heatmap" />
+      </div>
 
       <Card>
         <div className="px-4 py-3 flex flex-wrap items-center gap-3 text-xs border-b border-zinc-800">
           <FilterDropdown
             label="Metric"
             value={metricFilter}
-            onChange={setMetricFilter}
+            onChange={(v) => updateFilter("metric", v)}
             options={[
               { value: "", label: "All" },
               ...allMetrics.map((m) => ({ value: m.metric, label: m.metric_description })),
@@ -104,7 +119,7 @@ export default function CapacityAnalyzer() {
           <FilterDropdown
             label="Model Type"
             value={modelFilter}
-            onChange={setModelFilter}
+            onChange={(v) => updateFilter("model", v)}
             options={[
               { value: "", label: "All" },
               ...models.map((m) => ({ value: m, label: m })),
@@ -113,7 +128,7 @@ export default function CapacityAnalyzer() {
           <FilterDropdown
             label="Device Group"
             value={deviceGroup}
-            onChange={setDeviceGroup}
+            onChange={(v) => updateFilter("device_group", v)}
             options={[
               { value: "", label: "All" },
               ...deviceGroups.map((g) => ({ value: g, label: g })),
@@ -122,7 +137,7 @@ export default function CapacityAnalyzer() {
           <FilterDropdown
             label="Template Stack"
             value={templateStack}
-            onChange={setTemplateStack}
+            onChange={(v) => updateFilter("template_stack", v)}
             options={[
               { value: "", label: "All" },
               ...templateStacks.map((t) => ({ value: t, label: t })),

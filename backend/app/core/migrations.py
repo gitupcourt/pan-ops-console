@@ -72,22 +72,27 @@ def _baseline_revision(cfg: Config) -> str:
 
     Resolves dynamically so this stays correct as the migration tree
     grows; no need to update a hardcoded string each time a new
-    baseline-touching migration is added. (The current baseline is
-    "0001"; using `get_revisions("base")` keeps that as data, not code.)
+    baseline-touching migration is added.
+
+    Subtle alembic API quirk this avoids: `ScriptDirectory.get_revisions("base")`
+    returns an empty tuple — "base" is a literal alembic token meaning
+    "before any revision," not a query for base revisions. The right call
+    is `get_bases()`, which returns the revision IDs whose `down_revision`
+    is None.
     """
     script = ScriptDirectory.from_config(cfg)
-    bases = script.get_revisions("base")
+    bases = script.get_bases()
     if not bases:
         raise RuntimeError("alembic has no base revision")
     if len(bases) > 1:
         # Linear chain expected — multiple bases would mean someone
         # branched the migration tree, which we don't do here. Fail loud.
         raise RuntimeError(
-            f"alembic has multiple base revisions ({[b.revision for b in bases]}); "
+            f"alembic has multiple base revisions ({list(bases)}); "
             "this stamp helper expects a single linear chain. Pin the right "
             "baseline manually before continuing."
         )
-    return bases[0].revision
+    return bases[0]
 
 
 def _migration_has_real_upgrade(path: Path) -> bool:

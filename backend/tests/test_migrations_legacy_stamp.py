@@ -81,12 +81,19 @@ def test_legacy_create_all_db_gets_stamped_at_baseline_then_upgraded(client, db)
 
 def test_baseline_revision_is_resolved_dynamically(client, db):
     """The fix resolves the baseline revision via
-    `ScriptDirectory.get_revisions('base')` instead of hardcoding '0001'.
+    `ScriptDirectory.get_bases()` instead of hardcoding '0001'.
 
     Pin the contract: there's exactly one base revision (linear chain),
     and the runner returns its id correctly. If someone branches the
     migration tree later, _baseline_revision raises rather than picking
     a wrong base silently.
+
+    Note the API choice: `script.get_bases()` (NOT `get_revisions("base")`,
+    which returns an empty tuple — "base" is alembic's literal token for
+    "before any revision," not a query for revisions whose down_revision
+    is None). The wrong API landed the first CI run with a confusing
+    `RuntimeError: alembic has no base revision` — the helper's loud-fail
+    wired up correctly but it was firing for the wrong reason.
     """
     from app.core.migrations import _alembic_config, _baseline_revision
 
@@ -97,12 +104,12 @@ def test_baseline_revision_is_resolved_dynamically(client, db):
     # the chain ever gets a new base prepended (unlikely but possible).
     from alembic.script import ScriptDirectory
 
-    bases = ScriptDirectory.from_config(cfg).get_revisions("base")
+    bases = ScriptDirectory.from_config(cfg).get_bases()
     assert len(bases) == 1, (
         "Migration tree gained multiple bases — _baseline_revision will "
         "raise in production. Pin a single base or update the helper."
     )
-    assert baseline == bases[0].revision
+    assert baseline == bases[0]
 
 
 def test_legacy_branch_writes_post_baseline_columns(client, db):

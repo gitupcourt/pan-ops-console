@@ -19,8 +19,27 @@ from app.capacity.services.catalog import MetricSpec, Sources
 from app.capacity.services.storage import SamplePoint, SampleStore
 from app.core.command_proxy.builder import build_client_with_fallback
 from app.core.devices.models.device import Device
+from app.core.devices.models.enums import DeviceSource
 
 log = logging.getLogger(__name__)
+
+
+def _is_known_offline(device: Device) -> bool:
+    """True for Panorama-imported devices that Panorama currently reports
+    as not connected.
+
+    Panorama's `connected` field on `show devices all` is authoritative
+    for "is this device reachable via Panorama right now." For
+    Panorama-imported devices (`source=PANORAMA`), we trust that signal —
+    polling a known-offline device through Panorama just produces a "target
+    not connected" error per round-trip, which is noise, wastes the call,
+    and (pre-#48) used to mis-attribute as "Panorama unreachable."
+
+    Excluded: direct-added devices. We don't refresh their `connected`
+    flag (sync only runs against Panorama), so it's permanently False
+    for direct devices and unsafe to use as a skip signal there.
+    """
+    return device.source == DeviceSource.PANORAMA and not device.connected
 
 
 def poll_device(
@@ -102,6 +121,24 @@ def poll_all(db: Session, metrics: list[MetricSpec], store: SampleStore) -> dict
     devices = db.query(Device).filter(Device.polling_enabled == True).all()  # noqa: E712
 
     for device in devices:
+        # Cheap pre-check: skip Panorama-imported devices that Panorama
+        # currently reports as disconnected. Saves the wasted XML round-
+        # trip and avoids the (pre-#48) misleading "Panorama proxy failed"
+        # log noise per cycle per offline device. The next Panorama sync
+        # will refresh `connected` so a device coming back online resumes
+        # polling at the next sync interval.
+        if _is_known_offline(device):
+            device.last_poll_at = datetime.now(timezone.utc)
+            device.last_poll_error = (
+                "Skipped: Panorama reports device as disconnected. "
+                "Polling will resume automatically once Panorama sees the "
+                "device come back online."
+            )
+            results[device.id] = 0
+            log.info("Skipped %s: Panorama reports disconnected", device.name)
+            db.commit()
+            continue
+
         try:
             points = poll_device(db, device, metrics)
             store.write_samples(points)

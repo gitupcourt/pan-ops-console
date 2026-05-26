@@ -23,16 +23,30 @@ Behavior:
 1. If `proxy_via_panorama && panorama_id && serial`: build a proxy
    client, do a cheap `get_system_info()` health probe.
 2. On proxy success: mark Panorama healthy, return proxy.
-3. On proxy failure: mark Panorama unhealthy (with exception text in
-   `last_reachability_error`), log a warning.
-4. If device can fall back to direct (has its own inline credential):
-   return direct client.
-5. If no direct fallback possible: re-raise as ConnectionError.
+3. On proxy probe raising `TargetDisconnectedError` (Panorama reachable,
+   but it reports the device as offline): mark Panorama HEALTHY (the
+   proxy call did reach Panorama), then try direct fallback if available,
+   else re-raise. Critically, this does *not* taint
+   `panoramas.reachable` — the Panorama is fine, the device is down.
+4. On any other proxy failure (network error to Panorama, auth rejected,
+   etc.): mark Panorama unhealthy (with exception text in
+   `last_reachability_error`), log a warning, then try direct fallback.
+5. If direct fallback available: return direct client.
+6. If no direct fallback possible: re-raise.
 
 Side effect to know about (per MIGRATION_NOTES §4):
 - Writes to `panoramas.reachable`, `panoramas.last_reachability_at`,
   `panoramas.last_reachability_error` via `_mark_panorama_health`.
   The helper commits, so the caller does not need to.
+
+Error-attribution fix (post-#43, post-proxy-by-default rollout): an
+earlier version of this routine treated *every* probe failure as
+"Panorama unhealthy", which caused Panorama's reachability flag to
+flap False whenever a single device behind it was offline (an N×1
+attribution bug — every poll of every disconnected device wrote
+`reachable=False` for the shared Panorama). The TargetDisconnectedError
+branch above keeps that flag accurate when the failure is at the
+device layer rather than the Panorama layer.
 
 Notable calibration choices preserved verbatim:
 - Health probe is `get_system_info()` specifically because it's the
@@ -51,7 +65,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.core.command_proxy.pan_client import PanDeviceClient
+from app.core.command_proxy.pan_client import PanDeviceClient, TargetDisconnectedError
 from app.core.credentials import decrypt_key
 from app.core.devices.models.device import Device
 
@@ -139,6 +153,29 @@ def build_client_with_fallback(
             proxy_client.get_system_info()
             _mark_panorama_health(db, device, ok=True)
             return proxy_client, "proxy"
+        except TargetDisconnectedError as exc:
+            # Panorama itself is healthy — it answered the proxy call. It
+            # just told us the target firewall is offline. Mark Panorama
+            # as reachable (the call succeeded at the Panorama layer) but
+            # propagate the device-down state so the caller can surface
+            # "device disconnected" rather than "Panorama proxy failed."
+            _mark_panorama_health(db, device, ok=True)
+            log.info(
+                "Panorama reports %s as disconnected; not attempting fallback",
+                device.name,
+            )
+            # Direct fallback is unlikely to succeed for a Panorama-imported
+            # device that's offline (no own key, and the device is down anyway).
+            # But if the operator has set up direct credentials, give it a
+            # shot — sometimes Panorama's "not connected" reflects a stale
+            # connection while the device itself is actually reachable.
+            if _device_can_direct(device):
+                log.info(
+                    "Trying direct fallback for %s despite Panorama-reported disconnect",
+                    device.name,
+                )
+                return _build_direct_client(device), "direct"
+            raise
         except Exception as exc:  # noqa: BLE001
             _mark_panorama_health(db, device, ok=False, error=str(exc))
             log.warning(

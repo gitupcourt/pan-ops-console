@@ -13,7 +13,11 @@ matters most.
 
 from __future__ import annotations
 
-from app.core.command_proxy.pan_client import _friendly_check_error
+from app.core.command_proxy.pan_client import (
+    TargetDisconnectedError,
+    _friendly_check_error,
+    _looks_like_target_disconnect,
+)
 
 
 def test_connection_refused_maps_to_https_hint():
@@ -95,3 +99,74 @@ def test_unrecognized_falls_back_to_generic():
     msg = _friendly_check_error(Exception("something else entirely"))
     assert "Readiness checks failed" in msg
     assert "something else entirely" in msg
+
+
+# ---------- TargetDisconnectedError classification ----------
+#
+# These tests pin the "is this exception Panorama saying the target is
+# offline, or is it Panorama itself being unreachable?" decision boundary.
+# The classifier feeds the proxy-vs-direct fallback logic in
+# `command_proxy.builder` — getting it wrong here corrupts
+# `panoramas.reachable` for every device behind a healthy Panorama whose
+# firewall happens to be offline (the N×1 attribution bug from #50).
+
+
+def test_target_disconnect_detects_target_not_connected():
+    assert _looks_like_target_disconnect(Exception("target not connected"))
+    assert _looks_like_target_disconnect(Exception("Target is not connected"))
+
+
+def test_target_disconnect_detects_named_device_not_connected():
+    # The most common real-world shape from PAN-OS XML API.
+    assert _looks_like_target_disconnect(
+        Exception("Device '0123456789' is not connected")
+    )
+
+
+def test_target_disconnect_detects_unknown_target():
+    assert _looks_like_target_disconnect(
+        Exception("target serial does not exist on this Panorama")
+    )
+    assert _looks_like_target_disconnect(Exception("No such target"))
+    assert _looks_like_target_disconnect(Exception("target unknown"))
+
+
+def test_target_disconnect_detects_target_connection_failed():
+    assert _looks_like_target_disconnect(
+        Exception("Target connection failed: retry later")
+    )
+
+
+def test_target_disconnect_does_not_match_network_errors():
+    # Network-level failures to Panorama itself should NOT classify as
+    # target-disconnect — they're Panorama health issues.
+    assert not _looks_like_target_disconnect(Exception("Connection refused"))
+    assert not _looks_like_target_disconnect(Exception("Connection timed out"))
+    assert not _looks_like_target_disconnect(
+        Exception("[Errno -2] Name or service not known")
+    )
+    assert not _looks_like_target_disconnect(
+        Exception("HTTP 401 unauthorized — bad credential")
+    )
+    assert not _looks_like_target_disconnect(
+        Exception("certificate verify failed: self-signed certificate")
+    )
+
+
+def test_target_disconnect_does_not_match_unrelated_errors():
+    assert not _looks_like_target_disconnect(
+        Exception("Internal Server Error 500")
+    )
+    assert not _looks_like_target_disconnect(
+        Exception("PAN-OS reported invalid command syntax")
+    )
+
+
+def test_target_disconnected_error_is_a_connection_error():
+    """Callers that catch `ConnectionError` (the broad case) still catch
+    TargetDisconnectedError — the inheritance is what keeps existing
+    `except ConnectionError` blocks working unchanged."""
+    assert issubclass(TargetDisconnectedError, ConnectionError)
+    exc = TargetDisconnectedError("nope")
+    assert isinstance(exc, ConnectionError)
+    assert isinstance(exc, TargetDisconnectedError)

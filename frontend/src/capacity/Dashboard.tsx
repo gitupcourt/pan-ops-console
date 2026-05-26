@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 
 import { api, Device, MetricSpec } from "../api";
 import { DeviceConnectionStatus } from "../core/devices/DeviceConnectionStatus";
@@ -12,15 +13,29 @@ export default function Dashboard() {
   const devicesQ = useQuery({ queryKey: ["devices"], queryFn: api.listDevices });
   const catalogQ = useQuery({ queryKey: ["catalog"], queryFn: api.listCatalog });
 
-  const [deviceId, setDeviceId] = useState<number | null>(null);
+  // The URL is the source of truth for which device is selected.
+  // Two routes mount Dashboard: `/capacity/device` (no param — defaults
+  // to alphabetic-first) and `/capacity/device/:deviceId` (deep-link
+  // from the Capacity Table's host column or anywhere else that knows
+  // the device id). Changing the dropdown navigates to the
+  // `:deviceId`-bearing URL so back/forward and copy/paste preserve
+  // context.
+  const { deviceId: deviceIdParam } = useParams<{ deviceId?: string }>();
+  const navigate = useNavigate();
+  const urlDeviceId =
+    deviceIdParam && /^\d+$/.test(deviceIdParam) ? Number(deviceIdParam) : null;
+
   const [hours, setHours] = useState(1);
 
   const devices: Device[] = devicesQ.data ?? [];
   const catalog: MetricSpec[] = catalogQ.data ?? [];
 
+  // Resolve the displayed device: URL param wins, fall back to first
+  // device if the URL is bare or points at a device that no longer
+  // exists (e.g. stale bookmark to a deleted device).
   const selected = useMemo(
-    () => devices.find((d) => d.id === deviceId) ?? devices[0] ?? null,
-    [devices, deviceId],
+    () => devices.find((d) => d.id === urlDeviceId) ?? devices[0] ?? null,
+    [devices, urlDeviceId],
   );
   const activeDeviceId = selected?.id ?? null;
 
@@ -50,7 +65,9 @@ export default function Dashboard() {
       <div className="flex items-center gap-3 mb-3">
         <Select
           value={activeDeviceId ?? ""}
-          onChange={(e) => setDeviceId(Number(e.target.value))}
+          onChange={(e) =>
+            navigate(`/capacity/device/${Number(e.target.value)}`)
+          }
         >
           {devices.map((d) => (
             <option key={d.id} value={d.id}>

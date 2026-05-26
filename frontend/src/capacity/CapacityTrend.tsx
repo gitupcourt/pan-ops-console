@@ -32,9 +32,9 @@ import { Button, Card, CardHeader, Select } from "../core/ui/ui";
  * are both surfaced here.
  *
  * Below the chart: a small device-picker table listing every device
- * of the same model with the same metric, with radio-button selection
- * to swap which device's chart is displayed. Matches the screenshot's
- * "Address Objects on all PA-220" affordance.
+ * of the same model with the same metric. Click any row to swap which
+ * device's chart is displayed. (PA's UI has radio buttons on each row
+ * but they're redundant with the row click, so we drop them.)
  */
 export default function CapacityTrend() {
   const { deviceId: deviceIdStr, metric } = useParams<{
@@ -354,7 +354,6 @@ function PeerPicker({
     <table className="w-full text-sm">
       <thead className="text-[11px] uppercase text-zinc-500 border-b border-zinc-800">
         <tr>
-          <th className="w-8 px-2 py-2"></th>
           <th className="text-left px-4 py-2 font-medium">Host</th>
           <th className="text-left px-4 py-2 font-medium">Amount Used</th>
           <th className="text-left px-4 py-2 font-medium">Unused</th>
@@ -371,6 +370,10 @@ function PeerPicker({
               : null;
           const selected = r.device_id === currentDeviceId;
           return (
+            // The whole row is the selection affordance. The selected
+            // row gets a subtle highlight + left-border accent so the
+            // operator can see at a glance which device the chart above
+            // is currently showing.
             <tr
               key={r.device_id}
               className={`border-b border-zinc-800/40 hover:bg-zinc-900/30 cursor-pointer ${
@@ -378,14 +381,15 @@ function PeerPicker({
               }`}
               onClick={() => onPick(r.device_id)}
             >
-              <td className="px-2 py-2 text-center">
-                <input
-                  type="radio"
-                  checked={selected}
-                  onChange={() => onPick(r.device_id)}
-                />
+              <td
+                className={`px-4 py-2 ${
+                  selected
+                    ? "border-l-2 border-blue-400 text-blue-300 font-medium"
+                    : "text-blue-400"
+                }`}
+              >
+                {r.device_name}
               </td>
-              <td className="px-4 py-2 text-blue-400">{r.device_name}</td>
               <td className="px-4 py-2 text-xs text-zinc-300">
                 {fmtCount(r.current)}{" "}
                 <span className="text-zinc-500">

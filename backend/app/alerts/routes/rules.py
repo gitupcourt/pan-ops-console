@@ -137,13 +137,20 @@ def update_rule(
 
 
 @router.delete("/{rule_id}", status_code=204)
-def delete_rule(rule_id: int, db: Session = Depends(get_db)) -> None:
+def delete_rule(rule_id: int, db: Session = Depends(get_db)):
     """Hard delete. Historical alert rows are not affected — they
     snapshotted threshold_pct at fire time, so they remain
     self-describing even with the rule gone.
 
     Operators can re-add a deleted default rule by POSTing the same
     shape.
+
+    Intentionally no `-> None` annotation: FastAPI's newer behaviour
+    is to treat any non-Response return annotation (including `None`)
+    as declaring a response model, which conflicts with the 204
+    status-code-must-not-have-body rule and raises an assertion at
+    app startup. Matches the convention in the existing DELETE
+    handlers under core/auth/, core/devices/, core/panorama/.
     """
     rule = db.get(AlertRule, rule_id)
     if rule is None:

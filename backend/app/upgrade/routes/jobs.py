@@ -41,10 +41,12 @@ parked or failed task):
                                          `reconcile_markers_with_device_state`
                                          handles drift before resuming).
 
-Phase-4d coupling is via Celery `send_task("upgrade.drive_pair", ...)`
-— stubbed here with a TODO comment until 4d wires the worker side.
-Routes set DB state correctly today so the API is observable; the
-orchestrator just doesn't run yet.
+Celery dispatch (phase 4d): `start_job`, `confirm_task`,
+`override_task`, and `retry_task` all hand the orchestrator one
+`drive_pair_task.delay(job_id, ha_pair_key)` per affected pair. The
+orchestrator runs to the next park point, returns, and waits for the
+next dispatch — re-entry resumes from the last completed phase marker
+in `task.progress.completed_phases`.
 """
 
 from __future__ import annotations
@@ -71,6 +73,7 @@ from app.upgrade.schemas import (
     TaskOverride,
     TaskRead,
 )
+from app.upgrade.tasks import drive_pair_task
 
 router = APIRouter(tags=["upgrade"])
 
@@ -300,13 +303,11 @@ def start_job(job_id: int, db: Session = Depends(get_db)):
     Idempotent on a RUNNING job (no-op). Refuses to start a job that's
     already in a terminal state.
 
-    **Phase-4d coupling**: this route SHOULD `send_task` to the Celery
-    queue (`upgrade.drive_pair` for each unique ha_pair_key). Until
-    phase 4d defines that task on the worker, the DB state change here
-    is the only effect of /start — the orchestrator never actually
-    ticks. Running this in dev pre-4d is safe (no errors, just no
-    progress). Documenting the TODO inline so the next change to this
-    route notices the missing dispatch and adds it.
+    Dispatches one `drive_pair_task` per unique ha_pair_key. HA peers
+    share a key, so a job with one standalone + one HA pair fans out
+    to exactly 2 dispatches, not 3. Each dispatch runs the orchestrator
+    until the next park point or done; subsequent dispatches
+    (confirm/override/retry) resume from the parked phase.
     """
     job = db.get(UpgradeJob, job_id)
     if job is None:
@@ -321,15 +322,17 @@ def start_job(job_id: int, db: Session = Depends(get_db)):
 
     job.state = JobState.RUNNING
     job.started_at = datetime.now(timezone.utc)
-
-    # TODO(phase 4d): when `app.upgrade.tasks` exports `drive_pair`,
-    # `from app.upgrade.tasks import drive_pair` and dispatch one
-    # `drive_pair.delay(job.id, ha_pair_key)` per unique ha_pair_key
-    # in this job's tasks. Right now the worker has no handler for that
-    # name, so dispatching would just queue messages that nothing
-    # consumes. Better to leave the queue clean until 4d lands.
     db.commit()
     db.refresh(job)
+
+    # Commit the state transition BEFORE dispatching — if the broker is
+    # slow or the dispatch raises, we don't want the job stuck in a
+    # half-RUNNING limbo. The orchestrator on the worker side reads
+    # job.state on entry, so it sees RUNNING when it picks up the task.
+    pair_keys = sorted({t.ha_pair_key for t in job.tasks})
+    for key in pair_keys:
+        drive_pair_task.delay(job.id, key)
+
     return _job_to_detail(job)
 
 
@@ -467,6 +470,12 @@ def confirm_task(
     _consume_task_token(task, payload.token, valid_phases=_AWAITING_CONFIRM)
     db.commit()
     db.refresh(task)
+
+    # Wake the orchestrator for THIS task's pair. The previous drive_pair
+    # call returned when it parked; the new one will see the cleared
+    # confirmation_token + the current phase and advance.
+    drive_pair_task.delay(task.job_id, task.ha_pair_key)
+
     base = _task_to_read(task)
     return TaskDetail.model_validate(
         {**base.model_dump(), "progress": task.progress}
@@ -493,6 +502,9 @@ def override_task(
     _consume_task_token(task, payload.token, valid_phases=_AWAITING_OVERRIDE)
     db.commit()
     db.refresh(task)
+
+    drive_pair_task.delay(task.job_id, task.ha_pair_key)
+
     base = _task_to_read(task)
     return TaskDetail.model_validate(
         {**base.model_dump(), "progress": task.progress}
@@ -532,6 +544,9 @@ def retry_task(task_id: int, db: Session = Depends(get_db)):
     # makes retry resume from where it left off instead of starting over.
     db.commit()
     db.refresh(task)
+
+    drive_pair_task.delay(task.job_id, task.ha_pair_key)
+
     base = _task_to_read(task)
     return TaskDetail.model_validate(
         {**base.model_dump(), "progress": task.progress}

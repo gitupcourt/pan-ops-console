@@ -17,6 +17,7 @@ pin the API contract that 4d and the frontend depend on.
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 
 from app.core.devices.models.device import Device
@@ -27,6 +28,35 @@ from app.upgrade.models.job import DeviceUpgradeTask, UpgradeJob
 
 
 STRONG = "correct horse battery staple"
+
+
+@pytest.fixture(autouse=True)
+def _stub_celery_dispatch(monkeypatch):
+    """Stub `drive_pair_task.delay` so route tests don't try to hit Redis.
+
+    Phase 4d wired the routes to dispatch the orchestrator via Celery
+    on /start, /confirm, /override, and /retry. In tests there's no
+    broker, so the real `.delay()` call would error out trying to
+    connect. We replace it with a no-op that returns a fake AsyncResult
+    shape (good enough for the routes' return path — none of them
+    inspect the result).
+
+    Tests that care about WHICH calls were made should use a different
+    fixture (or override this one) that records args. The default here
+    is "tests pass without exercising the broker."
+    """
+    from app.upgrade.routes import jobs as jobs_routes
+
+    class _FakeAsyncResult:
+        id = "fake-task-id"
+
+    def _fake_delay(*args, **kwargs):
+        return _FakeAsyncResult()
+
+    monkeypatch.setattr(
+        jobs_routes.drive_pair_task, "delay", _fake_delay
+    )
+    yield
 
 
 def _signup(client):

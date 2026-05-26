@@ -177,7 +177,15 @@ def list_jobs(db: Session = Depends(get_db)):
         ).all()
     )
     jobs = (
-        db.execute(select(UpgradeJob).order_by(UpgradeJob.created_at.desc()))
+        db.execute(
+            select(UpgradeJob)
+            # Newest first by wall clock, with id as a tiebreaker so jobs
+            # created within the same second (common in tests + bulk
+            # operator workflows) get a stable order. Without this SQLite
+            # falls back to row-insertion order, which is fine in prod
+            # but flaky in tests and surprising in the UI.
+            .order_by(UpgradeJob.created_at.desc(), UpgradeJob.id.desc())
+        )
         .scalars()
         .all()
     )

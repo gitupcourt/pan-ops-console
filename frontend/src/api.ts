@@ -172,6 +172,118 @@ export type MetricSeries = {
   samples: Sample[];
 };
 
+// ---------- Upgrade module ----------
+//
+// Mirrors `app/upgrade/schemas.py`. Job/task lifecycle is operator-
+// driven through the routes: create a job → start it → confirm/override
+// at park steps → done or retry on failure.
+
+export type WorkflowType = "full" | "partial";
+
+export type JobState =
+  | "pending"
+  | "running"
+  | "awaiting_confirmation"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+export type TaskPhase =
+  | "pending"
+  | "precheck"
+  | "awaiting_precheck_override"
+  | "snapshot"
+  | "downloading_image"
+  | "suspend_secondary"
+  | "upgrade_secondary"
+  | "awaiting_reboot_confirm"
+  | "postcheck_secondary"
+  | "awaiting_postcheck_override"
+  | "awaiting_failover_confirm"
+  | "failover"
+  | "awaiting_primary_upgrade_confirm"
+  | "upgrade_primary"
+  | "postcheck_primary"
+  | "failback"
+  | "report"
+  | "done"
+  | "failed";
+
+export type UpgradeImage = {
+  id: number;
+  version: string;
+  filename: string | null;
+  sha256: string | null;
+  size_bytes: number | null;
+  notes: string | null;
+  created_at: string;
+  uploaded: boolean;
+};
+
+export type UpgradeImageCreate = {
+  version: string;
+  notes?: string | null;
+};
+
+export type UpgradeJob = {
+  id: number;
+  name: string;
+  target_version: string;
+  workflow: WorkflowType;
+  state: JobState;
+  task_count: number;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type UpgradeTask = {
+  id: number;
+  job_id: number;
+  device_id: number;
+  device_name: string;
+  ha_pair_key: string;
+  phase: TaskPhase;
+  error: string | null;
+  confirmation_token: string | null;
+  tick_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type UpgradeTaskDetail = UpgradeTask & {
+  progress: Record<string, unknown> | null;
+};
+
+export type UpgradeJobDetail = UpgradeJob & {
+  workflow_stages: string[] | null;
+  image_id: number | null;
+  device_pull_image: boolean;
+  require_failover_confirmation: boolean;
+  require_primary_upgrade_confirmation: boolean;
+  auto_failback: boolean;
+  auto_reboot_after_install: boolean;
+  auto_ack_precheck_failures: boolean;
+  auto_ack_postcheck_failures: boolean;
+  tasks: UpgradeTask[];
+};
+
+export type UpgradeJobCreate = {
+  name: string;
+  target_version: string;
+  device_ids: number[];
+  workflow?: WorkflowType;
+  workflow_stages?: string[] | null;
+  image_id?: number | null;
+  device_pull_image?: boolean;
+  require_failover_confirmation?: boolean;
+  require_primary_upgrade_confirmation?: boolean;
+  auto_failback?: boolean;
+  auto_reboot_after_install?: boolean;
+  auto_ack_precheck_failures?: boolean;
+  auto_ack_postcheck_failures?: boolean;
+};
+
 // ---------- API ----------
 
 export const api = {
@@ -267,4 +379,45 @@ export const api = {
   getSeries: (deviceId: number, metric: string, hours = 24) =>
     j<MetricSeries>(`/metrics/${deviceId}/${metric}?hours=${hours}`),
   pollNow: () => j<{ status: string }>("/metrics/poll/run-now", { method: "POST" }),
+
+  // Upgrade: jobs
+  listUpgradeJobs: () => j<UpgradeJob[]>("/upgrade/jobs"),
+  createUpgradeJob: (body: UpgradeJobCreate) =>
+    j<UpgradeJobDetail>("/upgrade/jobs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getUpgradeJob: (id: number) => j<UpgradeJobDetail>(`/upgrade/jobs/${id}`),
+  startUpgradeJob: (id: number) =>
+    j<UpgradeJobDetail>(`/upgrade/jobs/${id}/start`, { method: "POST" }),
+  abortUpgradeJob: (id: number) =>
+    j<UpgradeJobDetail>(`/upgrade/jobs/${id}/abort`, { method: "POST" }),
+  deleteUpgradeJob: (id: number) =>
+    j<void>(`/upgrade/jobs/${id}`, { method: "DELETE" }),
+
+  // Upgrade: tasks (within a job)
+  getUpgradeTask: (id: number) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}`),
+  confirmUpgradeTask: (id: number, token: string) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  overrideUpgradeTask: (id: number, token: string) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/override`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  retryUpgradeTask: (id: number) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/retry`, { method: "POST" }),
+
+  // Upgrade: image registry
+  listUpgradeImages: () => j<UpgradeImage[]>("/upgrade/images"),
+  registerUpgradeImage: (body: UpgradeImageCreate) =>
+    j<UpgradeImage>("/upgrade/images", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteUpgradeImage: (id: number) =>
+    j<void>(`/upgrade/images/${id}`, { method: "DELETE" }),
 };

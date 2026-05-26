@@ -9,6 +9,7 @@ import Profile from "./core/auth/Profile";
 import Providers from "./core/auth/Providers";
 import Users from "./core/auth/Users";
 import Inventory from "./core/devices/Inventory";
+import HomeDashboard from "./HomeDashboard";
 import JobDetail from "./upgrade/JobDetail";
 import UpgradeJobs from "./upgrade/UpgradeJobs";
 
@@ -38,6 +39,7 @@ export default function App() {
             </h1>
             <nav className="flex items-center gap-4 text-sm">
               <NavTab to="/">Dashboard</NavTab>
+              <NavTab to="/capacity">Capacity</NavTab>
               <NavTab to="/inventory">Inventory</NavTab>
               <NavTab to="/upgrade">Upgrade</NavTab>
               {user.is_admin && <NavTab to="/users">Users</NavTab>}
@@ -49,7 +51,13 @@ export default function App() {
 
         <main className="max-w-7xl mx-auto px-6 py-6">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<HomeDashboard />} />
+            {/* /capacity is the old "Dashboard" home for now — phase 9
+                replaces this with the heat-map. The per-device chart
+                grid it currently renders lives on as the device-detail
+                view (reachable from the capacity table in phase 10),
+                so swapping the route here doesn't lose the affordance. */}
+            <Route path="/capacity" element={<Dashboard />} />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/upgrade" element={<UpgradeJobs />} />
             <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />

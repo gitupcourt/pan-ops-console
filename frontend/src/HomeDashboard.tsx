@@ -1,7 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "react-router-dom";
 
-import { api, Device, JobsSummary, Panorama, VersionDistributionRow } from "./api";
+import {
+  api,
+  AlertsSummary,
+  Device,
+  JobsSummary,
+  Panorama,
+  VersionDistributionRow,
+} from "./api";
 import { Card, CardHeader } from "./core/ui/ui";
 
 /**
@@ -49,14 +56,16 @@ export default function HomeDashboard() {
 // ----- frames -----
 
 function AlertsFrame() {
-  // Phase 12 will wire this to a /alerts/active query. Leaving the
-  // frame in place with the link target wired up so the home page
-  // doesn't dead-end while the rule engine is being built.
+  const q = useQuery({
+    queryKey: ["alerts-summary"],
+    queryFn: api.getAlertsSummary,
+    refetchInterval: 30_000,
+  });
   return (
     <Card>
       <CardHeader
         title="Active alerts"
-        description="Devices approaching configured capacity thresholds."
+        description="Devices crossing configured capacity thresholds."
         action={
           <NavLink
             to="/alerts"
@@ -66,11 +75,67 @@ function AlertsFrame() {
           </NavLink>
         }
       />
-      <div className="px-4 py-8 text-center text-xs text-zinc-500 italic">
-        Alerts engine ships in phase 12. Until then this frame is a
-        placeholder.
-      </div>
+      <AlertsContent summary={q.data} isLoading={q.isLoading} error={q.error} />
     </Card>
+  );
+}
+
+function AlertsContent({
+  summary,
+  isLoading,
+  error,
+}: {
+  summary: AlertsSummary | undefined;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  if (isLoading) {
+    return <FrameStatus>Loading…</FrameStatus>;
+  }
+  if (error) {
+    return <FrameStatus tone="error">Failed to load alerts.</FrameStatus>;
+  }
+  if (!summary) return null;
+
+  // Two prominent tiles for the two severities — critical surfaces as
+  // danger when non-zero, warning as warn-amber. Acknowledged count
+  // is a smaller third tile beneath so operators see at a glance how
+  // many are still asking for attention vs. silenced.
+  const tiles: { label: string; value: number; tone: Tone }[] = [
+    {
+      label: "Critical",
+      value: summary.critical,
+      tone: summary.critical > 0 ? "danger" : "muted",
+    },
+    {
+      label: "Warning",
+      value: summary.warning,
+      tone: summary.warning > 0 ? "warn" : "muted",
+    },
+  ];
+  return (
+    <div className="p-4 space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        {tiles.map((t) => (
+          <CountTile key={t.label} label={t.label} value={t.value} tone={t.tone} />
+        ))}
+      </div>
+      {summary.total_active > 0 && (
+        <div className="text-[11px] text-zinc-500 flex items-center justify-between px-1 pt-1">
+          <span>
+            {summary.acknowledged} of {summary.total_active} acknowledged
+          </span>
+          <NavLink to="/alerts" className="text-blue-400 hover:text-blue-300">
+            Triage →
+          </NavLink>
+        </div>
+      )}
+      {summary.total_active === 0 && (
+        <div className="text-[11px] text-emerald-400/80 text-center pt-1">
+          All clear.
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
 
+import AlertsPage from "./alerts/AlertsPage";
 import CapacityAnalyzer from "./capacity/CapacityAnalyzer";
 import CapacityTable from "./capacity/CapacityTable";
 import CapacityTrend from "./capacity/CapacityTrend";
@@ -43,6 +44,7 @@ export default function App() {
             <nav className="flex items-center gap-4 text-sm">
               <NavTab to="/">Dashboard</NavTab>
               <NavTab to="/capacity">Capacity</NavTab>
+              <NavTab to="/alerts">Alerts</NavTab>
               <NavTab to="/inventory">Inventory</NavTab>
               <NavTab to="/upgrade">Upgrade</NavTab>
               {user.is_admin && <NavTab to="/users">Users</NavTab>}
@@ -75,6 +77,7 @@ export default function App() {
               path="/capacity/trend/:deviceId/:metric"
               element={<CapacityTrend />}
             />
+            <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/upgrade" element={<UpgradeJobs />} />
             <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />

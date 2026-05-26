@@ -7,7 +7,8 @@ the rule engine, alert rows, and acknowledgement actions.
 
 from fastapi import APIRouter
 
-from app.alerts.routes import alerts
+from app.alerts.routes import alerts, rules
 
 router = APIRouter()
 router.include_router(alerts.router)
+router.include_router(rules.router)

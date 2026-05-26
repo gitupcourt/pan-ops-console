@@ -21,6 +21,7 @@ from app.upgrade.routes import router as upgrade_router
 
 # Importing each module's models package registers every table on
 # Base.metadata so alembic's autogenerate sees them.
+from app.alerts import models as _alerts_models  # noqa: F401
 from app.capacity import models as _capacity_models  # noqa: F401
 from app.core.auth import models as _auth_models  # noqa: F401
 from app.core.devices import models as _devices_models  # noqa: F401

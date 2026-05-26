@@ -382,6 +382,52 @@ export type VersionDistributionRow = {
   count: number;
 };
 
+// ---------- Alerts (phase 12) ----------
+
+export type AlertSeverity = "warning" | "critical";
+
+export type AlertRead = {
+  id: number;
+  severity: AlertSeverity;
+  alert_name: string;
+  device_id: number;
+  device_name: string;
+  metric: string;
+  threshold_pct: number;
+  current_value: number | null;
+  max_value: number | null;
+  pct: number | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  cleared_at: string | null;
+  acknowledged_at: string | null;
+};
+
+export type AlertsSummary = {
+  critical: number;
+  warning: number;
+  acknowledged: number;
+  total_active: number;
+};
+
+export type AlertRuleRead = {
+  id: number;
+  name: string;
+  metric: string | null;
+  severity: AlertSeverity;
+  threshold_pct: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AlertListFilters = {
+  state?: "active" | "all";
+  severity?: AlertSeverity;
+  device_id?: number;
+  limit?: number;
+};
+
 // ---------- API ----------
 
 export const api = {
@@ -552,4 +598,17 @@ export const api = {
   getJobsSummary: () => j<JobsSummary>("/upgrade/jobs/summary"),
   getVersionDistribution: () =>
     j<VersionDistributionRow[]>("/devices/version-distribution"),
+
+  // Alerts (phase 12)
+  listAlerts: (filters?: AlertListFilters) => {
+    const qs = new URLSearchParams();
+    if (filters?.state) qs.set("state", filters.state);
+    if (filters?.severity) qs.set("severity", filters.severity);
+    if (filters?.device_id != null) qs.set("device_id", String(filters.device_id));
+    if (filters?.limit) qs.set("limit", String(filters.limit));
+    const suffix = qs.toString();
+    return j<AlertRead[]>(`/alerts${suffix ? "?" + suffix : ""}`);
+  },
+  getAlertsSummary: () => j<AlertsSummary>("/alerts/summary"),
+  listAlertRules: () => j<AlertRuleRead[]>("/alerts/rules"),
 };

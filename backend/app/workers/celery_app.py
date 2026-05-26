@@ -69,6 +69,7 @@ celery = Celery(
         # Modules that define @celery.task functions. Adding a new task
         # module means listing it here so the worker imports it at boot.
         "app.capacity.tasks",
+        "app.core.panorama.tasks",
         "app.upgrade.tasks",
     ],
 )
@@ -96,6 +97,17 @@ celery.conf.update(
         "capacity-poll-all": {
             "task": "capacity.poll_all",
             "schedule": float(_settings.POLL_INTERVAL_SECONDS),
+        },
+        # Scheduled refresh of Panorama-imported device state. Without
+        # this, Device.connected / last_seen_at only update on operator
+        # action (manual sync, device import) and the UI's disconnected
+        # badge becomes meaningless within minutes. The sync_all task is
+        # idempotent and one-API-call-per-Panorama, so even a 30s
+        # interval would be safe on cost — default 300s gives the same
+        # cadence as capacity polling.
+        "panorama-sync-all": {
+            "task": "panorama.sync_all",
+            "schedule": float(_settings.PANORAMA_SYNC_INTERVAL_SECONDS),
         },
     },
 )

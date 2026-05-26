@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, NavLink } from "react-router-dom";
+import { useNavigate, NavLink, useSearchParams } from "react-router-dom";
 
 import { HeatmapCell } from "../api";
 
@@ -28,6 +28,11 @@ export function HeatMapTile({
   colorScheme: "multi" | "mono";
 }) {
   const navigate = useNavigate();
+  // Read current URL params so the tile-click navigate to the table
+  // view preserves any filters the operator already set on the heat
+  // map (device_group, template_stack). The tile contributes model +
+  // metric on top of those.
+  const [params] = useSearchParams();
   const [hovered, setHovered] = useState(false);
 
   if (!cell) {
@@ -51,11 +56,12 @@ export function HeatMapTile({
       onMouseLeave={() => setHovered(false)}
     >
       <button
-        onClick={() =>
-          navigate(
-            `/capacity/table?model=${encodeURIComponent(cell.model)}&metric=${encodeURIComponent(cell.metric)}`,
-          )
-        }
+        onClick={() => {
+          const next = new URLSearchParams(params);
+          next.set("model", cell.model);
+          next.set("metric", cell.metric);
+          navigate(`/capacity/table?${next.toString()}`);
+        }}
         className={`w-12 h-10 rounded ${bg} hover:ring-2 hover:ring-zinc-300/40 transition-shadow cursor-pointer`}
         title={`${cell.metric_description} on ${cell.model}: ${formatPct(cell.max_pct)} max across ${cell.device_count} device(s)`}
         aria-label={`${cell.metric} on ${cell.model}`}

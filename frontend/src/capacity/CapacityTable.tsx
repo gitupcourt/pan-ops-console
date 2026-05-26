@@ -8,6 +8,22 @@ import {
 
 import { api, CapacityTableRow, MetricCategory } from "../api";
 import { Button, Card, CardHeader, Select } from "../core/ui/ui";
+import { CapacityViewToggle } from "./CapacityViewToggle";
+
+// Sortable columns. "alert" and "predicted" aren't sortable yet
+// because they don't have data — phase 12 / phase 15 add those.
+type SortKey = "metric" | "pct" | "sw" | "host";
+type SortDir = "asc" | "desc";
+
+const DEFAULT_SORT: SortKey = "pct";
+const DEFAULT_DIR: SortDir = "desc";
+
+function isSortKey(s: string): s is SortKey {
+  return s === "metric" || s === "pct" || s === "sw" || s === "host";
+}
+function isSortDir(s: string): s is SortDir {
+  return s === "asc" || s === "desc";
+}
 
 /**
  * Capacity table view at `/capacity/table`.
@@ -25,8 +41,10 @@ import { Button, Card, CardHeader, Select } from "../core/ui/ui";
  *
  * Rows are grouped by Resource Category (Configuration / System /
  * Traffic) per the PA screenshot, with each category collapsible.
- * Within each category, rows sort by % desc — what's on fire surfaces
- * first.
+ * Within each category, sort is operator-controlled via clickable
+ * column headers (Metric / Amount Used / SW / Host); sort key + dir
+ * persist in URL params so a sorted view is sharable. Default is
+ * Amount Used desc — what's on fire surfaces first.
  *
  * "Clear all" reverts to showing every (device, metric) in the fleet.
  * Backend caps at 500 rows; with the realistic operator scale
@@ -43,6 +61,30 @@ export default function CapacityTable() {
   const metric = params.get("metric") ?? "";
   const deviceGroup = params.get("device_group") ?? "";
   const templateStack = params.get("template_stack") ?? "";
+
+  // Sort state also lives in URL params so a sorted view is sharable.
+  // Default is pct desc — what's on fire surfaces first — matching the
+  // pre-sortable behaviour.
+  const sortParam = params.get("sort") ?? "";
+  const dirParam = params.get("dir") ?? "";
+  const sortBy: SortKey = isSortKey(sortParam) ? sortParam : DEFAULT_SORT;
+  const sortDir: SortDir = isSortDir(dirParam) ? dirParam : DEFAULT_DIR;
+
+  const handleHeaderClick = (col: SortKey) => {
+    const next = new URLSearchParams(params);
+    if (sortBy === col) {
+      // Toggle direction in-place
+      next.set("sort", col);
+      next.set("dir", sortDir === "asc" ? "desc" : "asc");
+    } else {
+      // Switch column with a sensible default direction —
+      // numeric % defaults desc (most used first), string columns
+      // default asc (A → Z).
+      next.set("sort", col);
+      next.set("dir", col === "pct" ? "desc" : "asc");
+    }
+    setParams(next);
+  };
 
   const tableQ = useQuery({
     queryKey: [
@@ -85,10 +127,11 @@ export default function CapacityTable() {
     [rows],
   );
 
-  // Group rows by category for the section layout.
+  // Group rows by category for the section layout, with the active
+  // sort applied within each category.
   const byCategory = useMemo(
-    () => groupByCategory(rows),
-    [rows],
+    () => groupByCategory(rows, sortBy, sortDir),
+    [rows, sortBy, sortDir],
   );
 
   const title = describeFilters({ model, metric, deviceGroup, templateStack });
@@ -103,9 +146,12 @@ export default function CapacityTable() {
         <span>Capacity Analyzer Table</span>
       </div>
 
-      <h2 className="text-xl font-semibold text-zinc-100">
-        Capacity Analyzer
-      </h2>
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-semibold text-zinc-100">
+          Capacity Analyzer
+        </h2>
+        <CapacityViewToggle view="table" />
+      </div>
 
       <Card>
         <div className="px-4 py-3 flex flex-wrap items-center gap-3 text-xs border-b border-zinc-800">
@@ -172,6 +218,9 @@ export default function CapacityTable() {
             <CategorySection
               label="Configuration Resource"
               rows={byCategory.config}
+              sortBy={sortBy}
+              sortDir={sortDir}
+              onSort={handleHeaderClick}
               onMetricClick={(deviceId, metricName) =>
                 navigate(`/capacity/trend/${deviceId}/${encodeURIComponent(metricName)}`)
               }
@@ -179,6 +228,9 @@ export default function CapacityTable() {
             <CategorySection
               label="System Resource"
               rows={byCategory.system}
+              sortBy={sortBy}
+              sortDir={sortDir}
+              onSort={handleHeaderClick}
               onMetricClick={(deviceId, metricName) =>
                 navigate(`/capacity/trend/${deviceId}/${encodeURIComponent(metricName)}`)
               }
@@ -186,6 +238,9 @@ export default function CapacityTable() {
             <CategorySection
               label="Traffic Resource"
               rows={byCategory.traffic}
+              sortBy={sortBy}
+              sortDir={sortDir}
+              onSort={handleHeaderClick}
               onMetricClick={(deviceId, metricName) =>
                 navigate(`/capacity/trend/${deviceId}/${encodeURIComponent(metricName)}`)
               }
@@ -202,10 +257,16 @@ export default function CapacityTable() {
 function CategorySection({
   label,
   rows,
+  sortBy,
+  sortDir,
+  onSort,
   onMetricClick,
 }: {
   label: string;
   rows: CapacityTableRow[];
+  sortBy: SortKey;
+  sortDir: SortDir;
+  onSort: (col: SortKey) => void;
   onMetricClick: (deviceId: number, metric: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -226,28 +287,44 @@ function CategorySection({
         </span>
       </button>
 
-      {!collapsed && <CategoryTable rows={rows} onMetricClick={onMetricClick} />}
+      {!collapsed && (
+        <CategoryTable
+          rows={rows}
+          sortBy={sortBy}
+          sortDir={sortDir}
+          onSort={onSort}
+          onMetricClick={onMetricClick}
+        />
+      )}
     </div>
   );
 }
 
 function CategoryTable({
   rows,
+  sortBy,
+  sortDir,
+  onSort,
   onMetricClick,
 }: {
   rows: CapacityTableRow[];
+  sortBy: SortKey;
+  sortDir: SortDir;
+  onSort: (col: SortKey) => void;
   onMetricClick: (deviceId: number, metric: string) => void;
 }) {
   return (
     <table className="w-full text-sm">
       <thead className="text-[11px] uppercase text-zinc-500 border-b border-zinc-800">
         <tr>
-          <th className="text-left px-4 py-2 font-medium">Metric</th>
-          <th className="text-left px-4 py-2 font-medium">Amount Used</th>
+          <SortableHeader col="metric" label="Metric" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+          <SortableHeader col="pct" label="Amount Used" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+          {/* Alert and Predicted to Hit aren't sortable yet — they
+              have no data until phase 12 / phase 15 land. */}
           <th className="text-left px-4 py-2 font-medium">Alert</th>
           <th className="text-left px-4 py-2 font-medium">Predicted to Hit</th>
-          <th className="text-left px-4 py-2 font-medium">SW</th>
-          <th className="text-left px-4 py-2 font-medium">Host</th>
+          <SortableHeader col="sw" label="SW" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
+          <SortableHeader col="host" label="Host" sortBy={sortBy} sortDir={sortDir} onSort={onSort} />
         </tr>
       </thead>
       <tbody>
@@ -358,6 +435,8 @@ function deriveOptions(rows: CapacityTableRow[]) {
 
 function groupByCategory(
   rows: CapacityTableRow[],
+  sortBy: SortKey,
+  sortDir: SortDir,
 ): Record<MetricCategory, CapacityTableRow[]> {
   const out: Record<MetricCategory, CapacityTableRow[]> = {
     config: [],
@@ -369,15 +448,64 @@ function groupByCategory(
       out[r.category].push(r);
     }
   }
-  // Within each category, sort by pct desc (null last).
+  // Apply the active sort within each category. Empty/null values
+  // (e.g. pct=null on a metric whose max we don't know yet) always
+  // sort to the bottom regardless of direction — those rows are
+  // noise relative to the data the operator cares about.
   for (const cat of Object.keys(out) as MetricCategory[]) {
-    out[cat].sort((a, b) => {
-      const ap = a.pct ?? -1;
-      const bp = b.pct ?? -1;
-      return bp - ap;
-    });
+    out[cat] = sortRows(out[cat], sortBy, sortDir);
   }
   return out;
+}
+
+function sortRows(
+  rows: CapacityTableRow[],
+  sortBy: SortKey,
+  sortDir: SortDir,
+): CapacityTableRow[] {
+  const arr = [...rows];
+  arr.sort((a, b) => {
+    const aEmpty = isSortEmpty(a, sortBy);
+    const bEmpty = isSortEmpty(b, sortBy);
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;
+    if (bEmpty) return -1;
+    const cmp = compareRows(a, b, sortBy);
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+  return arr;
+}
+
+function isSortEmpty(r: CapacityTableRow, key: SortKey): boolean {
+  switch (key) {
+    case "pct":
+      return r.pct == null;
+    case "sw":
+      return !r.software_version;
+    case "metric":
+    case "host":
+      return false;
+  }
+}
+
+function compareRows(
+  a: CapacityTableRow,
+  b: CapacityTableRow,
+  key: SortKey,
+): number {
+  switch (key) {
+    case "metric":
+      return a.metric_description.localeCompare(b.metric_description);
+    case "pct":
+      // Both sides are non-null here (isSortEmpty filter above).
+      return (a.pct as number) - (b.pct as number);
+    case "sw":
+      return (a.software_version ?? "").localeCompare(
+        b.software_version ?? "",
+      );
+    case "host":
+      return a.device_name.localeCompare(b.device_name);
+  }
 }
 
 function describeFilters(f: {
@@ -407,6 +535,53 @@ function fmtCount(n: number | null): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toLocaleString();
+}
+
+/**
+ * Clickable column header for the sortable table.
+ *
+ * - When this column is the active sort, shows a ▲ / ▼ indicator and
+ *   in the column-header color to mark it.
+ * - Clicking the active column toggles direction.
+ * - Clicking a different column switches to that column with a
+ *   sensible default direction (set by the caller).
+ */
+function SortableHeader({
+  col,
+  label,
+  sortBy,
+  sortDir,
+  onSort,
+}: {
+  col: SortKey;
+  label: string;
+  sortBy: SortKey;
+  sortDir: SortDir;
+  onSort: (col: SortKey) => void;
+}) {
+  const active = sortBy === col;
+  return (
+    <th className="text-left px-4 py-2 font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(col)}
+        className={
+          "inline-flex items-center gap-1 hover:text-zinc-200 " +
+          (active ? "text-zinc-200" : "text-zinc-500")
+        }
+        title={
+          active
+            ? `Sorted ${sortDir === "asc" ? "ascending" : "descending"} — click to flip`
+            : `Sort by ${label}`
+        }
+      >
+        <span>{label}</span>
+        <span className="text-[9px] w-2 inline-block">
+          {active ? (sortDir === "asc" ? "▲" : "▼") : ""}
+        </span>
+      </button>
+    </th>
+  );
 }
 
 function FilterDropdown({

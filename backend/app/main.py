@@ -15,6 +15,7 @@ from app.core.auth.routes import auth, providers, users
 from app.core.devices.routes import devices
 from app.core.migrations import run_migrations
 from app.core.panorama.routes import panoramas
+from app.upgrade.routes import router as upgrade_router
 
 # Importing each module's models package registers every table on
 # Base.metadata so alembic's autogenerate sees them.
@@ -67,6 +68,12 @@ app.include_router(devices.router, dependencies=_auth_required)
 app.include_router(metrics.router, dependencies=_auth_required)
 app.include_router(users.router, dependencies=_auth_required)
 app.include_router(providers.router, dependencies=_auth_required)
+# Upgrade module — phase 4c-routes. Job + image management endpoints
+# under /upgrade/*. The Celery dispatch wiring (phase 4d) is intentionally
+# missing from `start_job` — see the TODO in that route. Endpoints work
+# today for create / list / observe / abort / delete + per-task confirm /
+# override / retry; orchestration runs once 4d lands.
+app.include_router(upgrade_router, dependencies=_auth_required)
 
 
 @app.get("/")

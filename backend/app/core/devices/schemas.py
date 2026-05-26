@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.core.devices.models.enums import DeviceSource
+from app.core.devices.models.enums import DeviceSource, HARole
 from app.core.schema_utils import ensure_utc
 
 
@@ -59,9 +59,22 @@ class DeviceRead(BaseModel):
     last_poll_at: datetime | None
     last_poll_error: str | None
 
+    # Connection-state fields. Authoritative for Panorama-imported devices
+    # (refreshed each Panorama sync); for direct-added devices these are
+    # less meaningful since we don't have an external source to update
+    # them (`connected` stays at False, `last_seen_at` reflects only what
+    # the future poller-side write decides to do). UI should not show a
+    # "disconnected" badge for direct devices on the strength of
+    # `connected=False` alone — gate on `source == "panorama"`.
+    connected: bool
+    last_seen_at: datetime | None
+    last_refresh_at: datetime | None
+    ha_role: HARole
+    ha_state: str | None
+
     model_config = {"from_attributes": True}
 
-    @field_validator("last_poll_at", mode="before")
+    @field_validator("last_poll_at", "last_seen_at", "last_refresh_at", mode="before")
     @classmethod
     def _utc(cls, v):
         return ensure_utc(v)

@@ -170,3 +170,69 @@ def test_target_disconnected_error_is_a_connection_error():
     exc = TargetDisconnectedError("nope")
     assert isinstance(exc, ConnectionError)
     assert isinstance(exc, TargetDisconnectedError)
+
+
+# ---------- context kwarg + keygen-path patterns ----------
+#
+# pan-ops-console#46: operator added a device with a hostname that didn't
+# resolve in DNS; the form returned "keygen failed: [Errno -2] Name or
+# service not known" — technically correct, but the average operator
+# doesn't know -2 means DNS. The context kwarg lets the helper produce
+# a message that names what was being attempted, so the operator can
+# disambiguate "I was trying to authenticate to a brand-new device"
+# from "the daily readiness scan failed."
+
+
+def test_context_kwarg_prefixes_message():
+    msg = _friendly_check_error(
+        Exception("Connection refused"), context="Authentication"
+    )
+    assert msg.startswith("Authentication:")
+    # The body still contains the same actionable hint.
+    assert "TCP/443" in msg
+
+
+def test_context_default_preserves_legacy_readiness_text():
+    """Existing callers in the codebase pass no context — the default
+    'Readiness checks' must keep producing 'Readiness checks failed: ...'
+    in the generic fallback so older callers and tests stay valid."""
+    msg = _friendly_check_error(Exception("something else"))
+    assert "Readiness checks failed: something else" in msg
+
+
+def test_keygen_dns_errno_negative_2_matches():
+    """The exact shape the operator saw on pan-ops-console#46 —
+    glibc/POSIX `getaddrinfo` returns -2 (EAI_NONAME) when the hostname
+    can't be resolved. httpx surfaces it verbatim in ConnectError."""
+    msg = _friendly_check_error(
+        Exception("[Errno -2] Name or service not known"),
+        context="Authentication",
+    )
+    assert msg.startswith("Authentication:")
+    assert "DNS lookup failed" in msg
+    assert "hostname" in msg.lower()
+    # Original error still present so the operator can grep logs.
+    assert "Errno -2" in msg
+
+
+def test_keygen_dns_errno_negative_3_also_matches():
+    """`Errno -3` is `EAI_AGAIN` — DNS server returned a temporary
+    failure (often a SERVFAIL or upstream timeout). Same fix space as -2,
+    same message branch."""
+    msg = _friendly_check_error(
+        Exception("[Errno -3] Temporary failure in name resolution"),
+        context="Authentication",
+    )
+    assert "DNS lookup failed" in msg
+
+
+def test_keygen_invalid_credential_xml_response():
+    """When PAN-OS replies with status=error and a message like
+    'Invalid Credential' (the most common keygen rejection), the
+    helper routes it to the credential-hint branch."""
+    msg = _friendly_check_error(
+        Exception("Invalid Credential"), context="Authentication"
+    )
+    assert msg.startswith("Authentication:")
+    assert "Authentication rejected" in msg
+    assert "XML API access" in msg

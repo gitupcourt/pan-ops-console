@@ -1,4 +1,4 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   Line,
   LineChart,
@@ -28,18 +28,16 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["series", deviceId, spec.name, hours],
     queryFn: () => api.getSeries(deviceId, spec.name, hours),
-    // Keep the previous data on screen while a refetch is in flight so the
-    // chart doesn't flash "no samples yet" between polling-driven refreshes.
-    //
-    // `keepPreviousData` (vs. the older `(prev) => prev` shape) is key here:
-    // it ONLY preserves data on a refetch of the same queryKey. When the
-    // queryKey *changes* — e.g. operator switches the selected device on the
-    // dashboard — React Query returns `undefined` instead of the previous
-    // device's data, which surfaces the "loading…" state cleanly. The old
-    // function form returned the previous device's data unconditionally,
-    // making the chart hang on stale numbers across device swaps until the
-    // new fetch landed.
-    placeholderData: keepPreviousData,
+    // No placeholderData. Earlier attempts at "avoid the flash between
+    // refetches" used `placeholderData: (prev) => prev` and then
+    // `placeholderData: keepPreviousData` — BOTH preserve the previous
+    // query's data across queryKey changes too (pagination is the
+    // intended use case for keepPreviousData in v5). On device swap our
+    // queryKey changes (deviceId is part of it), so either form caused
+    // the previous device's numbers to linger on screen until the new
+    // fetch landed — the exact "dashboard hangs on the previous device"
+    // bug operators saw. Removing placeholderData gives a brief
+    // "loading…" flash on swap, which is the correct UX trade-off.
   });
 
   const points = (data?.samples ?? []).map((s) => ({

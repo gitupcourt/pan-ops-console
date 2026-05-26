@@ -60,6 +60,36 @@ def _head_revision_path(cfg: Config) -> Path:
     return Path(head_script.path)
 
 
+def _baseline_revision(cfg: Config) -> str:
+    """Return the revision id of the bottom-of-chain (baseline) migration.
+
+    Used by the legacy create_all stamp path: a DB that was built by
+    the pre-alembic `Base.metadata.create_all` has exactly the schema
+    the **baseline** migration produces, not the current head. Stamping
+    head on such a DB makes alembic skip every later migration as a
+    no-op — silent schema drift that surfaces only when ORM queries
+    hit a column the DB never got (see pan-ops-console#43).
+
+    Resolves dynamically so this stays correct as the migration tree
+    grows; no need to update a hardcoded string each time a new
+    baseline-touching migration is added. (The current baseline is
+    "0001"; using `get_revisions("base")` keeps that as data, not code.)
+    """
+    script = ScriptDirectory.from_config(cfg)
+    bases = script.get_revisions("base")
+    if not bases:
+        raise RuntimeError("alembic has no base revision")
+    if len(bases) > 1:
+        # Linear chain expected — multiple bases would mean someone
+        # branched the migration tree, which we don't do here. Fail loud.
+        raise RuntimeError(
+            f"alembic has multiple base revisions ({[b.revision for b in bases]}); "
+            "this stamp helper expects a single linear chain. Pin the right "
+            "baseline manually before continuing."
+        )
+    return bases[0].revision
+
+
 def _migration_has_real_upgrade(path: Path) -> bool:
     """Return False if the migration's `upgrade()` body is empty / `pass` /
     docstring-only. Catches the §3.2 empty-stub trap before it ships."""
@@ -115,11 +145,23 @@ def run_migrations() -> None:
         )
 
     if _db_has_legacy_schema_without_alembic_version():
+        baseline = _baseline_revision(cfg)
         log.info(
             "Detected legacy create_all schema with no alembic_version table; "
-            "stamping head instead of running upgrade."
+            "stamping baseline (%s) so subsequent upgrades fire normally.",
+            baseline,
         )
-        command.stamp(cfg, "head")
+        # Stamp the BASELINE revision (not head). The legacy create_all
+        # schema matches what the baseline migration produces — anything
+        # past that needs to actually run. Pre-#43 this stamped "head",
+        # which made `upgrade head` a silent no-op and silently dropped
+        # every post-baseline migration's column/table additions.
+        command.stamp(cfg, baseline)
+        # Now that the DB is anchored at baseline, do the upgrade so the
+        # post-baseline migrations actually execute. Without this, the
+        # caller would have to call run_migrations() twice to converge.
+        log.info("Running alembic upgrade head after baseline stamp")
+        command.upgrade(cfg, "head")
         return
 
     log.info("Running alembic upgrade head")

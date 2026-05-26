@@ -70,7 +70,7 @@ app.include_router(providers.router, dependencies=_auth_required)
 
 
 @app.get("/")
-def root():
+async def root():
     return {
         "name": "pan-ops-console",
         "docs": "/docs",
@@ -79,5 +79,23 @@ def root():
 
 
 @app.get("/healthz")
-def healthz():
+async def healthz():
+    """Kubernetes liveness/readiness probe target.
+
+    `async def` is load-bearing here. A sync `def` endpoint in FastAPI
+    runs in the default starlette thread pool — the SAME pool that
+    serves every other sync route (notably `/metrics/{device_id}/{metric}`,
+    which is fired ~17× in parallel on every Dashboard page load).
+    Under that load the probe can wait seconds for a worker thread,
+    causing intermittent timeoutSeconds breaches even when the app
+    itself is fine.
+
+    Because the body is trivial (no I/O, no DB), `async def` runs it
+    inline on the event loop — no thread contention. Probe latency
+    becomes effectively constant regardless of how many sync routes
+    are concurrently busy.
+
+    Companion to homelab#75 (which bumped probe timeoutSeconds from
+    3s to 5s as a stopgap while the root cause was investigated).
+    """
     return {"status": "ok"}

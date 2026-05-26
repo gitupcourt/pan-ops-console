@@ -38,6 +38,64 @@ from panos_upgrade_assurance.firewall_proxy import FirewallProxy
 log = logging.getLogger(__name__)
 
 
+class TargetDisconnectedError(ConnectionError):
+    """The Panorama proxy was reachable but reported that the target firewall is offline.
+
+    Distinct from a plain `ConnectionError` because the right reaction is
+    different: Panorama itself is healthy (don't mark it unreachable), but
+    the device behind it can't be reached *through Panorama* right now.
+
+    Callers (notably `command_proxy.builder.build_client_with_fallback`)
+    that decide where to attribute health-state side effects should catch
+    this case separately. Plain `except ConnectionError` still catches it
+    via the inheritance chain, so callers that don't care about the
+    distinction keep working unchanged.
+    """
+
+
+# Substring patterns (lowercase) that indicate Panorama replied successfully
+# but the *target device* is offline / unknown. These come from PAN-OS XML
+# API error messages when you address a target serial through Panorama's
+# `target=<serial>` mechanism. The exact wording varies slightly across
+# PAN-OS versions; match liberally on the distinctive verbiage.
+_TARGET_OFFLINE_PATTERNS: tuple[str, ...] = (
+    "target not connected",
+    "target is not connected",
+    "is not connected",        # "device '0123' is not connected"
+    "target connection failed",
+    "target serial does not exist",
+    "target unknown",
+    "no such target",
+)
+
+
+def _looks_like_target_disconnect(exc: BaseException) -> bool:
+    """True if the exception message indicates the target device is offline.
+
+    Centralized here so the proxy-vs-device error attribution stays in one
+    place — every PanDeviceError raising spot in this module can route
+    through `_raise_op_error` below and get consistent classification.
+    """
+    msg = str(exc).lower()
+    return any(p in msg for p in _TARGET_OFFLINE_PATTERNS)
+
+
+def _raise_op_error(exc: BaseException, context: str) -> None:
+    """Re-raise a PanDeviceError as either TargetDisconnectedError or ConnectionError.
+
+    `context` is a short string describing what operation failed (e.g.
+    "system info", "op() failed for cmd 'show foo'"). Used in the
+    re-raised exception's message so traceback readers can tell which call
+    site triggered the failure.
+
+    Always raises — never returns. Return-type omitted so callers don't
+    have to write `return _raise_op_error(...)` boilerplate.
+    """
+    if _looks_like_target_disconnect(exc):
+        raise TargetDisconnectedError(f"{context}: {exc}") from exc
+    raise ConnectionError(f"{context}: {exc}") from exc
+
+
 # All readiness check names supported by panos_upgrade_assurance.CheckFirewall.
 ALL_READINESS_CHECKS: list[str] = [
     "active_support",
@@ -223,23 +281,33 @@ class PanDeviceClient:
         callers (upgrade orchestrator, precheck) use the typed methods
         below instead — `op_xml` is the escape hatch for arbitrary commands
         that don't have a typed wrapper.
+
+        Raises `TargetDisconnectedError` (a `ConnectionError` subclass) when
+        the failure is "Panorama replied that the target firewall is
+        offline" so callers can avoid mis-attributing it to Panorama health.
         """
         try:
             return self._proxy.op(xml_cmd, cmd_xml=False)
         except PanDeviceError as exc:
-            raise ConnectionError(f"op() failed for cmd {xml_cmd!r}: {exc}") from exc
+            _raise_op_error(exc, f"op() failed for cmd {xml_cmd!r}")
 
     # ---------- read-only introspection ----------
 
     def get_system_info(self) -> SystemInfo:
-        """One round-trip to populate everything our DB cares about."""
+        """One round-trip to populate everything our DB cares about.
+
+        Raises `TargetDisconnectedError` (a `ConnectionError` subclass) when
+        the underlying op() failed specifically because Panorama reported
+        the target firewall as offline. Lets the proxy-fallback builder
+        avoid flagging Panorama itself as unreachable in that case.
+        """
         try:
             sys_resp = self._proxy.op("<show><system><info></info></system></show>", cmd_xml=False)
             ha_resp = self._proxy.op(
                 "<show><high-availability><state></state></high-availability></show>", cmd_xml=False
             )
         except PanDeviceError as exc:
-            raise ConnectionError(f"Device op() failed: {exc}") from exc
+            _raise_op_error(exc, "Device op() failed")
 
         info = sys_resp.find(".//system")
         ha_state = _text(ha_resp, ".//local-info/state") or _text(ha_resp, ".//state")

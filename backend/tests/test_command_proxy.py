@@ -25,6 +25,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import text
 
 from app.core.command_proxy.builder import build_client_with_fallback
+from app.core.command_proxy.pan_client import TargetDisconnectedError
 from app.core.devices.models.device import Device
 from app.core.panorama.models.panorama import Panorama
 
@@ -221,3 +222,111 @@ def test_direct_device_with_no_key_raises_meaningfully(client, db):
 
     with pytest.raises(ValueError, match="no API key for direct"):
         build_client_with_fallback(db, dev)
+
+
+# ---------- TargetDisconnectedError branch ----------
+#
+# Regression coverage for the N×1 attribution bug: prior to this fix,
+# *any* exception from the proxy probe wrote `panoramas.reachable=False`
+# — including PAN-OS responses meaning "Panorama is fine, but the
+# device behind it is offline." That caused 11 disconnected devices
+# behind a healthy Panorama to repeatedly mark the Panorama itself as
+# unreachable, every poll cycle, polluting the UI's Panorama-health
+# indicator. These tests pin the new behavior.
+
+
+def test_target_disconnected_does_not_mark_panorama_unhealthy(client, db):
+    """Probe raises TargetDisconnectedError → Panorama stays reachable=True."""
+    pano = _seed_panorama(db)
+    dev = _seed_device(
+        db, proxy_via_panorama=True, panorama=pano, serial="0123456789",
+        has_own_key=False,  # no direct fallback so we hit the re-raise path
+    )
+
+    class _DeviceOffline:
+        def get_system_info(self):
+            raise TargetDisconnectedError(
+                "Device op() failed: Device '0123456789' is not connected"
+            )
+
+    with patch(
+        "app.core.command_proxy.builder.PanDeviceClient.via_panorama",
+        return_value=_DeviceOffline(),
+    ):
+        with pytest.raises(TargetDisconnectedError):
+            build_client_with_fallback(db, dev)
+
+    db.refresh(pano)
+    # The proxy call reached Panorama successfully — the *device* is what
+    # was unreachable. Panorama health must NOT be downgraded.
+    assert pano.reachable is True
+    assert pano.last_reachability_error is None
+
+
+def test_target_disconnected_still_tries_direct_when_available(client, db):
+    """Even if Panorama says target is offline, give direct a chance if
+    the device has its own key (operator may have manual reachability)."""
+    pano = _seed_panorama(db)
+    dev = _seed_device(
+        db, proxy_via_panorama=True, panorama=pano, serial="0123456789",
+        has_own_key=True,
+    )
+
+    class _DeviceOffline:
+        def get_system_info(self):
+            raise TargetDisconnectedError(
+                "Device '0123456789' is not connected"
+            )
+
+    class _DirectOK:
+        pass
+
+    with patch(
+        "app.core.command_proxy.builder.PanDeviceClient.via_panorama",
+        return_value=_DeviceOffline(),
+    ), patch(
+        "app.core.command_proxy.builder.PanDeviceClient.direct",
+        return_value=_DirectOK(),
+    ) as direct_factory:
+        client_obj, route = build_client_with_fallback(db, dev)
+
+    assert route == "direct"
+    assert isinstance(client_obj, _DirectOK)
+    direct_factory.assert_called_once()
+
+    # Panorama still marked healthy — see test above for the why.
+    db.refresh(pano)
+    assert pano.reachable is True
+    assert pano.last_reachability_error is None
+
+
+def test_genuine_panorama_unreachable_still_marks_unhealthy(client, db):
+    """Sanity: the non-TargetDisconnected error path is unchanged.
+
+    A network failure to Panorama itself should still write
+    reachable=False — the original behavior for genuinely-down Panoramas
+    must be preserved, this fix only narrows what counts as 'Panorama
+    failed.'
+    """
+    pano = _seed_panorama(db)
+    dev = _seed_device(
+        db, proxy_via_panorama=True, panorama=pano, serial="0123456789",
+        has_own_key=False,
+    )
+
+    class _PanoramaDown:
+        def get_system_info(self):
+            # A bare ConnectionError, NOT TargetDisconnectedError — the
+            # error didn't look like "target offline" to the classifier.
+            raise ConnectionError("Connection refused")
+
+    with patch(
+        "app.core.command_proxy.builder.PanDeviceClient.via_panorama",
+        return_value=_PanoramaDown(),
+    ):
+        with pytest.raises(ConnectionError):
+            build_client_with_fallback(db, dev)
+
+    db.refresh(pano)
+    assert pano.reachable is False
+    assert "Connection refused" in (pano.last_reachability_error or "")

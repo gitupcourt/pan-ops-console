@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   Line,
   LineChart,
@@ -28,10 +28,18 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["series", deviceId, spec.name, hours],
     queryFn: () => api.getSeries(deviceId, spec.name, hours),
-    // Keep the previous device/range's data on screen while the new query
-    // is in flight. Without this, every refresh flashes "no samples yet"
-    // before the response lands.
-    placeholderData: (prev) => prev,
+    // Keep the previous data on screen while a refetch is in flight so the
+    // chart doesn't flash "no samples yet" between polling-driven refreshes.
+    //
+    // `keepPreviousData` (vs. the older `(prev) => prev` shape) is key here:
+    // it ONLY preserves data on a refetch of the same queryKey. When the
+    // queryKey *changes* — e.g. operator switches the selected device on the
+    // dashboard — React Query returns `undefined` instead of the previous
+    // device's data, which surfaces the "loading…" state cleanly. The old
+    // function form returned the previous device's data unconditionally,
+    // making the chart hang on stale numbers across device swaps until the
+    // new fetch landed.
+    placeholderData: keepPreviousData,
   });
 
   const points = (data?.samples ?? []).map((s) => ({

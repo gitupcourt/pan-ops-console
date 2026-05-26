@@ -30,6 +30,11 @@ def _to_read(d: Device) -> DeviceRead:
             "polling_enabled": d.polling_enabled,
             "last_poll_at": d.last_poll_at,
             "last_poll_error": d.last_poll_error,
+            "connected": d.connected,
+            "last_seen_at": d.last_seen_at,
+            "last_refresh_at": d.last_refresh_at,
+            "ha_role": d.ha_role,
+            "ha_state": d.ha_state,
         }
     )
 

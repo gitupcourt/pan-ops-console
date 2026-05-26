@@ -128,6 +128,16 @@ export type Device = {
   polling_enabled: boolean;
   last_poll_at: string | null;
   last_poll_error: string | null;
+  // Connection state. Authoritative for Panorama-imported devices —
+  // refreshed every Panorama sync. For direct-added devices these fields
+  // aren't meaningful (sync doesn't touch direct devices) so UI that
+  // shows a "disconnected" indicator MUST gate on `source === "panorama"`
+  // to avoid mis-labeling every direct device as offline.
+  connected: boolean;
+  last_seen_at: string | null;
+  last_refresh_at: string | null;
+  ha_role: "standalone" | "active" | "passive" | "unknown";
+  ha_state: string | null;
 };
 
 export type DeviceInput = {

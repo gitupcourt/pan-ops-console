@@ -26,6 +26,7 @@ from app.db import Base  # noqa: E402
 
 # Importing each module's models package registers every table on
 # Base.metadata. Mirrors the pattern in app.main.
+from app.alerts import models as _alerts_models  # noqa: E402,F401
 from app.capacity import models as _capacity_models  # noqa: E402,F401
 from app.core.auth import models as _auth_models  # noqa: E402,F401
 from app.core.devices import models as _devices_models  # noqa: E402,F401

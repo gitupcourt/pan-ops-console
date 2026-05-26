@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.alerts.services.evaluator import evaluate_device_samples
 from app.capacity.services.catalog import MetricSpec, Sources
 from app.capacity.services.storage import SamplePoint, SampleStore
 from app.core.command_proxy.builder import build_client_with_fallback
@@ -196,6 +197,11 @@ def poll_all(db: Session, metrics: list[MetricSpec], store: SampleStore) -> dict
         try:
             points = poll_device(db, device, metrics)
             store.write_samples(points)
+            # Evaluate the fresh samples against the alert rule set.
+            # Mutates the session but doesn't commit — the per-device
+            # commit below picks up both the device-status update and
+            # any alert open/close/escalate state in one transaction.
+            evaluate_device_samples(db, device.id, points)
             results[device.id] = len(points)
             device.last_poll_at = datetime.now(timezone.utc)
             device.last_poll_error = None

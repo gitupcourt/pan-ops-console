@@ -6,15 +6,13 @@ import { HeatmapCell } from "../api";
 /**
  * One (model, metric) tile on the capacity heat-map.
  *
- * Color derives from `cell.max_pct`. Bands match PA's Capacity
- * Analyzer screenshot: 0–60% safe, 60–80% warning, 80–100% danger.
- * If max_pct is null (no data), tile renders as a neutral
- * placeholder.
+ * Color derives from `cell.max_pct`. Bands: 0–60% safe (green),
+ * 60–80% warning (amber), 80–100% danger (red). If max_pct is null
+ * (no data), tile renders as a neutral placeholder.
  *
  * Hover behavior: small popover anchored to the right of the tile,
  * showing the top devices in this (model, metric) bucket sorted by
- * %. Mirrors the screenshot's "Capacity Used on PA-220 Devices"
- * list with the mini bars.
+ * %, with mini horizontal bars per device.
  *
  * Click behavior: routes to `/capacity/table?model=X&metric=Y` so
  * the operator can drill into the per-device view (phase 10 fills

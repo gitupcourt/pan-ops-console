@@ -40,7 +40,7 @@ function isSortDir(s: string): s is SortDir {
  * back-arrows return to the heat map.
  *
  * Rows are grouped by Resource Category (Configuration / System /
- * Traffic) per the PA screenshot, with each category collapsible.
+ * Traffic), with each category collapsible.
  * Within each category, sort is operator-controlled via clickable
  * column headers (Metric / Amount Used / SW / Host); sort key + dir
  * persist in URL params so a sorted view is sharable. Default is

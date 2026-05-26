@@ -1,4 +1,4 @@
-import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, NavLink, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
 
 import AlertsPage from "./alerts/AlertsPage";
@@ -7,6 +7,7 @@ import CapacityTable from "./capacity/CapacityTable";
 import CapacityTrend from "./capacity/CapacityTrend";
 import Dashboard from "./capacity/Dashboard";
 import { useAuth } from "./core/auth/AuthContext";
+import AuthenticationLayout from "./core/auth/AuthenticationLayout";
 import Bootstrap from "./core/auth/Bootstrap";
 import Login from "./core/auth/Login";
 import Profile from "./core/auth/Profile";
@@ -41,14 +42,22 @@ export default function App() {
             <h1 className="text-base font-semibold text-zinc-100">
               PAN NGFW Ops Console
             </h1>
+            {/* Top-level nav order is operator-defined: by-frequency-of-use
+                first (Dashboard / Alerts / Capacity), then operational
+                surfaces (Jobs / Inventory), then admin (Authentication).
+                "Jobs" replaces the older "Upgrade" label — the module
+                will host job types beyond upgrade in the future
+                (snapshots, bulk precheck, etc.) so the more general
+                label fits. */}
             <nav className="flex items-center gap-4 text-sm">
               <NavTab to="/">Dashboard</NavTab>
-              <NavTab to="/capacity">Capacity</NavTab>
               <NavTab to="/alerts">Alerts</NavTab>
+              <NavTab to="/capacity">Capacity</NavTab>
+              <NavTab to="/upgrade">Jobs</NavTab>
               <NavTab to="/inventory">Inventory</NavTab>
-              <NavTab to="/upgrade">Upgrade</NavTab>
-              {user.is_admin && <NavTab to="/users">Users</NavTab>}
-              {user.is_admin && <NavTab to="/providers">Providers</NavTab>}
+              {user.is_admin && (
+                <NavTab to="/authentication">Authentication</NavTab>
+              )}
             </nav>
             <UserMenu />
           </div>
@@ -79,10 +88,35 @@ export default function App() {
             />
             <Route path="/alerts" element={<AlertsPage />} />
             <Route path="/inventory" element={<Inventory />} />
+            {/* Job routes still live under /upgrade for backward-compat
+                — the nav label is the only thing that changed. URL stays
+                stable so bookmarks and the platform-sibling references
+                don't churn. */}
             <Route path="/upgrade" element={<UpgradeJobs />} />
             <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />
-            <Route path="/users" element={user.is_admin ? <Users /> : <NotAuthorized />} />
-            <Route path="/providers" element={user.is_admin ? <Providers /> : <NotAuthorized />} />
+            {/* Authentication shell + nested admin sub-routes. The shell
+                renders a sub-nav (Users / Providers / future …) and the
+                active sub-route in an <Outlet />. Old /users + /providers
+                URLs redirect into the shell so existing bookmarks
+                continue to work. */}
+            <Route
+              path="/authentication"
+              element={
+                user.is_admin ? <AuthenticationLayout /> : <NotAuthorized />
+              }
+            >
+              <Route index element={<Navigate to="users" replace />} />
+              <Route path="users" element={<Users />} />
+              <Route path="providers" element={<Providers />} />
+            </Route>
+            <Route
+              path="/users"
+              element={<Navigate to="/authentication/users" replace />}
+            />
+            <Route
+              path="/providers"
+              element={<Navigate to="/authentication/providers" replace />}
+            />
             <Route path="/profile" element={<Profile />} />
           </Routes>
         </main>
@@ -92,10 +126,15 @@ export default function App() {
 }
 
 function NavTab({ to, children }: { to: string; children: React.ReactNode }) {
+  // `end` prop matters for the root "/" tab — without it, every nested
+  // route would highlight the Dashboard tab. For top-level non-root
+  // tabs (e.g. /authentication), we WANT prefix matching so a child
+  // route like /authentication/users keeps the Authentication tab lit.
+  const exact = to === "/";
   return (
     <NavLink
       to={to}
-      end
+      end={exact}
       className={({ isActive }) =>
         clsx(
           "px-2 py-1 rounded transition-colors",

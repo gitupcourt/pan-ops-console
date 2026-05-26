@@ -10,10 +10,10 @@ import { HeatMapTile } from "./HeatMapTile";
 /**
  * Capacity Analyzer landing page at `/capacity`.
  *
- * Phase-9 piece of the operator's overhaul. Renders the PA-style heat
- * map: device models down the y-axis, metrics across the x-axis, each
- * tile colored by the highest % observed for that (model, metric)
- * across the fleet.
+ * Phase-9 piece of the operator's overhaul. Renders a heat map of
+ * fleet capacity: device models down the y-axis, metrics across the
+ * x-axis, each tile colored by the highest % observed for that
+ * (model, metric) across the fleet.
  *
  * UX flow:
  *   1. Operator scans the grid for red tiles.
@@ -405,8 +405,9 @@ function deriveOptions(cells: HeatmapCell[]): {
  *     (no parenthetical, returned as-is)
  *
  * The full description is preserved separately in the cell's `title`
- * attribute so hover still shows the verbose form. This mirrors PA's
- * Capacity Analyzer where axis labels are deliberately terse.
+ * attribute so hover still shows the verbose form. Keeps the axis
+ * deliberately terse so columns can pack tight at typical viewport
+ * widths.
  */
 function shortLabel(description: string): string {
   const idx = description.indexOf(" (");
@@ -504,7 +505,7 @@ function matchesSeverity(pct: number | null, sev: Severity): boolean {
 
 /**
  * Severity-band button group replacing the original two-handle range
- * slider. The slider was a faithful PA replica but suffered from a
+ * slider. The original two-handle range slider suffered from a
  * z-order bug — stacking two `<input type="range">` siblings means
  * only the top one (max handle) catches pointer events; the min
  * handle was unreachable. Three preset buttons cover the realistic

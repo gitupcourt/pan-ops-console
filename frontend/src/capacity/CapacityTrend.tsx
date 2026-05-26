@@ -27,14 +27,13 @@ import { Button, Card, CardHeader, Select } from "../core/ui/ui";
  *
  * Renders the time series for a single (device, metric) pair plus an
  * optional linear-regression projection of when the value will hit
- * the device's max. The PA screenshot's banner ("Forecasted date to
+ * the device's max. The forecast banner ("Forecasted date to
  * hit maximum capacity") + the dashed vertical line at that date
  * are both surfaced here.
  *
  * Below the chart: a small device-picker table listing every device
  * of the same model with the same metric. Click any row to swap which
- * device's chart is displayed. (PA's UI has radio buttons on each row
- * but they're redundant with the row click, so we drop them.)
+ * device's chart is displayed.
  */
 export default function CapacityTrend() {
   const { deviceId: deviceIdStr, metric } = useParams<{
@@ -341,8 +340,9 @@ function PeerPicker({
   currentDeviceId: number;
   onPick: (deviceId: number) => void;
 }) {
-  // Sort peers by pct desc to mirror the screenshot's "most used first"
-  // ordering. Stable secondary sort by device_id for deterministic
+  // Sort peers by pct desc — most-used-first puts the operator's eye
+  // on whichever device is closest to its limit. Stable secondary
+  // sort by device_id for deterministic
   // rendering across refetches.
   const sorted = [...rows].sort((a, b) => {
     const ap = a.pct ?? -1;

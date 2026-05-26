@@ -1,6 +1,7 @@
-"""Device CRUD + test-connection."""
+"""Device CRUD + test-connection + fleet-wide aggregates."""
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.command_proxy.pan_client import PanDeviceClient
@@ -238,3 +239,24 @@ def delete_device(device_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="not found")
     db.delete(device)
     db.commit()
+
+
+@router.get("/version-distribution")
+def version_distribution(db: Session = Depends(get_db)) -> list[dict]:
+    """How many devices are running each PAN-OS version.
+
+    Powers the home dashboard's version-distribution frame and the
+    "click a version tile to filter inventory" affordance. Returns
+    `[{"version": "11.1.4-h7", "count": 50}, ...]` sorted by count
+    descending. Devices with no known `current_version` (never
+    refreshed, freshly added) are bucketed under `version: null` so
+    the operator can spot them and refresh.
+
+    Cheap: one GROUP BY query against the indexed devices table.
+    """
+    rows = db.execute(
+        select(Device.current_version, func.count(Device.id))
+        .group_by(Device.current_version)
+        .order_by(func.count(Device.id).desc())
+    ).all()
+    return [{"version": v, "count": c} for v, c in rows]

@@ -163,6 +163,29 @@ def _job_to_detail(job: UpgradeJob) -> JobDetail:
 # ---------- /upgrade/jobs ----------
 
 
+@router.get("/upgrade/jobs/summary")
+def jobs_summary(db: Session = Depends(get_db)) -> dict[str, int]:
+    """Counts of upgrade jobs by state — powers the home dashboard's
+    Upgrades frame and any "X jobs in flight" affordance elsewhere.
+
+    Returns a flat dict keyed by JobState.value with the count. States
+    with zero jobs are still present in the response (with 0) so the
+    frontend can render the tile set without conditional logic.
+    """
+    counts = dict(
+        db.execute(
+            select(UpgradeJob.state, func.count(UpgradeJob.id))
+            .group_by(UpgradeJob.state)
+        ).all()
+    )
+    # Initialize every JobState to 0 so the response is shape-stable
+    # regardless of which states currently have rows.
+    out: dict[str, int] = {state.value: 0 for state in JobState}
+    for state, count in counts.items():
+        out[state.value] = count
+    return out
+
+
 @router.get("/upgrade/jobs", response_model=list[JobRead])
 def list_jobs(db: Session = Depends(get_db)):
     """List jobs newest first.

@@ -72,6 +72,16 @@ class DeviceRead(BaseModel):
     ha_role: HARole
     ha_state: str | None
 
+    # Panorama-managed grouping. Both fields are populated during
+    # Panorama sync; direct-added devices have them as NULL. Surfaced
+    # here so frontend pages (capacity table, upgrade-job device
+    # picker) can filter by DG/TS without a separate /panoramas
+    # lookup. The capacity aggregates endpoints expose the same
+    # values via their own response shape — this is the canonical
+    # device-level read.
+    device_group: str | None
+    template_stack: str | None
+
     model_config = {"from_attributes": True}
 
     @field_validator("last_poll_at", "last_seen_at", "last_refresh_at", mode="before")

@@ -138,6 +138,9 @@ export type Device = {
   last_refresh_at: string | null;
   ha_role: "standalone" | "active" | "passive" | "unknown";
   ha_state: string | null;
+  // Panorama-managed grouping. Null on direct-added devices.
+  device_group: string | null;
+  template_stack: string | null;
 };
 
 export type DeviceInput = {

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
-import { api, UpgradeJobCreate } from "../api";
+import { api, Device, UpgradeJobCreate } from "../api";
 import { Button, Field, Input, Select } from "../core/ui/ui";
 
 /**
@@ -44,6 +44,14 @@ export function JobForm({ onDone }: { onDone: () => void }) {
   const [imageMode, setImageMode] = useState<ImageMode>("pull");
   const [selectedImageId, setSelectedImageId] = useState<number | null>(null);
 
+  // Device-picker narrow-down filters. Independent of selection —
+  // operators often narrow to a DG, select some devices, then change
+  // the filter to a different DG without losing earlier selections.
+  // Empty string = "all" for that filter.
+  const [filterModel, setFilterModel] = useState<string>("");
+  const [filterDeviceGroup, setFilterDeviceGroup] = useState<string>("");
+  const [filterTemplateStack, setFilterTemplateStack] = useState<string>("");
+
   const [requireFailover, setRequireFailover] = useState(true);
   const [requirePrimaryUpgrade, setRequirePrimaryUpgrade] = useState(false);
   const [autoFailback, setAutoFailback] = useState(false);
@@ -79,6 +87,33 @@ export function JobForm({ onDone }: { onDone: () => void }) {
 
   const devices = devicesQ.data ?? [];
   const images = imagesQ.data ?? [];
+
+  // Build dropdown options dynamically from the device list — no
+  // hardcoded model/DG/TS lists, matching the pattern from the
+  // Capacity table view.
+  const { models, deviceGroups, templateStacks } = useMemo(
+    () => deriveFilterOptions(devices),
+    [devices],
+  );
+
+  // Filter the visible rows. Selection (selectedDeviceIds) is
+  // independent — narrowing the view doesn't deselect anything off-
+  // screen, so the operator can build a selection across multiple
+  // DG/TS by toggling filters between checks.
+  const visibleDevices = useMemo(
+    () =>
+      devices.filter((d) => {
+        if (filterModel && d.model !== filterModel) return false;
+        if (filterDeviceGroup && d.device_group !== filterDeviceGroup) return false;
+        if (filterTemplateStack && d.template_stack !== filterTemplateStack)
+          return false;
+        return true;
+      }),
+    [devices, filterModel, filterDeviceGroup, filterTemplateStack],
+  );
+
+  const anyFilterActive =
+    !!filterModel || !!filterDeviceGroup || !!filterTemplateStack;
 
   // Note: device.ha_peer_id is not exposed on DeviceRead yet, so we
   // can't visually group HA pairs in this picker. The orchestrator
@@ -125,33 +160,81 @@ export function JobForm({ onDone }: { onDone: () => void }) {
 
       {/* Device picker */}
       <div className="rounded border border-zinc-800 p-3 grid gap-2">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="text-xs uppercase tracking-wider text-zinc-500">
-            Devices ({selectedDeviceIds.size} selected)
+            Devices ({selectedDeviceIds.size} selected
+            {anyFilterActive
+              ? `, ${visibleDevices.length} of ${devices.length} shown`
+              : ""}
+            )
           </div>
           <div className="flex gap-3 text-xs">
             <button
               type="button"
               className="text-zinc-400 hover:text-zinc-100"
-              onClick={() =>
-                setSelectedDeviceIds(new Set(devices.map((d) => d.id)))
-              }
+              onClick={() => {
+                // "Select all" respects the active filter so the
+                // operator can DG-narrow → select-all-in-DG → repeat
+                // for another DG.
+                const next = new Set(selectedDeviceIds);
+                for (const d of visibleDevices) next.add(d.id);
+                setSelectedDeviceIds(next);
+              }}
             >
-              Select all
+              Select all visible
             </button>
             <button
               type="button"
               className="text-zinc-400 hover:text-zinc-100"
               onClick={() => setSelectedDeviceIds(new Set())}
             >
-              Clear
+              Clear all
             </button>
           </div>
         </div>
+
+        {/* Narrow-down filter row. Filtering is purely a view operation
+            — selection persists across filter changes so operators
+            can build a selection across multiple DG/TS without
+            re-checking each time. */}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <FilterChip
+            label="Model"
+            value={filterModel}
+            onChange={setFilterModel}
+            options={models}
+          />
+          <FilterChip
+            label="Device Group"
+            value={filterDeviceGroup}
+            onChange={setFilterDeviceGroup}
+            options={deviceGroups}
+          />
+          <FilterChip
+            label="Template Stack"
+            value={filterTemplateStack}
+            onChange={setFilterTemplateStack}
+            options={templateStacks}
+          />
+          {anyFilterActive && (
+            <button
+              type="button"
+              className="text-[11px] text-zinc-500 hover:text-zinc-300 underline"
+              onClick={() => {
+                setFilterModel("");
+                setFilterDeviceGroup("");
+                setFilterTemplateStack("");
+              }}
+            >
+              clear filters
+            </button>
+          )}
+        </div>
+
         <div className="max-h-64 overflow-auto border border-zinc-800 rounded">
           <table className="w-full text-sm">
             <tbody>
-              {devices.map((d) => (
+              {visibleDevices.map((d) => (
                 <tr
                   key={d.id}
                   className="border-b border-zinc-800/40 hover:bg-zinc-900/30"
@@ -176,14 +259,21 @@ export function JobForm({ onDone }: { onDone: () => void }) {
                     {d.sw_version ?? "—"}
                   </td>
                   <td className="px-3 py-1.5 text-zinc-500 text-xs">
+                    {d.device_group ?? (
+                      <span className="text-zinc-700 italic">standalone</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-1.5 text-zinc-500 text-xs">
                     {d.source}
                   </td>
                 </tr>
               ))}
-              {devices.length === 0 && (
+              {visibleDevices.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="p-4 text-xs text-zinc-500 text-center">
-                    No devices in inventory. Add some first.
+                  <td colSpan={6} className="p-4 text-xs text-zinc-500 text-center">
+                    {devices.length === 0
+                      ? "No devices in inventory. Add some first."
+                      : "No devices match the current filters."}
                   </td>
                 </tr>
               )}
@@ -301,6 +391,70 @@ export function JobForm({ onDone }: { onDone: () => void }) {
       </div>
     </form>
   );
+}
+
+/**
+ * Narrow-down dropdown for the device picker. Renders inline next to
+ * its siblings; "All" is the implicit value when nothing is selected.
+ * The Select shows up as a chip-style control so the row of chips
+ * reads as a compact toolbar above the device list.
+ */
+function FilterChip({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  options: string[];
+}) {
+  return (
+    <label className="inline-flex items-center gap-1.5 text-zinc-400">
+      <span>{label}:</span>
+      <Select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="text-xs"
+      >
+        <option value="">All</option>
+        {options.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </Select>
+    </label>
+  );
+}
+
+/**
+ * Surface the Model / Device Group / Template Stack values present in
+ * the current device list. We dedupe + sort so operators see them
+ * in a predictable order. Empty/null values are filtered out — they
+ * shouldn't appear in the dropdown because an "all" selection
+ * already covers them.
+ */
+function deriveFilterOptions(devices: Device[]): {
+  models: string[];
+  deviceGroups: string[];
+  templateStacks: string[];
+} {
+  const models = Array.from(
+    new Set(devices.map((d) => d.model).filter((m): m is string => !!m)),
+  ).sort();
+  const deviceGroups = Array.from(
+    new Set(
+      devices.map((d) => d.device_group).filter((g): g is string => !!g),
+    ),
+  ).sort();
+  const templateStacks = Array.from(
+    new Set(
+      devices.map((d) => d.template_stack).filter((t): t is string => !!t),
+    ),
+  ).sort();
+  return { models, deviceGroups, templateStacks };
 }
 
 function Toggle({

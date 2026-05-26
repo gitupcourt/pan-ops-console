@@ -217,16 +217,27 @@ function HeatMapGrid({
   ];
 
   return (
-    // `overflow-x: auto` alone gets the browser to promote `overflow-y`
-    // from `visible` to `auto` (the famous one-axis scroll gotcha), which
-    // was producing a surprise vertical scrollbar. Setting both axes
-    // explicitly pins it: horizontal scrolls when the table is wider than
-    // the container, vertical never scrolls. The `pb-32` reserves space
-    // below the table for the rotated metric labels so they don't get
-    // clipped.
+    // Per the CSS spec, ANY non-visible `overflow-x` (auto, scroll,
+    // hidden) promotes `overflow-y: visible` to `overflow-y: auto`.
+    // The previous fix attempt set both axes explicitly but the
+    // promotion happens regardless — there is no combination of
+    // (auto-x, visible-y) that the browser will honour as written.
+    //
+    // The way out is `overflow: clip` on one axis: `clip` doesn't
+    // create a scroll container, so the other axis stays exactly as
+    // declared. `overflow-y: clip` is widely supported (Chrome 90+,
+    // Firefox 81+, Safari 16+).
+    //
+    // For the heat map specifically the table currently fits inside
+    // the card at typical widths — phase-10's table view is where
+    // horizontal real estate gets tight. If the grid ever does
+    // overflow horizontally, the user can scroll the page. The
+    // important thing is NEVER scroll the heat-map area vertically;
+    // every model row and the rotated metric labels below should be
+    // visible at once.
     <div
       className="p-4 pb-32"
-      style={{ overflowX: "auto", overflowY: "visible" }}
+      style={{ overflowX: "auto", overflowY: "clip" }}
     >
       <table className="border-separate border-spacing-1">
         <thead>

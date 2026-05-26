@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, NavLink } from "react-router-dom";
 
 import { HeatmapCell } from "../api";
 
@@ -94,7 +94,18 @@ function HoverPopover({ cell }: { cell: HeatmapCell }) {
       </div>
       <div className="space-y-1">
         {cell.top_devices.map((d) => (
-          <div key={d.device_id} className="flex items-center gap-2">
+          // Device name links to the trend chart for THIS exact
+          // (device, metric) pair — the hover popover is already in the
+          // context of one metric, so the click target most useful to
+          // the operator is "show me how this metric is trending on
+          // this device specifically." The trend route is a phase-11
+          // placeholder for now but the navigation is correct, so when
+          // phase 11 lands the link starts working without UI changes.
+          <NavLink
+            key={d.device_id}
+            to={`/capacity/trend/${d.device_id}/${encodeURIComponent(cell.metric)}`}
+            className="flex items-center gap-2 px-1 -mx-1 rounded hover:bg-zinc-800/60"
+          >
             <div className="text-blue-400 w-24 truncate text-[11px]">
               {d.device_name}
             </div>
@@ -110,7 +121,7 @@ function HoverPopover({ cell }: { cell: HeatmapCell }) {
                 style={{ width: `${Math.min(100, Math.max(0, d.pct ?? 0))}%` }}
               />
             </div>
-          </div>
+          </NavLink>
         ))}
       </div>
 

@@ -60,3 +60,42 @@ def test_capacity_beat_schedule_entry():
     entry = schedule["capacity-poll-all"]
     assert entry["task"] == "capacity.poll_all"
     assert entry["schedule"] == float(settings.POLL_INTERVAL_SECONDS)
+
+
+def test_panorama_sync_all_task_registered():
+    """The scheduled Panorama sync wraps the existing sync_all service
+    so Device.connected / last_seen_at stay fresh between operator
+    interactions. The Celery task name 'panorama.sync_all' is what beat
+    dispatches by — if the registered name drifts from the beat-schedule
+    entry's `task:` field, beat will fire into the void and the field
+    silently goes stale within minutes.
+    """
+    import app.core.panorama.tasks  # noqa: F401
+    from app.workers.celery_app import celery
+
+    assert "panorama.sync_all" in celery.tasks, (
+        f"panorama.sync_all not registered. Available: "
+        f"{[n for n in celery.tasks if not n.startswith('celery.')]}"
+    )
+
+
+def test_panorama_sync_beat_schedule_entry():
+    """The beat schedule must reference the task by the same name the
+    decorator registered, on the configurable PANORAMA_SYNC_INTERVAL_SECONDS
+    cadence (default 300s).
+
+    Operator-visible consequence if this regresses: the disconnected
+    badge in the UI is no longer a real signal — sync only fires on
+    manual click, so any device shows stale state minutes after.
+    """
+    from app.config import get_settings
+    from app.workers.celery_app import celery
+
+    settings = get_settings()
+    schedule = celery.conf.beat_schedule
+    assert "panorama-sync-all" in schedule, (
+        f"panorama.sync_all not in beat_schedule. Entries: {list(schedule)}"
+    )
+    entry = schedule["panorama-sync-all"]
+    assert entry["task"] == "panorama.sync_all"
+    assert entry["schedule"] == float(settings.PANORAMA_SYNC_INTERVAL_SECONDS)

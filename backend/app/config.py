@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///data/capacity.db"
     FERNET_KEY: str = Field(..., min_length=32)
     POLL_INTERVAL_SECONDS: int = 300
+
+    # How often the scheduled Panorama sync runs (refresh `Device.connected`,
+    # `last_seen_at`, HA state, etc. across every registered Panorama).
+    # Default 5 minutes — same cadence as the capacity poller, low cost
+    # since Panorama's `show devices all` is one call per Panorama
+    # regardless of fleet size. Set higher if Panorama is rate-limit-
+    # sensitive or the operator wants slower refresh; the UI's
+    # disconnected/online pill freshness scales with this.
+    PANORAMA_SYNC_INTERVAL_SECONDS: int = 300
+
     CATALOG_PATH: str = "/app/catalog/metrics.yaml"
     CORS_ORIGINS: str = "http://localhost:5173"
 

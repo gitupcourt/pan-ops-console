@@ -248,7 +248,8 @@ def get_heatmap(
     AND which appear in top_devices.
 
     `top_n` controls how many devices the hover popover gets. Default 8
-    matches the screenshot's ~6 visible + "Show N more" affordance.
+    fits comfortably in the popover while leaving room for a "show N
+    more" affordance when the bucket has more than top_n devices.
     """
     # Step 1: latest sample per (device_id, metric), joined with the
     # device row so we have model + filter columns in scope.

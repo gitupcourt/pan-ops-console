@@ -38,9 +38,6 @@ export default function HomeDashboard() {
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-semibold text-zinc-100">Overview</h2>
-        <p className="text-sm text-zinc-400 mt-1">
-          Fleet status at a glance — drill into any frame for detail.
-        </p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

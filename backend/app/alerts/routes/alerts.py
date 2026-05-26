@@ -221,7 +221,7 @@ def _alert_to_read(db: Session, a: Alert) -> AlertRead:
 
 
 def _alert_name(a: Alert) -> str:
-    """Human-readable label following PA's catalog naming convention.
+    """Human-readable label for an alert event.
 
     The metric is shown raw here — the frontend has the catalog and
     can render the friendly description (e.g. "Address objects") in

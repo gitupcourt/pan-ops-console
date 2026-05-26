@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi import Depends
 
+from app.alerts.routes import router as alerts_router
+from app.capacity.routes import aggregates as capacity_aggregates
 from app.capacity.routes import metrics
 from app.config import get_settings
 from app.core.auth.deps import current_user
@@ -74,6 +76,15 @@ app.include_router(providers.router, dependencies=_auth_required)
 # today for create / list / observe / abort / delete + per-task confirm /
 # override / retry; orchestration runs once 4d lands.
 app.include_router(upgrade_router, dependencies=_auth_required)
+# Capacity-analyzer aggregation endpoints — phase 8. Powers the heat-map
+# (phase 9), table (phase 10), and trend (phase 11) views with read-only
+# aggregates over the existing samples + devices tables. No schema added.
+app.include_router(capacity_aggregates.router, dependencies=_auth_required)
+# Alerts module — phase 8 scaffold (empty list). Phase 12 fills in the
+# real rule engine + acknowledgement actions. Mounting the route now
+# means the phase-7 Home Dashboard's Active-alerts frame can fetch
+# from /alerts immediately and just renders the empty state.
+app.include_router(alerts_router, dependencies=_auth_required)
 
 
 @app.get("/")

@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api, Device, MetricSpec } from "../api";
+import { DeviceConnectionStatus } from "../core/devices/DeviceConnectionStatus";
 import { Button, Select } from "../core/ui/ui";
 import { MetricChart } from "./MetricChart";
 
@@ -46,7 +47,7 @@ export default function Dashboard() {
 
   return (
     <>
-      <div className="flex items-center gap-3 mb-6">
+      <div className="flex items-center gap-3 mb-3">
         <Select
           value={activeDeviceId ?? ""}
           onChange={(e) => setDeviceId(Number(e.target.value))}
@@ -57,6 +58,7 @@ export default function Dashboard() {
             </option>
           ))}
         </Select>
+        {selected && <DeviceConnectionStatus device={selected} />}
         <Select value={hours} onChange={(e) => setHours(Number(e.target.value))}>
           {HOURS_OPTIONS.map((h) => (
             <option key={h} value={h}>
@@ -73,6 +75,12 @@ export default function Dashboard() {
           </span>
         )}
       </div>
+
+      {selected && (
+        <div className="mb-6">
+          <DeviceConnectionStatus device={selected} variant="banner" />
+        </div>
+      )}
 
       {activeDeviceId == null ? null : (
         <div className="space-y-8">

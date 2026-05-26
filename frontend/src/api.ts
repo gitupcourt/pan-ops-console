@@ -284,6 +284,104 @@ export type UpgradeJobCreate = {
   auto_ack_postcheck_failures?: boolean;
 };
 
+// ---------- Capacity Analyzer (phase 8 endpoints) ----------
+//
+// Mirrors `app/capacity/routes/aggregates.py`. The three drill levels:
+//   - HeatmapCell        — one per (model, metric); powers /capacity
+//   - CapacityTableRow   — one per (device, metric); powers /capacity/table
+//   - CapacityTrend      — time-series + prediction; powers /capacity/trend
+
+export type MetricCategory = "config" | "system" | "traffic";
+
+export type HeatmapDeviceTop = {
+  device_id: number;
+  device_name: string;
+  current: number;
+  max: number | null;
+  pct: number | null;
+};
+
+export type HeatmapCell = {
+  model: string;
+  metric: string;
+  category: MetricCategory | "unknown";
+  metric_description: string;
+  max_pct: number | null;
+  device_count: number;
+  top_devices: HeatmapDeviceTop[];
+};
+
+export type CapacityTableRow = {
+  device_id: number;
+  device_name: string;
+  model: string | null;
+  software_version: string | null;
+  device_group: string | null;
+  template_stack: string | null;
+  metric: string;
+  metric_description: string;
+  category: MetricCategory | "unknown";
+  current: number;
+  max: number | null;
+  pct: number | null;
+  predicted_date: string | null;
+  last_sample_at: string;
+};
+
+export type CapacityTableResponse = {
+  rows: CapacityTableRow[];
+  total: number;
+};
+
+export type TrendSample = {
+  ts: string;
+  current: number;
+  pct: number | null;
+};
+
+export type TrendPrediction = {
+  predicted_date: string | null;
+  days_left: number | null;
+  slope_per_day: number | null;
+  method: "linear_regression" | "insufficient_data" | "decreasing";
+};
+
+export type CapacityTrend = {
+  device_id: number;
+  device_name: string;
+  model: string | null;
+  metric: string;
+  metric_description: string;
+  max_value: number | null;
+  samples: TrendSample[];
+  prediction: TrendPrediction;
+};
+
+export type CapacityTableFilters = {
+  model?: string | null;
+  metric?: string | null;
+  device_group?: string | null;
+  template_stack?: string | null;
+  pct_min?: number | null;
+  pct_max?: number | null;
+  limit?: number;
+  offset?: number;
+};
+
+export type JobsSummary = {
+  pending: number;
+  running: number;
+  awaiting_confirmation: number;
+  completed: number;
+  failed: number;
+  aborted: number;
+};
+
+export type VersionDistributionRow = {
+  version: string | null;
+  count: number;
+};
+
 // ---------- API ----------
 
 export const api = {
@@ -420,4 +518,38 @@ export const api = {
     }),
   deleteUpgradeImage: (id: number) =>
     j<void>(`/upgrade/images/${id}`, { method: "DELETE" }),
+
+  // Capacity Analyzer (phase 8 endpoints).
+  getCapacityHeatmap: (filters?: {
+    device_group?: string | null;
+    template_stack?: string | null;
+    top_n?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (filters?.device_group) qs.set("device_group", filters.device_group);
+    if (filters?.template_stack) qs.set("template_stack", filters.template_stack);
+    if (filters?.top_n) qs.set("top_n", String(filters.top_n));
+    const suffix = qs.toString();
+    return j<HeatmapCell[]>(`/capacity/heatmap${suffix ? "?" + suffix : ""}`);
+  },
+  getCapacityTable: (filters?: CapacityTableFilters) => {
+    const qs = new URLSearchParams();
+    if (filters?.model) qs.set("model", filters.model);
+    if (filters?.metric) qs.set("metric", filters.metric);
+    if (filters?.device_group) qs.set("device_group", filters.device_group);
+    if (filters?.template_stack) qs.set("template_stack", filters.template_stack);
+    if (filters?.pct_min != null) qs.set("pct_min", String(filters.pct_min));
+    if (filters?.pct_max != null) qs.set("pct_max", String(filters.pct_max));
+    if (filters?.limit) qs.set("limit", String(filters.limit));
+    if (filters?.offset != null) qs.set("offset", String(filters.offset));
+    const suffix = qs.toString();
+    return j<CapacityTableResponse>(`/capacity/table${suffix ? "?" + suffix : ""}`);
+  },
+  getCapacityTrend: (deviceId: number, metric: string, days = 30) =>
+    j<CapacityTrend>(`/capacity/trend/${deviceId}/${metric}?days=${days}`),
+
+  // Summary endpoints for the home Dashboard frames.
+  getJobsSummary: () => j<JobsSummary>("/upgrade/jobs/summary"),
+  getVersionDistribution: () =>
+    j<VersionDistributionRow[]>("/devices/version-distribution"),
 };

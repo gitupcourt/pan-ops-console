@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import clsx from "clsx";
 
+import CapacityAnalyzer from "./capacity/CapacityAnalyzer";
 import Dashboard from "./capacity/Dashboard";
 import { useAuth } from "./core/auth/AuthContext";
 import Bootstrap from "./core/auth/Bootstrap";
@@ -52,12 +53,23 @@ export default function App() {
         <main className="max-w-7xl mx-auto px-6 py-6">
           <Routes>
             <Route path="/" element={<HomeDashboard />} />
-            {/* /capacity is the old "Dashboard" home for now — phase 9
-                replaces this with the heat-map. The per-device chart
-                grid it currently renders lives on as the device-detail
-                view (reachable from the capacity table in phase 10),
-                so swapping the route here doesn't lose the affordance. */}
-            <Route path="/capacity" element={<Dashboard />} />
+            {/* /capacity is now the heat-map view (phase 9). The
+                per-device chart grid previously at /capacity lives on
+                at /capacity/device — phase 10's table view will deep-
+                link there from the device-name column. Phase 10
+                replaces CapacityTablePlaceholder and phase 11 replaces
+                CapacityTrendPlaceholder; the routes exist now so the
+                heat-map's tile click doesn't 404. */}
+            <Route path="/capacity" element={<CapacityAnalyzer />} />
+            <Route path="/capacity/device" element={<Dashboard />} />
+            <Route
+              path="/capacity/table"
+              element={<CapacityTablePlaceholder />}
+            />
+            <Route
+              path="/capacity/trend/:deviceId/:metric"
+              element={<CapacityTrendPlaceholder />}
+            />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/upgrade" element={<UpgradeJobs />} />
             <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />
@@ -116,6 +128,38 @@ function NotAuthorized() {
   return (
     <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
       Admins only.
+    </div>
+  );
+}
+
+/**
+ * Placeholders for routes the heat-map's tile click navigates to but
+ * that don't have a real implementation yet. Phase 10 replaces
+ * CapacityTablePlaceholder with the table view; phase 11 replaces
+ * CapacityTrendPlaceholder with the time-series chart. Including the
+ * routes today means the phase-9 heat map's "click a tile" doesn't
+ * dead-end on operator confusion.
+ */
+function CapacityTablePlaceholder() {
+  return (
+    <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
+      <p>Capacity table view ships in phase 10.</p>
+      <p className="mt-2 text-xs">
+        The heat-map tile you clicked passed its filters through this URL —
+        once the table view lands, it'll honour them automatically.
+      </p>
+    </div>
+  );
+}
+
+function CapacityTrendPlaceholder() {
+  return (
+    <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
+      <p>Capacity trend view ships in phase 11.</p>
+      <p className="mt-2 text-xs">
+        Will render a historical chart + predicted-date overlay for the
+        (device, metric) pair in the URL.
+      </p>
     </div>
   );
 }

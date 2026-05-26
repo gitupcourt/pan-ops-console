@@ -217,7 +217,17 @@ function HeatMapGrid({
   ];
 
   return (
-    <div className="overflow-x-auto p-4">
+    // `overflow-x: auto` alone gets the browser to promote `overflow-y`
+    // from `visible` to `auto` (the famous one-axis scroll gotcha), which
+    // was producing a surprise vertical scrollbar. Setting both axes
+    // explicitly pins it: horizontal scrolls when the table is wider than
+    // the container, vertical never scrolls. The `pb-32` reserves space
+    // below the table for the rotated metric labels so they don't get
+    // clipped.
+    <div
+      className="p-4 pb-32"
+      style={{ overflowX: "auto", overflowY: "visible" }}
+    >
       <table className="border-separate border-spacing-1">
         <thead>
           {/* Row 1: category group headers spanning their metric columns */}
@@ -252,7 +262,7 @@ function HeatMapGrid({
         <tbody>
           {visibleModels.map((model) => (
             <tr key={model}>
-              <th className="text-right pr-2 text-xs font-medium text-zinc-200 align-middle">
+              <th className="text-right pr-2 text-xs font-medium text-zinc-200 align-middle whitespace-nowrap">
                 {model}
               </th>
               {orderedMetrics.map((m) => {
@@ -265,21 +275,31 @@ function HeatMapGrid({
               })}
             </tr>
           ))}
-          {/* Row N+1: metric labels under the column. Rotated for density. */}
+          {/* Row N+1: metric labels under the columns. Rotated 45° for
+              density. The cell uses `position: relative` + absolutely-
+              positioned text so the rotated text doesn't push the row's
+              intrinsic height and doesn't introduce extra space above
+              the labels. The container has `pb-32` to reserve room
+              below the table for these labels without clipping. */}
           <tr>
             <th className="w-24" />
             {orderedMetrics.map((m) => (
               <th
                 key={m.metric}
-                className="align-top pt-2"
-                style={{ width: 56 }}
+                style={{
+                  width: 44,
+                  height: 8,
+                  position: "relative",
+                  verticalAlign: "top",
+                }}
               >
                 <div
-                  className="text-[10px] text-zinc-400 origin-top-left whitespace-nowrap"
+                  className="absolute text-[10px] text-zinc-400 whitespace-nowrap"
                   style={{
-                    transform: "rotate(45deg) translateY(-50%)",
-                    width: 100,
-                    paddingTop: 8,
+                    top: 4,
+                    left: "50%",
+                    transform: "rotate(45deg)",
+                    transformOrigin: "left top",
                   }}
                   title={m.metric_description}
                 >

@@ -3,6 +3,7 @@ import clsx from "clsx";
 
 import CapacityAnalyzer from "./capacity/CapacityAnalyzer";
 import CapacityTable from "./capacity/CapacityTable";
+import CapacityTrend from "./capacity/CapacityTrend";
 import Dashboard from "./capacity/Dashboard";
 import { useAuth } from "./core/auth/AuthContext";
 import Bootstrap from "./core/auth/Bootstrap";
@@ -54,19 +55,16 @@ export default function App() {
         <main className="max-w-7xl mx-auto px-6 py-6">
           <Routes>
             <Route path="/" element={<HomeDashboard />} />
-            {/* /capacity is now the heat-map view (phase 9). The
-                per-device chart grid previously at /capacity lives on
-                at /capacity/device — phase 10's table view will deep-
-                link there from the device-name column. Phase 10
-                replaces CapacityTablePlaceholder and phase 11 replaces
-                CapacityTrendPlaceholder; the routes exist now so the
-                heat-map's tile click doesn't 404. */}
+            {/* Capacity Analyzer drill chain: heat-map → table → trend.
+                The previous /capacity (per-device chart grid) lives on
+                at /capacity/device — the table view deep-links there
+                from the device-name column. */}
             <Route path="/capacity" element={<CapacityAnalyzer />} />
             <Route path="/capacity/device" element={<Dashboard />} />
             <Route path="/capacity/table" element={<CapacityTable />} />
             <Route
               path="/capacity/trend/:deviceId/:metric"
-              element={<CapacityTrendPlaceholder />}
+              element={<CapacityTrend />}
             />
             <Route path="/inventory" element={<Inventory />} />
             <Route path="/upgrade" element={<UpgradeJobs />} />
@@ -126,24 +124,6 @@ function NotAuthorized() {
   return (
     <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
       Admins only.
-    </div>
-  );
-}
-
-/**
- * Placeholder for the phase-11 trend view. The heat-map tile click +
- * the capacity table's metric-name click both navigate here; phase 11
- * fills in the historical chart + predicted-date overlay. Until then
- * the route exists so the affordance doesn't dead-end.
- */
-function CapacityTrendPlaceholder() {
-  return (
-    <div className="rounded-lg border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-400">
-      <p>Capacity trend view ships in phase 11.</p>
-      <p className="mt-2 text-xs">
-        Will render a historical chart + predicted-date overlay for the
-        (device, metric) pair in the URL.
-      </p>
     </div>
   );
 }

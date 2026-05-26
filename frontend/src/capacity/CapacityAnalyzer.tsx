@@ -44,8 +44,13 @@ export default function CapacityAnalyzer() {
   const modelFilter = params.get("model") ?? "";
   const deviceGroup = params.get("device_group") ?? "";
   const templateStack = params.get("template_stack") ?? "";
-  const [pctMin, setPctMin] = useState<number>(0);
-  const [pctMax, setPctMax] = useState<number>(100);
+  // Severity bands match the tile color bands: green/amber/red.
+  // Operators think in "show me what's hot" not "show me 60–80%", so
+  // the three preset buttons + All cover the realistic use cases
+  // without the two-handle-range-slider footgun (the old slider only
+  // let you drag the max handle because both inputs were absolute-
+  // positioned siblings — z-order swallowed the min handle).
+  const [severity, setSeverity] = useState<Severity>("all");
   const [colorScheme, setColorScheme] = useState<"multi" | "mono">("multi");
 
   const updateFilter = (key: string, value: string) => {
@@ -71,23 +76,20 @@ export default function CapacityAnalyzer() {
   const { models, metricsByCategory, deviceGroups, templateStacks, allMetrics } =
     useMemo(() => deriveOptions(cells), [cells]);
 
-  // Apply client-side filters that the API doesn't (metric, model, pct
-  // range) — keeps the API surface narrow and lets the slider feel
-  // responsive without round-tripping.
+  // Apply client-side filters that the API doesn't (metric, model,
+  // severity band) — keeps the API surface narrow.
   const visibleCells = useMemo(() => {
     return cells.filter((c) => {
       if (metricFilter && c.metric !== metricFilter) return false;
       if (modelFilter && c.model !== modelFilter) return false;
-      const pct = c.max_pct ?? 0;
-      if (pct < pctMin || pct > pctMax) return false;
+      if (!matchesSeverity(c.max_pct, severity)) return false;
       return true;
     });
-  }, [cells, metricFilter, modelFilter, pctMin, pctMax]);
+  }, [cells, metricFilter, modelFilter, severity]);
 
   const reset = () => {
     setParams(new URLSearchParams());
-    setPctMin(0);
-    setPctMax(100);
+    setSeverity("all");
   };
 
   const title = useMemo(() => {
@@ -155,14 +157,7 @@ export default function CapacityAnalyzer() {
           description={`${visibleCells.length} of ${cells.length} tiles shown`}
         />
 
-        <CapacityFilterSlider
-          min={pctMin}
-          max={pctMax}
-          onChange={(lo, hi) => {
-            setPctMin(lo);
-            setPctMax(hi);
-          }}
-        />
+        <CapacitySeverityFilter value={severity} onChange={setSeverity} />
 
         {heatmapQ.isLoading ? (
           <div className="p-8 text-center text-xs text-zinc-500">Loading…</div>
@@ -483,56 +478,79 @@ function ColorSchemeToggle({
   );
 }
 
-function CapacityFilterSlider({
-  min,
-  max,
+// ----- severity band filter -----
+
+/**
+ * Severity bands that mirror the tile color thresholds used by
+ * bgForPct() in HeatMapTile. Keeping these aligned is important: an
+ * operator clicking "Critical" should see exactly the red tiles, not
+ * an off-by-one set. If the thresholds in HeatMapTile ever change,
+ * change them here too.
+ *
+ *   "all"      — no severity filter (every tile, regardless of %)
+ *   "nominal"  — pct < 60   (the green/emerald band — healthy)
+ *   "alert"    — 60 ≤ pct < 80   (the amber band — pay attention)
+ *   "critical" — pct ≥ 80   (the rose band — act now)
+ */
+type Severity = "all" | "nominal" | "alert" | "critical";
+
+function matchesSeverity(pct: number | null, sev: Severity): boolean {
+  if (sev === "all") return true;
+  const p = pct ?? 0;
+  if (sev === "nominal") return p < 60;
+  if (sev === "alert") return p >= 60 && p < 80;
+  return p >= 80; // critical
+}
+
+/**
+ * Severity-band button group replacing the original two-handle range
+ * slider. The slider was a faithful PA replica but suffered from a
+ * z-order bug — stacking two `<input type="range">` siblings means
+ * only the top one (max handle) catches pointer events; the min
+ * handle was unreachable. Three preset buttons cover the realistic
+ * use case ("show me what's hot") without the footgun, and the color
+ * swatch on each button makes the relationship to the tile colors
+ * unmistakable.
+ */
+function CapacitySeverityFilter({
+  value,
   onChange,
 }: {
-  min: number;
-  max: number;
-  onChange: (lo: number, hi: number) => void;
+  value: Severity;
+  onChange: (v: Severity) => void;
 }) {
-  // Two-handle range slider built from two range inputs stacked on a
-  // colored gradient. Pure CSS — no library needed.
+  const options: { value: Severity; label: string; swatch?: string }[] = [
+    { value: "all", label: "All" },
+    { value: "nominal", label: "Nominal", swatch: "bg-emerald-700/60" },
+    { value: "alert", label: "Alert", swatch: "bg-amber-600/60" },
+    { value: "critical", label: "Critical", swatch: "bg-rose-700/70" },
+  ];
   return (
-    <div className="px-4 py-3 border-b border-zinc-800">
-      <div className="flex items-center gap-3 text-[11px] text-zinc-500">
-        <span>Capacity Filter</span>
-        <div className="relative flex-1 h-6">
-          {/* Visual gradient track behind the inputs */}
-          <div
-            className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-2 rounded"
-            style={{
-              background:
-                "linear-gradient(to right, rgb(20 83 45 / 0.6) 0%, rgb(20 83 45 / 0.6) 60%, rgb(120 53 15 / 0.6) 60%, rgb(120 53 15 / 0.6) 80%, rgb(127 29 29 / 0.6) 80%, rgb(127 29 29 / 0.6) 100%)",
-            }}
-          />
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={min}
-            onChange={(e) =>
-              onChange(Math.min(Number(e.target.value), max - 1), max)
-            }
-            className="absolute inset-x-0 top-1/2 -translate-y-1/2 w-full appearance-none bg-transparent pointer-events-auto"
-            style={{ height: 6 }}
-          />
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={max}
-            onChange={(e) =>
-              onChange(min, Math.max(Number(e.target.value), min + 1))
-            }
-            className="absolute inset-x-0 top-1/2 -translate-y-1/2 w-full appearance-none bg-transparent pointer-events-auto"
-            style={{ height: 6 }}
-          />
-        </div>
-        <span className="font-mono text-zinc-300 w-16 text-right">
-          {min}% – {max}%
-        </span>
+    <div className="px-4 py-3 border-b border-zinc-800 flex items-center gap-3 text-[11px] text-zinc-500">
+      <span>Capacity Filter</span>
+      <div className="inline-flex border border-zinc-700 rounded overflow-hidden">
+        {options.map((opt) => {
+          const active = value === opt.value;
+          return (
+            <button
+              key={opt.value}
+              onClick={() => onChange(opt.value)}
+              className={
+                "px-3 py-1 flex items-center gap-1.5 " +
+                (active
+                  ? "bg-zinc-700 text-zinc-100"
+                  : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
+              }
+            >
+              {opt.swatch && (
+                <span
+                  className={`inline-block w-2 h-2 rounded-sm ${opt.swatch}`}
+                />
+              )}
+              <span>{opt.label}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

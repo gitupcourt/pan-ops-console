@@ -283,9 +283,9 @@ function CategoryTable({
             </td>
             <td className="px-4 py-2">
               <NavLink
-                to="/capacity/device"
+                to={`/capacity/device/${r.device_id}`}
                 className="text-blue-400 hover:text-blue-300 text-xs"
-                title={`Open device-level view (selector currently lands on first device — phase 11 deep-links by id)`}
+                title={`Open device-level view for ${r.device_name}`}
               >
                 {r.device_name}
               </NavLink>

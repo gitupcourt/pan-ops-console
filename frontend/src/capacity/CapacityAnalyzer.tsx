@@ -235,8 +235,14 @@ function HeatMapGrid({
     // important thing is NEVER scroll the heat-map area vertically;
     // every model row and the rotated metric labels below should be
     // visible at once.
+    //
+    // pb-48 (192px) reserves enough room below the table for rotated
+    // 45° labels up to ~40 chars long. Combined with shortLabel()
+    // stripping any "(...)" parenthetical from descriptions, the
+    // longest labels in the current catalog (e.g. "Active sessions
+    // vs. session table maximum" at 41 chars) fit cleanly.
     <div
-      className="p-4 pb-32"
+      className="p-4 pb-48"
       style={{ overflowX: "auto", overflowY: "clip" }}
     >
       <table className="border-separate border-spacing-1">
@@ -290,8 +296,15 @@ function HeatMapGrid({
               density. The cell uses `position: relative` + absolutely-
               positioned text so the rotated text doesn't push the row's
               intrinsic height and doesn't introduce extra space above
-              the labels. The container has `pb-32` to reserve room
-              below the table for these labels without clipping. */}
+              the labels. The container has `pb-48` to reserve room
+              below the table for these labels without clipping.
+
+              The display label is shortLabel(description) — anything
+              after " (" is dropped — so verbose catalog descriptions
+              like "FQDN address objects (pushed + local; subset of
+              address objects)" render as just "FQDN address objects"
+              on the axis. Full description is preserved in the title
+              hover for operators who need the detail. */}
           <tr>
             <th className="w-24" />
             {orderedMetrics.map((m) => (
@@ -314,7 +327,7 @@ function HeatMapGrid({
                   }}
                   title={m.metric_description}
                 >
-                  {m.metric_description}
+                  {shortLabel(m.metric_description)}
                 </div>
               </th>
             ))}
@@ -371,6 +384,24 @@ function deriveOptions(cells: HeatmapCell[]): {
     templateStacks: [],
     allMetrics,
   };
+}
+
+/**
+ * Strip any "(...)" parenthetical from a metric description for the
+ * compact rotated-axis label. Examples:
+ *   "Address objects (pushed + local)" → "Address objects"
+ *   "FQDN address objects (pushed + local; subset of ...)" → "FQDN address objects"
+ *   "Active sessions vs. session table maximum" → "Active sessions vs. session table maximum"
+ *     (no parenthetical, returned as-is)
+ *
+ * The full description is preserved separately in the cell's `title`
+ * attribute so hover still shows the verbose form. This mirrors PA's
+ * Capacity Analyzer where axis labels are deliberately terse.
+ */
+function shortLabel(description: string): string {
+  const idx = description.indexOf(" (");
+  if (idx === -1) return description;
+  return description.slice(0, idx);
 }
 
 function FilterDropdown({

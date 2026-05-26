@@ -60,7 +60,16 @@ export default function App() {
                 at /capacity/device — the table view deep-links there
                 from the device-name column. */}
             <Route path="/capacity" element={<CapacityAnalyzer />} />
+            {/* Two routes for the per-device chart grid: bare
+                `/capacity/device` shows the dropdown defaulted to
+                the alphabetic-first device (entry point from the
+                top nav), and `/capacity/device/:deviceId` deep-links
+                directly to a specific device (entry point from the
+                Capacity Table host column). Dashboard reads the
+                param via useParams and uses it as the initial /
+                URL-synced selection. */}
             <Route path="/capacity/device" element={<Dashboard />} />
+            <Route path="/capacity/device/:deviceId" element={<Dashboard />} />
             <Route path="/capacity/table" element={<CapacityTable />} />
             <Route
               path="/capacity/trend/:deviceId/:metric"

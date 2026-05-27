@@ -42,7 +42,7 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center p-4">
       <form onSubmit={submit} className="w-full max-w-sm space-y-5">
         <div className="text-center mb-4">
-          <h1 className="text-xl font-semibold text-zinc-100">PAN Capacity Analyzer</h1>
+          <h1 className="text-xl font-semibold text-zinc-100">PAN NGFW Ops Console</h1>
           <p className="text-xs text-zinc-500 mt-1">Sign in to continue</p>
         </div>
 

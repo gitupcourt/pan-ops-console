@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, object_session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth.deps import current_user
 from app.core.auth.models.user import User
@@ -386,7 +387,11 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/upgrade/jobs/{job_id}/start", response_model=JobDetail)
-def start_job(job_id: int, db: Session = Depends(get_db)):
+def start_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
     """Transition PENDING → RUNNING and enqueue per-pair orchestration.
 
     Idempotent on a RUNNING job (no-op). Refuses to start a job that's
@@ -411,6 +416,10 @@ def start_job(job_id: int, db: Session = Depends(get_db)):
 
     job.state = JobState.RUNNING
     job.started_at = datetime.now(timezone.utc)
+    # Per-task audit line so the JobDetail activity panel surfaces
+    # who kicked the job off (operator vs scheduler vs API client).
+    for t in job.tasks:
+        _audit_log(t, f"Job started by {user.username}")
     db.commit()
     db.refresh(job)
 
@@ -426,7 +435,11 @@ def start_job(job_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/upgrade/jobs/{job_id}/abort", response_model=JobDetail)
-def abort_job(job_id: int, db: Session = Depends(get_db)):
+def abort_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
     """Operator pull-the-cord on a running job.
 
     Sets state=ABORTED + finished_at. The orchestrator checks job.state
@@ -447,6 +460,8 @@ def abort_job(job_id: int, db: Session = Depends(get_db)):
         )
     job.state = JobState.ABORTED
     job.finished_at = datetime.now(timezone.utc)
+    for t in job.tasks:
+        _audit_log(t, f"Job aborted by {user.username}")
     db.commit()
     db.refresh(job)
     return _job_to_detail(job)
@@ -492,6 +507,29 @@ _AWAITING_OVERRIDE = {
     TaskPhase.AWAITING_PRECHECK_OVERRIDE,
     TaskPhase.AWAITING_POSTCHECK_OVERRIDE,
 }
+
+
+def _audit_log(task: DeviceUpgradeTask, message: str) -> None:
+    """Append a user-attributed line to task.progress.log so the audit
+    trail in the JobDetail activity panel surfaces who clicked what.
+
+    The orchestrator's `_record` also writes here; this helper mirrors
+    its shape (ISO-timestamped) so the rendered log reads as one
+    chronologically-ordered stream of orchestrator + operator events.
+
+    Uses `flag_modified` because the `progress` column is plain JSON
+    (not `MutableDict.as_mutable(JSON)`), so in-place mutation followed
+    by self-assignment doesn't always reliably mark the column dirty.
+    `flag_modified` is the explicit "yes, persist this" signal.
+    """
+    progress = task.progress or {}
+    log = progress.get("log") or []
+    if not isinstance(log, list):
+        log = []
+    log.append(f"{datetime.now(timezone.utc).isoformat()} {message}")
+    progress["log"] = log
+    task.progress = progress
+    flag_modified(task, "progress")
 
 
 def _signal_task_advance(
@@ -553,6 +591,7 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
 def confirm_task(
     task_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(current_user),
 ):
     """Advance a parked task past a reboot / failover / primary-upgrade
     confirmation gate.
@@ -568,6 +607,12 @@ def confirm_task(
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     _signal_task_advance(task, valid_phases=_AWAITING_CONFIRM)
+    # Phase-aware audit line — "Confirm" means different things at
+    # different gates, so capture which gate the operator cleared.
+    _audit_log(
+        task,
+        f"Confirmed ({task.phase.value}) by {user.username}",
+    )
     db.commit()
     db.refresh(task)
 
@@ -588,17 +633,47 @@ def confirm_task(
 def override_task(
     task_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(current_user),
 ):
     """Acknowledge a precheck or postcheck FAIL and proceed.
 
     Same signal-pattern as confirm_task; different valid phases. The
     task's `progress` JSON keeps the failing-check details so the
     audit trail is intact even after the operator overrides.
+
+    Records the override under `progress.overrides` so the JobDetail
+    precheck panel can render "Overridden by USERNAME" even after the
+    task has moved past the gate. Useful to answer questions like
+    "the device is now in Snapshot but the precheck panel still shows
+    FAIL — is that because someone overrode it earlier?" without
+    making the operator scroll the activity log.
     """
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
     _signal_task_advance(task, valid_phases=_AWAITING_OVERRIDE)
+    # Persistent override record on the task so the precheck panel
+    # can surface "overridden by ..." on subsequent renders.
+    phase_value = task.phase.value
+    overridden_at = datetime.now(timezone.utc).isoformat()
+    progress = task.progress or {}
+    overrides = progress.get("overrides") or []
+    if not isinstance(overrides, list):
+        overrides = []
+    overrides.append(
+        {
+            "phase": phase_value,
+            "by": user.username,
+            "at": overridden_at,
+        }
+    )
+    progress["overrides"] = overrides
+    task.progress = progress
+    flag_modified(task, "progress")
+    _audit_log(
+        task,
+        f"Override ({phase_value}) by {user.username}",
+    )
     db.commit()
     db.refresh(task)
 
@@ -616,6 +691,7 @@ def override_task(
 def rerun_task_check(
     task_id: int,
     db: Session = Depends(get_db),
+    user: User = Depends(current_user),
 ):
     """Re-run the pre- or post-check at an override gate.
 
@@ -645,6 +721,10 @@ def rerun_task_check(
     # any token starting with this string triggers a rerun; everything
     # else falls through to PROCEED.
     task.confirmation_token = f"RERUN_{secrets.token_hex(8)}"
+    _audit_log(
+        task,
+        f"Re-run check ({task.phase.value}) by {user.username}",
+    )
     db.commit()
     db.refresh(task)
 
@@ -657,7 +737,11 @@ def rerun_task_check(
 
 
 @router.post("/upgrade/tasks/{task_id}/retry", response_model=TaskDetail)
-def retry_task(task_id: int, db: Session = Depends(get_db)):
+def retry_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
     """Re-enter the orchestrator for a failed or stuck task.
 
     Per MIGRATION_NOTES §3.3, retry == resume-from-last-completed-marker.
@@ -683,8 +767,13 @@ def retry_task(task_id: int, db: Session = Depends(get_db)):
                 "/confirm or /override, not /retry"
             ),
         )
+    failed_from = task.phase.value
     task.phase = TaskPhase.PENDING
     task.error = None
+    _audit_log(
+        task,
+        f"Retry from {failed_from} by {user.username}",
+    )
     # progress.completed_phases is preserved deliberately — that's what
     # makes retry resume from where it left off instead of starting over.
     db.commit()

@@ -92,9 +92,18 @@ export default function JobDetail() {
 function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
   const qc = useQueryClient();
 
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["upgrade-job", job.id] });
-    qc.invalidateQueries({ queryKey: ["upgrade-jobs"] });
+  // `await` the invalidate so React Query's `isPending` stays true
+  // through the refetch — without this, the button flips back to its
+  // idle label the instant the POST resolves, even though the worker
+  // hasn't yet picked up the state change. Operator perception: the
+  // button "did nothing." With await, the disabled+spinner state
+  // persists until the next /jobs/{id} payload lands, which is when
+  // the new task phase actually becomes visible in the UI.
+  const invalidate = async () => {
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ["upgrade-job", job.id] }),
+      qc.invalidateQueries({ queryKey: ["upgrade-jobs"] }),
+    ]);
   };
 
   const startM = useMutation({
@@ -107,8 +116,8 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
   });
   const deleteM = useMutation({
     mutationFn: () => api.deleteUpgradeJob(job.id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["upgrade-jobs"] });
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["upgrade-jobs"] });
       // Navigate away — handled by caller via key change; if this
       // detail page renders for a now-missing job the next refetch
       // 404s and the operator can click "All jobs."
@@ -124,7 +133,7 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
           onClick={() => startM.mutate()}
           disabled={startM.isPending}
         >
-          {startM.isPending ? "Starting…" : "Start"}
+          <BusyLabel busy={startM.isPending} busyLabel="Starting…" idleLabel="Start" />
         </Button>
       )}
       {job.state === "running" && (
@@ -133,7 +142,7 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
           onClick={() => abortM.mutate()}
           disabled={abortM.isPending}
         >
-          {abortM.isPending ? "Aborting…" : "Abort"}
+          <BusyLabel busy={abortM.isPending} busyLabel="Aborting…" idleLabel="Abort" />
         </Button>
       )}
       {["pending", "completed", "failed", "aborted"].includes(job.state) && (
@@ -144,10 +153,66 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
           }}
           disabled={deleteM.isPending}
         >
-          Delete
+          <BusyLabel busy={deleteM.isPending} busyLabel="Deleting…" idleLabel="Delete" />
         </Button>
       )}
     </div>
+  );
+}
+
+/**
+ * Tiny SVG spinner — used inside Buttons during their in-flight state.
+ *
+ * Tailwind's `animate-spin` does the rotation; the SVG provides the
+ * arc-of-a-circle shape that reads as "loading." Inline because we
+ * only need it here and keeping it inline avoids icon-library churn.
+ */
+function Spinner({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      className={`animate-spin h-3 w-3 ${className}`}
+      xmlns="http://www.w3.org/2000/svg"
+      fill="none"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <circle
+        className="opacity-25"
+        cx="12"
+        cy="12"
+        r="10"
+        stroke="currentColor"
+        strokeWidth="4"
+      />
+      <path
+        className="opacity-75"
+        fill="currentColor"
+        d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Spinner + label, with a small gap, so an in-flight Button reads
+ * unambiguously as "working on it" rather than "did you actually
+ * click that?"
+ */
+function BusyLabel({
+  busy,
+  busyLabel,
+  idleLabel,
+}: {
+  busy: boolean;
+  busyLabel: string;
+  idleLabel: string;
+}) {
+  if (!busy) return <>{idleLabel}</>;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <Spinner />
+      {busyLabel}
+    </span>
   );
 }
 
@@ -314,17 +379,20 @@ function TaskRow({
 }
 
 function TaskExpandedDetail({ task: t }: { task: UpgradeTask }) {
-  // Three blocks: at-a-glance summary, recent activity log, precheck
-  // results (when present). Order picked to put the most-actionable
-  // info first — what the orchestrator is doing right now and what
-  // it just found.
+  // Four blocks: at-a-glance summary, override-history banner (if
+  // any), completed-phase chips, precheck results, recent activity
+  // log. Order picked to put the most-actionable info first — what
+  // the orchestrator is doing right now and what it just found.
   const log = readLog(t.progress);
   const completedPhases = readCompletedPhases(t.progress);
   const failingChecks = readFailingChecks(t.progress);
+  const overrides = readOverrides(t.progress);
 
   return (
     <div className="grid gap-3 text-xs">
       <CurrentPhaseExplainer phase={t.phase} failingChecks={failingChecks} />
+
+      {overrides.length > 0 && <OverrideHistory overrides={overrides} />}
 
       {completedPhases.length > 0 && (
         <div>
@@ -358,6 +426,41 @@ function TaskExpandedDetail({ task: t }: { task: UpgradeTask }) {
       )}
     </div>
   );
+}
+
+interface OverrideEntry {
+  phase: string;
+  by: string;
+  at: string;
+}
+
+function OverrideHistory({ overrides }: { overrides: OverrideEntry[] }) {
+  // Sits above the precheck table because the question this answers
+  // ("why is the device past the gate when the precheck still shows
+  // FAIL?") is settled by knowing somebody overrode it, and by whom.
+  return (
+    <div className="px-2 py-1.5 rounded bg-amber-950/30 border border-amber-900/30 text-amber-200">
+      <div className="text-[10px] uppercase tracking-wider text-amber-400/80 mb-0.5">
+        Operator override{overrides.length > 1 ? "s" : ""}
+      </div>
+      <ul className="space-y-0.5 text-[11px]">
+        {overrides.map((o, i) => (
+          <li key={i}>
+            <span className="font-mono text-amber-300">
+              {prettyPhase(o.phase)}
+            </span>{" "}
+            overridden by{" "}
+            <span className="font-semibold text-amber-100">{o.by}</span>{" "}
+            <span className="text-amber-400/70">at {fmtTime(o.at)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function prettyPhase(phase: string): string {
+  return phase.replace(/_/g, " ");
 }
 
 function CurrentPhaseExplainer({
@@ -577,6 +680,26 @@ function readFailingChecks(
   return raw.filter((x): x is string => typeof x === "string");
 }
 
+function readOverrides(
+  progress: Record<string, unknown> | null,
+): OverrideEntry[] {
+  // Filter shape defensively — the field is operator-edited downstream
+  // (well, written by our own override route, but JSON blobs in
+  // progress.* drift over time), so don't trust shape blindly.
+  if (!progress) return [];
+  const raw = progress.overrides;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x): x is OverrideEntry => {
+    if (typeof x !== "object" || x === null) return false;
+    const o = x as Partial<OverrideEntry>;
+    return (
+      typeof o.phase === "string" &&
+      typeof o.by === "string" &&
+      typeof o.at === "string"
+    );
+  });
+}
+
 function fmtTime(iso: string): string {
   return new Date(iso).toLocaleString();
 }
@@ -593,8 +716,13 @@ const PARKED_OVERRIDE: TaskPhase[] = [
 
 function TaskActionButtons({ task }: { task: UpgradeTask }) {
   const qc = useQueryClient();
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["upgrade-job", task.job_id] });
+  // `await` so `isPending` remains true through the refetch — gives
+  // the operator a visible "still working" window between clicking
+  // and the new task phase appearing in the polled payload. Without
+  // this, the spinner flicks off the instant the POST returns, even
+  // though the orchestrator-side state hasn't visibly advanced yet.
+  const invalidate = async () => {
+    await qc.invalidateQueries({ queryKey: ["upgrade-job", task.job_id] });
   };
 
   const confirmM = useMutation({
@@ -621,7 +749,11 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
         onClick={() => confirmM.mutate()}
         disabled={confirmM.isPending}
       >
-        {confirmM.isPending ? "Confirming…" : "Confirm"}
+        <BusyLabel
+          busy={confirmM.isPending}
+          busyLabel="Confirming…"
+          idleLabel="Confirm"
+        />
       </Button>
     );
   }
@@ -637,14 +769,22 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
           disabled={busy}
           title="Re-execute the check on the device. Use after fixing the underlying issue externally (e.g. pushing config from Panorama)."
         >
-          {rerunM.isPending ? "Re-running…" : "Re-run check"}
+          <BusyLabel
+            busy={rerunM.isPending}
+            busyLabel="Re-running…"
+            idleLabel="Re-run check"
+          />
         </Button>
         <Button
           variant="danger"
           onClick={() => overrideM.mutate()}
           disabled={busy}
         >
-          {overrideM.isPending ? "Overriding…" : "Override + proceed"}
+          <BusyLabel
+            busy={overrideM.isPending}
+            busyLabel="Overriding…"
+            idleLabel="Override + proceed"
+          />
         </Button>
       </div>
     );
@@ -652,7 +792,11 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
   if (task.phase === "failed") {
     return (
       <Button onClick={() => retryM.mutate()} disabled={retryM.isPending}>
-        {retryM.isPending ? "Retrying…" : "Retry"}
+        <BusyLabel
+          busy={retryM.isPending}
+          busyLabel="Retrying…"
+          idleLabel="Retry"
+        />
       </Button>
     );
   }

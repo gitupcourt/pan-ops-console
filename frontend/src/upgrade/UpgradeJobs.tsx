@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
-import { NavLink } from "react-router-dom";
+import { Fragment, useMemo, useState } from "react";
+import { NavLink, useSearchParams } from "react-router-dom";
 
 import { api, JobState, UpgradeJob } from "../api";
 import { Button, Card, CardHeader, Empty } from "../core/ui/ui";
@@ -21,6 +21,7 @@ import { JobForm } from "./JobForm";
  */
 export default function UpgradeJobs() {
   const qc = useQueryClient();
+  const [params, setParams] = useSearchParams();
   const jobsQ = useQuery({
     queryKey: ["upgrade-jobs"],
     queryFn: api.listUpgradeJobs,
@@ -30,7 +31,23 @@ export default function UpgradeJobs() {
     refetchInterval: 5000,
   });
 
-  const [creating, setCreating] = useState(false);
+  // Hand-off contract from /inventory (phase 13c):
+  //   /upgrade?new=true&devices=1,2,3
+  // → auto-open the new-job form with those device IDs pre-checked.
+  // We init `creating` from the URL once on mount; subsequent operator
+  // toggles use plain state, and closing the form strips the params
+  // so navigating away + back doesn't re-pop the form.
+  const initialDeviceIds = useMemo(() => {
+    const raw = params.get("devices");
+    if (!raw) return [];
+    return raw
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  }, [params]);
+  const [creating, setCreating] = useState(
+    params.get("new") === "true" || initialDeviceIds.length > 0,
+  );
 
   return (
     <div className="space-y-6">
@@ -46,7 +63,18 @@ export default function UpgradeJobs() {
               >
                 Manage precheck sets
               </NavLink>
-              <Button variant="primary" onClick={() => setCreating((v) => !v)}>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  // Cancel — also clear the URL params so back/forward
+                  // doesn't re-pop the form with the inventory-handed
+                  // selection.
+                  if (creating) {
+                    setParams(new URLSearchParams());
+                  }
+                  setCreating((v) => !v);
+                }}
+              >
                 {creating ? "Cancel" : "New job"}
               </Button>
             </div>
@@ -55,8 +83,10 @@ export default function UpgradeJobs() {
 
         {creating && (
           <JobForm
+            initialDeviceIds={initialDeviceIds}
             onDone={() => {
               setCreating(false);
+              setParams(new URLSearchParams());
               qc.invalidateQueries({ queryKey: ["upgrade-jobs"] });
             }}
           />

@@ -511,7 +511,7 @@ function DevicesSection() {
             </tr>
           </thead>
           <tbody>
-            {orderedDevs.map((d, idx) => {
+            {orderedDevs.map((d) => {
               // HA-pair visual stitching: a thin left border on both
               // rows of a pair when grouping is on, so the eye reads
               // them as one unit. Different color from polling/state

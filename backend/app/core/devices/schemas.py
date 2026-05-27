@@ -71,6 +71,12 @@ class DeviceRead(BaseModel):
     last_refresh_at: datetime | None
     ha_role: HARole
     ha_state: str | None
+    # FK to this device's HA peer (or None for standalone devices).
+    # Surfaced to the UI so the inventory page can stitch HA pairs
+    # together (selecting one auto-selects both) and the upgrade
+    # device picker can avoid showing operators half-pairs that
+    # would naturally upgrade together.
+    ha_peer_id: int | None
 
     # Panorama-managed grouping. Both fields are populated during
     # Panorama sync; direct-added devices have them as NULL. Surfaced

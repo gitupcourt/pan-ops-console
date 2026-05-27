@@ -351,6 +351,12 @@ function DevicesSection() {
   // Edit / Delete) — those don't need a selection. Set semantics so
   // toggling a single checkbox doesn't rebuild a stale array.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Group HA devices: when on, selecting one half of an HA pair
+  // auto-selects the other half (and vice versa for deselect). Most
+  // operator flows that select one half of an HA pair (upgrade,
+  // pre-stage) want both halves, so default ON. Operators with a
+  // genuine reason to act on one half can flip it off.
+  const [groupHA, setGroupHA] = useState(true);
 
   const test = useMutation({
     mutationFn: async (id: number) => ({ id, result: await api.testDevice(id) }),
@@ -387,15 +393,60 @@ function DevicesSection() {
 
   const devs: Device[] = devsQ.data ?? [];
 
+  // Order devices so HA peers land adjacent in the table when grouping
+  // is on. Pair key = min(id, peer_id) so both halves sort together;
+  // within a pair, lower id first (active is usually lower-id by
+  // convention but we don't depend on that — just deterministic).
+  // When grouping is off, fall back to id-asc to match the unsorted
+  // /devices response order.
+  const orderedDevs = groupHA
+    ? [...devs].sort((a, b) => {
+        const aKey = a.ha_peer_id == null ? a.id : Math.min(a.id, a.ha_peer_id);
+        const bKey = b.ha_peer_id == null ? b.id : Math.min(b.id, b.ha_peer_id);
+        if (aKey !== bKey) return aKey - bKey;
+        return a.id - b.id;
+      })
+    : devs;
+
+  // Selection toggle that auto-includes the HA peer when grouping is
+  // on. Used by both the per-row checkbox and the "select all" header
+  // checkbox.
+  const toggleSelected = (id: number, checked: boolean) => {
+    const next = new Set(selectedIds);
+    const dev = devs.find((d) => d.id === id);
+    const peerId = groupHA ? dev?.ha_peer_id ?? null : null;
+    if (checked) {
+      next.add(id);
+      if (peerId != null) next.add(peerId);
+    } else {
+      next.delete(id);
+      if (peerId != null) next.delete(peerId);
+    }
+    setSelectedIds(next);
+  };
+
   return (
     <Card>
       <CardHeader
         title="Devices"
         description="Firewalls polled by the capacity analyzer. Switch between direct API access and Panorama-proxied at any time."
         action={
-          <Button variant="primary" onClick={() => setAdding((v) => !v)}>
-            {adding ? "Cancel" : "Add device"}
-          </Button>
+          <div className="flex items-center gap-4 text-xs">
+            <label
+              className="flex items-center gap-1.5 text-zinc-400 hover:text-zinc-200 cursor-pointer select-none"
+              title="When on, selecting one half of an HA pair auto-selects the other half. Multi-select actions (e.g. Upgrade selected) apply to both."
+            >
+              <input
+                type="checkbox"
+                checked={groupHA}
+                onChange={(e) => setGroupHA(e.target.checked)}
+              />
+              <span>Group HA devices</span>
+            </label>
+            <Button variant="primary" onClick={() => setAdding((v) => !v)}>
+              {adding ? "Cancel" : "Add device"}
+            </Button>
+          </div>
         }
       />
       {adding && <DeviceForm panos={panosQ.data ?? []} onDone={() => setAdding(false)} />}
@@ -433,13 +484,16 @@ function DevicesSection() {
                 <input
                   type="checkbox"
                   // "All" = every device on the page is selected. Click
-                  // toggles to all-or-none.
+                  // toggles to all-or-none. HA grouping is irrelevant
+                  // here — selecting all naturally includes both peers
+                  // of every pair.
                   checked={
-                    devs.length > 0 && devs.every((d) => selectedIds.has(d.id))
+                    orderedDevs.length > 0 &&
+                    orderedDevs.every((d) => selectedIds.has(d.id))
                   }
                   onChange={(e) => {
                     if (e.target.checked) {
-                      setSelectedIds(new Set(devs.map((d) => d.id)));
+                      setSelectedIds(new Set(orderedDevs.map((d) => d.id)));
                     } else {
                       setSelectedIds(new Set());
                     }
@@ -457,25 +511,37 @@ function DevicesSection() {
             </tr>
           </thead>
           <tbody>
-            {devs.map((d) => (
+            {orderedDevs.map((d) => {
+              // HA-pair visual stitching: a thin left border on both
+              // rows of a pair when grouping is on, so the eye reads
+              // them as one unit. Different color from polling/state
+              // accents so it doesn't fight existing badges.
+              const inHAPair = groupHA && d.ha_peer_id != null;
+              const rowClass = inHAPair
+                ? "border-b border-zinc-800/50 align-top border-l-2 border-l-blue-700/50"
+                : "border-b border-zinc-800/50 align-top";
+              return (
               <Fragment key={d.id}>
-                <tr className="border-b border-zinc-800/50 align-top">
+                <tr className={rowClass}>
                   <td className="px-4 py-2 w-8">
                     <input
                       type="checkbox"
                       checked={selectedIds.has(d.id)}
-                      onChange={(e) => {
-                        const next = new Set(selectedIds);
-                        if (e.target.checked) next.add(d.id);
-                        else next.delete(d.id);
-                        setSelectedIds(next);
-                      }}
+                      onChange={(e) => toggleSelected(d.id, e.target.checked)}
                       aria-label={`Select ${d.name}`}
                     />
                   </td>
                   <td className="px-4 py-2 text-zinc-100">
                     <div className="flex items-center gap-2">
                       <span>{d.name}</span>
+                      {inHAPair && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-900/50 uppercase tracking-wider"
+                          title="HA peer — selected together with its pair while Group HA devices is on"
+                        >
+                          HA · {d.ha_role}
+                        </span>
+                      )}
                       <DeviceConnectionStatus device={d} />
                     </div>
                   </td>
@@ -556,7 +622,8 @@ function DevicesSection() {
                   </tr>
                 )}
               </Fragment>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}

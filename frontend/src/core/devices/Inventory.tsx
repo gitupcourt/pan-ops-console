@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import {
   api,
@@ -339,11 +340,17 @@ function PanoramaForm({ initial, onDone }: { initial?: Panorama; onDone: () => v
 
 function DevicesSection() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const devsQ = useQuery({ queryKey: ["devices"], queryFn: api.listDevices });
   const panosQ = useQuery({ queryKey: ["panoramas"], queryFn: api.listPanoramas });
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<{ id: number; ok: boolean; text: string } | null>(null);
+  // Multi-select state for the "Upgrade selected" bulk-action toolbar.
+  // Independent of the existing per-row actions (Test / Capacity /
+  // Edit / Delete) — those don't need a selection. Set semantics so
+  // toggling a single checkbox doesn't rebuild a stale array.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   const test = useMutation({
     mutationFn: async (id: number) => ({ id, result: await api.testDevice(id) }),
@@ -392,12 +399,54 @@ function DevicesSection() {
         }
       />
       {adding && <DeviceForm panos={panosQ.data ?? []} onDone={() => setAdding(false)} />}
+      {selectedIds.size > 0 && (
+        <div className="px-4 py-2 border-b border-zinc-800 bg-blue-950/30 flex items-center gap-3 text-xs">
+          <span className="text-zinc-200">
+            {selectedIds.size} device{selectedIds.size === 1 ? "" : "s"} selected
+          </span>
+          <Button
+            variant="primary"
+            onClick={() => {
+              // Hand off to the upgrade flow via URL params — JobForm
+              // reads `devices` and pre-populates its picker.
+              const ids = Array.from(selectedIds).join(",");
+              navigate(`/upgrade?new=true&devices=${ids}`);
+            }}
+          >
+            Upgrade selected
+          </Button>
+          <button
+            onClick={() => setSelectedIds(new Set())}
+            className="text-zinc-500 hover:text-zinc-300"
+          >
+            clear selection
+          </button>
+        </div>
+      )}
       {devs.length === 0 ? (
         <Empty>No devices yet. Add one directly, or sync a Panorama to import its managed devices.</Empty>
       ) : (
         <table className="w-full text-sm">
           <thead className="text-xs uppercase text-zinc-500 border-b border-zinc-800">
             <tr>
+              <th className="px-4 py-2 w-8">
+                <input
+                  type="checkbox"
+                  // "All" = every device on the page is selected. Click
+                  // toggles to all-or-none.
+                  checked={
+                    devs.length > 0 && devs.every((d) => selectedIds.has(d.id))
+                  }
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setSelectedIds(new Set(devs.map((d) => d.id)));
+                    } else {
+                      setSelectedIds(new Set());
+                    }
+                  }}
+                  title="Select all"
+                />
+              </th>
               <th className="text-left px-4 py-2 font-medium">Name</th>
               <th className="text-left px-4 py-2 font-medium">Host</th>
               <th className="text-left px-4 py-2 font-medium">Model</th>
@@ -411,6 +460,19 @@ function DevicesSection() {
             {devs.map((d) => (
               <Fragment key={d.id}>
                 <tr className="border-b border-zinc-800/50 align-top">
+                  <td className="px-4 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(d.id)}
+                      onChange={(e) => {
+                        const next = new Set(selectedIds);
+                        if (e.target.checked) next.add(d.id);
+                        else next.delete(d.id);
+                        setSelectedIds(next);
+                      }}
+                      aria-label={`Select ${d.name}`}
+                    />
+                  </td>
                   <td className="px-4 py-2 text-zinc-100">
                     <div className="flex items-center gap-2">
                       <span>{d.name}</span>
@@ -448,6 +510,12 @@ function DevicesSection() {
                     <Button onClick={() => test.mutate(d.id)} disabled={test.isPending}>
                       Test
                     </Button>
+                    <Button
+                      onClick={() => navigate(`/upgrade?new=true&devices=${d.id}`)}
+                      title="Open a new upgrade job pre-filled with just this device"
+                    >
+                      Upgrade
+                    </Button>
                     <Button onClick={() => setCapacityFor(capacityFor === d.id ? null : d.id)}>
                       {capacityFor === d.id ? "Close" : "Capacity"}
                     </Button>
@@ -461,14 +529,14 @@ function DevicesSection() {
                 </tr>
                 {capacityFor === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={7} className="p-0">
+                    <td colSpan={8} className="p-0">
                       <CapacityPanel deviceId={d.id} onClose={() => setCapacityFor(null)} />
                     </td>
                   </tr>
                 )}
                 {testResult?.id === d.id && (
                   <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
-                    <td colSpan={7} className="px-4 py-2">
+                    <td colSpan={8} className="px-4 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <pre className={`text-xs whitespace-pre-wrap ${testResult.ok ? "text-emerald-300" : "text-rose-300"}`}>
                           {testResult.text}
@@ -482,7 +550,7 @@ function DevicesSection() {
                 )}
                 {editing === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={7} className="p-0">
+                    <td colSpan={8} className="p-0">
                       <DeviceForm panos={panosQ.data ?? []} initial={d} onDone={() => setEditing(null)} />
                     </td>
                   </tr>

@@ -19,7 +19,15 @@ import { Button, Field, Input, Select } from "../core/ui/ui";
  * checkbox is the escape hatch for "I haven't pre-registered, just
  * pull it."
  */
-export function JobForm({ onDone }: { onDone: () => void }) {
+export function JobForm({
+  onDone,
+  initialDeviceIds = [],
+}: {
+  onDone: () => void;
+  /** Pre-checked device IDs when the form is opened — e.g. from
+   *  /inventory's "Upgrade selected" handoff via URL params. */
+  initialDeviceIds?: number[];
+}) {
   const qc = useQueryClient();
 
   // Fetch the inputs needed to populate the form.
@@ -39,8 +47,12 @@ export function JobForm({ onDone }: { onDone: () => void }) {
   // Form state.
   const [name, setName] = useState("");
   const [targetVersion, setTargetVersion] = useState("");
+  // Seed the device selection from the inventory handoff (if any).
+  // We intentionally init from the prop ONCE; subsequent prop changes
+  // don't reset the selection (rare in practice — the form mounts
+  // fresh each time the operator opens it).
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<Set<number>>(
-    new Set(),
+    () => new Set(initialDeviceIds),
   );
   // Image source: either an existing PanosImage id (when imageMode = "select")
   // or device_pull_image=true (when imageMode = "pull"). Mutually exclusive.

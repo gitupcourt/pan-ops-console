@@ -517,6 +517,77 @@ def test_task_override_works_on_precheck_override_phase(client, db):
     assert task.confirmation_token  # non-empty sentinel set
 
 
+def test_task_override_records_audit_entry(client, db):
+    """Override records who clicked it in progress.overrides + log so the
+    JobDetail panel can show 'overridden by USERNAME' even after the
+    task has moved past the gate."""
+    _signup(client)
+    dev = _seed_standalone(db, name="fw1")
+    create = client.post("/upgrade/jobs", json={
+        "name": "j", "target_version": "11.1.4-h7",
+        "device_ids": [dev.id], "device_pull_image": True,
+    })
+    task_id = create.json()["tasks"][0]["id"]
+    task = db.get(DeviceUpgradeTask, task_id)
+    task.phase = TaskPhase.AWAITING_PRECHECK_OVERRIDE
+    db.commit()
+
+    r = client.post(f"/upgrade/tasks/{task_id}/override")
+    assert r.status_code == 200
+    db.refresh(task)
+    progress = task.progress or {}
+    overrides = progress.get("overrides") or []
+    assert len(overrides) == 1
+    o = overrides[0]
+    assert o["by"] == "admin"
+    assert o["phase"] == TaskPhase.AWAITING_PRECHECK_OVERRIDE.value
+    assert "at" in o
+    log = progress.get("log") or []
+    assert any("Override" in line and "admin" in line for line in log)
+
+
+def test_task_rerun_check_sets_rerun_token_and_audits(client, db):
+    """Re-run check sets a RERUN_-prefixed token (so the orchestrator's
+    _wait_for_override routes to its RERUN branch) AND records the
+    operator on the activity log."""
+    _signup(client)
+    dev = _seed_standalone(db, name="fw1")
+    create = client.post("/upgrade/jobs", json={
+        "name": "j", "target_version": "11.1.4-h7",
+        "device_ids": [dev.id], "device_pull_image": True,
+    })
+    task_id = create.json()["tasks"][0]["id"]
+    task = db.get(DeviceUpgradeTask, task_id)
+    task.phase = TaskPhase.AWAITING_PRECHECK_OVERRIDE
+    db.commit()
+
+    r = client.post(f"/upgrade/tasks/{task_id}/rerun-check")
+    assert r.status_code == 200
+    db.refresh(task)
+    assert task.confirmation_token
+    assert task.confirmation_token.startswith("RERUN_")
+    log = (task.progress or {}).get("log") or []
+    assert any(
+        "Re-run check" in line and "admin" in line for line in log
+    )
+
+
+def test_task_rerun_check_refuses_non_override_phase(client, db):
+    """Re-run is only meaningful at the precheck/postcheck override
+    gates; refuse at any other phase rather than silently no-op."""
+    _signup(client)
+    dev = _seed_standalone(db, name="fw1")
+    create = client.post("/upgrade/jobs", json={
+        "name": "j", "target_version": "11.1.4-h7",
+        "device_ids": [dev.id], "device_pull_image": True,
+    })
+    task_id = create.json()["tasks"][0]["id"]
+    # Task is PENDING by default — not an override gate.
+
+    r = client.post(f"/upgrade/tasks/{task_id}/rerun-check")
+    assert r.status_code == 409
+
+
 def test_task_retry_clears_error_and_resets_phase(client, db):
     _signup(client)
     dev = _seed_standalone(db, name="fw1")

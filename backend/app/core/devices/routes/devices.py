@@ -46,6 +46,7 @@ def _to_read(d: Device) -> DeviceRead:
             "last_refresh_at": d.last_refresh_at,
             "ha_role": d.ha_role,
             "ha_state": d.ha_state,
+            "ha_peer_id": d.ha_peer_id,
             "device_group": d.device_group,
             "template_stack": d.template_stack,
         }

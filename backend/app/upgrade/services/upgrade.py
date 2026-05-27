@@ -17,6 +17,7 @@ import paths but is not exercised.
 
 from __future__ import annotations
 
+import enum
 import logging
 import time
 from datetime import datetime, timezone
@@ -316,33 +317,40 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
         _record(db, task, "Pre-check already completed in a prior run; skipping")
         return True
 
-    _set_phase(db, task, TaskPhase.PRECHECK)
-    try:
-        run = precheck_svc.run_precheck_for_device(
-            db,
-            device,
-            checks=_resolve_checks_for_job(db, job),
-            user_id=job.created_by_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _record(db, task, f"Pre-check raised: {exc}", phase=TaskPhase.FAILED)
-        _fail_job(db, job.id, f"Pre-check failed for {device.name}")
-        return False
+    # Outer loop supports the operator's "Re-run check" action — if
+    # they clicked it at the override gate (e.g. after pushing a
+    # fixed candidate config from Panorama), we loop back and execute
+    # the precheck fresh instead of advancing past it.
+    while True:
+        _set_phase(db, task, TaskPhase.PRECHECK)
+        try:
+            run = precheck_svc.run_precheck_for_device(
+                db,
+                device,
+                checks=_resolve_checks_for_job(db, job),
+                user_id=job.created_by_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _record(db, task, f"Pre-check raised: {exc}", phase=TaskPhase.FAILED)
+            _fail_job(db, job.id, f"Pre-check failed for {device.name}")
+            return False
 
-    progress = task.progress or {}
-    progress["precheck_run_id"] = run.id
-    progress["precheck_overall"] = run.overall_severity.value
-    task.progress = progress
-    db.commit()
+        progress = task.progress or {}
+        progress["precheck_run_id"] = run.id
+        progress["precheck_overall"] = run.overall_severity.value
+        task.progress = progress
+        db.commit()
 
-    if run.overall_severity == Severity.FAIL:
-        # Don't kill the job — park at an override gate so the operator can
-        # read what failed, decide if it's acceptable for their environment,
-        # and click Proceed anyway (or Abort the job).
+        if run.overall_severity != Severity.FAIL:
+            break  # pass / warn / skip → advance
+
+        # FAIL — park at override gate so operator can read what
+        # failed, decide if it's acceptable, click Proceed anyway,
+        # click Re-run check, or Abort the job.
         failing = _failing_check_names(run.results)
         msg = (
             f"Pre-check FAILED: {', '.join(failing) if failing else 'see precheck run for details'}."
-            f" Job parked — click Proceed anyway in the UI to override, or Abort job to stop."
+            f" Job parked — click Override + proceed, Re-run check, or Abort job."
         )
         progress["failing_checks"] = failing
         task.progress = progress
@@ -357,8 +365,19 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
                 "Pre-check failures auto-acknowledged (auto_ack_precheck_failures "
                 "was enabled on this job); proceeding without operator confirmation",
             )
-        elif not _wait_for_override(db, task, TaskPhase.AWAITING_PRECHECK_OVERRIDE):
+            break
+        outcome = _wait_for_override(db, task, TaskPhase.AWAITING_PRECHECK_OVERRIDE)
+        if outcome == _OverrideOutcome.ABORT:
             return False
+        if outcome == _OverrideOutcome.PROCEED:
+            break
+        # RERUN — clear the failing_checks list and loop back to the
+        # top to execute precheck again. The new run replaces the old.
+        progress.pop("failing_checks", None)
+        task.progress = progress
+        db.commit()
+        # Loop continues, _set_phase(PRECHECK) on next iteration.
+
     _mark_phase_done(db, task, "precheck")
     return True
 
@@ -696,30 +715,36 @@ def _phase_postcheck(
         _record(db, task, "Post-check already completed in a prior run; skipping")
         return True
 
-    _set_phase(db, task, finishing_phase)
-    try:
-        run = precheck_svc.run_precheck_for_device(
-            db,
-            device,
-            checks=_resolve_checks_for_job(db, job),
-            user_id=job.created_by_id,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _record(db, task, f"Post-check raised: {exc}", phase=TaskPhase.FAILED)
-        _fail_job(db, job.id, f"Post-check failed for {device.name}")
-        return False
+    # Same rerun-loop pattern as _phase_precheck — operator can fix a
+    # post-upgrade issue and re-run the check rather than override or
+    # abort.
+    while True:
+        _set_phase(db, task, finishing_phase)
+        try:
+            run = precheck_svc.run_precheck_for_device(
+                db,
+                device,
+                checks=_resolve_checks_for_job(db, job),
+                user_id=job.created_by_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _record(db, task, f"Post-check raised: {exc}", phase=TaskPhase.FAILED)
+            _fail_job(db, job.id, f"Post-check failed for {device.name}")
+            return False
 
-    progress = task.progress or {}
-    progress["postcheck_run_id"] = run.id
-    progress["postcheck_overall"] = run.overall_severity.value
-    task.progress = progress
-    db.commit()
+        progress = task.progress or {}
+        progress["postcheck_run_id"] = run.id
+        progress["postcheck_overall"] = run.overall_severity.value
+        task.progress = progress
+        db.commit()
 
-    if run.overall_severity == Severity.FAIL:
+        if run.overall_severity != Severity.FAIL:
+            break
+
         failing = _failing_check_names(run.results)
         msg = (
             f"Post-check FAILED: {', '.join(failing) if failing else 'see post-check run for details'}."
-            f" Job parked — click Proceed anyway to override, or Abort job to stop."
+            f" Job parked — click Override + proceed, Re-run check, or Abort job."
         )
         progress["failing_postchecks"] = failing
         task.progress = progress
@@ -731,8 +756,17 @@ def _phase_postcheck(
                 "Post-check failures auto-acknowledged (auto_ack_postcheck_failures "
                 "was enabled on this job); proceeding without operator confirmation",
             )
-        elif not _wait_for_override(db, task, TaskPhase.AWAITING_POSTCHECK_OVERRIDE):
+            break
+        outcome = _wait_for_override(db, task, TaskPhase.AWAITING_POSTCHECK_OVERRIDE)
+        if outcome == _OverrideOutcome.ABORT:
             return False
+        if outcome == _OverrideOutcome.PROCEED:
+            break
+        # RERUN — clear and loop.
+        progress.pop("failing_postchecks", None)
+        task.progress = progress
+        db.commit()
+
     _mark_phase_done(db, task, "postcheck")
     return True
 
@@ -1375,28 +1409,68 @@ def _wait_for_confirm(db: Session, task: DeviceUpgradeTask, parking_phase: TaskP
     return False
 
 
-def _wait_for_override(db: Session, task: DeviceUpgradeTask, parking_phase: TaskPhase) -> bool:
+class _OverrideOutcome(enum.Enum):
+    """Three-state return for `_wait_for_override`. Callers in the
+    phase functions branch on these.
+
+    - PROCEED: operator clicked "Override + proceed" — accept the
+      check failures as-is and advance to the next phase.
+    - RERUN: operator clicked "Re-run check" (e.g. "I fixed the
+      candidate config push; try again"). Phase function should
+      loop back and re-execute the check instead of advancing.
+    - ABORT: operator aborted the job (or another task failed it).
+      Caller propagates failure.
+    """
+
+    PROCEED = "proceed"
+    RERUN = "rerun"
+    ABORT = "abort"
+
+
+# Token-value sentinels written by the route endpoints. `_wait_for_override`
+# inspects the token to disambiguate proceed vs rerun. Any other non-empty
+# token value falls through to PROCEED for backward-compat (the older
+# /override endpoint set a random hex value).
+_RERUN_TOKEN_PREFIX = "RERUN_"
+
+
+def _wait_for_override(
+    db: Session, task: DeviceUpgradeTask, parking_phase: TaskPhase
+) -> _OverrideOutcome:
     """Park at a check-failure override gate. Same polling shape as
-    _wait_for_confirm, but on abort/timeout we propagate to FAILED so the
-    job doesn't silently sit forever and the dashboard reflects reality."""
+    _wait_for_confirm. Three-state return per `_OverrideOutcome` so
+    the calling phase can decide whether to advance, re-run, or fail.
+    """
     _set_phase(db, task, parking_phase)
     deadline = time.monotonic() + CONFIRM_TIMEOUT_S
     while time.monotonic() < deadline:
         time.sleep(CONFIRM_POLL_S)
         db.refresh(task)
         if task.confirmation_token:
+            tok = task.confirmation_token
             task.confirmation_token = None
-            _record(db, task, f"Operator overrode check failure at {parking_phase.value}; proceeding.")
+            if tok.startswith(_RERUN_TOKEN_PREFIX):
+                _record(
+                    db, task,
+                    f"Operator requested re-run at {parking_phase.value}",
+                )
+                db.commit()
+                return _OverrideOutcome.RERUN
+            _record(
+                db, task,
+                f"Operator overrode check failure at {parking_phase.value}; proceeding.",
+            )
             db.commit()
-            return True
+            return _OverrideOutcome.PROCEED
         job = db.get(UpgradeJob, task.job_id)
         if job is None or job.state in (JobState.ABORTED, JobState.FAILED, JobState.COMPLETED):
             # User aborted (or another task failed the job). Mark this task
             # FAILED so the timeline reflects that we stopped here.
             _record(db, task, "Aborted at check-failure override gate", phase=TaskPhase.FAILED)
-            return False
+            return _OverrideOutcome.ABORT
     _record(db, task, f"Override timeout at {parking_phase.value}", phase=TaskPhase.FAILED)
     _fail_job(db, task.job_id, "Override timeout")
+    return _OverrideOutcome.ABORT
     return False
 
 

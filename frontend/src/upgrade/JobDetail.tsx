@@ -376,9 +376,23 @@ function CurrentPhaseExplainer({
     return (
       <div className="px-2 py-1.5 rounded bg-amber-950/40 border border-amber-900/40 text-amber-200">
         <strong>Waiting on you.</strong> The {which} found something the
-        classifier marked as a FAIL severity. Review the results below;
-        click <em>Override + proceed</em> to acknowledge and continue, or
-        Abort the job to stop here.
+        classifier marked as a FAIL severity. Review the results below,
+        then:
+        <ul className="list-disc list-inside mt-1 text-[11px] space-y-0.5">
+          <li>
+            <em>Re-run check</em> — if you fixed the issue externally
+            (e.g. pushed a candidate config from Panorama), re-execute
+            the check on the device to verify.
+          </li>
+          <li>
+            <em>Override + proceed</em> — acknowledge the failure and
+            continue with the upgrade anyway.
+          </li>
+          <li>
+            Abort the job from the job header above if you want to
+            stop here.
+          </li>
+        </ul>
         {failingChecks.length > 0 && (
           <div className="text-[11px] mt-1 text-amber-300">
             Failing: <span className="font-mono">{failingChecks.join(", ")}</span>
@@ -591,6 +605,10 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
     mutationFn: () => api.overrideUpgradeTask(task.id),
     onSuccess: invalidate,
   });
+  const rerunM = useMutation({
+    mutationFn: () => api.rerunUpgradeTaskCheck(task.id),
+    onSuccess: invalidate,
+  });
   const retryM = useMutation({
     mutationFn: () => api.retryUpgradeTask(task.id),
     onSuccess: invalidate,
@@ -608,14 +626,27 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
     );
   }
   if (PARKED_OVERRIDE.includes(task.phase)) {
+    // Three operator choices at a check-failure gate. Re-run goes
+    // first (left) because it's the lowest-risk path — "I fixed it,
+    // verify again." Override is the deliberate-bypass red button.
+    const busy = overrideM.isPending || rerunM.isPending;
     return (
-      <Button
-        variant="danger"
-        onClick={() => overrideM.mutate()}
-        disabled={overrideM.isPending}
-      >
-        {overrideM.isPending ? "Overriding…" : "Override + proceed"}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          onClick={() => rerunM.mutate()}
+          disabled={busy}
+          title="Re-execute the check on the device. Use after fixing the underlying issue externally (e.g. pushing config from Panorama)."
+        >
+          {rerunM.isPending ? "Re-running…" : "Re-run check"}
+        </Button>
+        <Button
+          variant="danger"
+          onClick={() => overrideM.mutate()}
+          disabled={busy}
+        >
+          {overrideM.isPending ? "Overriding…" : "Override + proceed"}
+        </Button>
+      </div>
     );
   }
   if (task.phase === "failed") {

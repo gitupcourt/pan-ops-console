@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from app.core.auth.deps import current_user
 from app.core.auth.models.user import User
@@ -113,6 +113,25 @@ def _job_to_read(job: UpgradeJob, task_count: int) -> JobRead:
 
 
 def _task_to_read(task: DeviceUpgradeTask) -> TaskRead:
+    from app.upgrade.models.precheck import PrecheckRun  # local — avoid cycle
+
+    # Find the latest PrecheckRun for this task's device. We pick by
+    # ran_at desc; with realistic job sizes (~5-20 tasks) this is one
+    # cheap indexed query per task per render. If JobDetail starts
+    # showing more than a few jobs at once we can batch this with a
+    # single grouped query.
+    db = object_session(task)
+    precheck_payload = None
+    if db is not None:
+        latest = (
+            db.query(PrecheckRun)
+            .filter(PrecheckRun.device_id == task.device_id)
+            .order_by(PrecheckRun.ran_at.desc())
+            .first()
+        )
+        if latest is not None:
+            precheck_payload = _precheck_to_summary(latest)
+
     return TaskRead.model_validate(
         {
             "id": task.id,
@@ -126,8 +145,45 @@ def _task_to_read(task: DeviceUpgradeTask) -> TaskRead:
             "tick_count": task.tick_count,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
+            "progress": task.progress,
+            "precheck": precheck_payload,
         }
     )
+
+
+def _precheck_to_summary(run) -> dict:
+    """Normalize a PrecheckRun ORM row into the API summary shape.
+
+    `results` on the row is whatever the orchestrator + classifier
+    persisted. Shape per check is {state, reason, severity} keyed by
+    check name. We unwrap into a list sorted severity-desc then
+    name-asc so the UI lands the operator's eye on FAIL first.
+    """
+    raw = run.results or {}
+    severity_order = {"fail": 0, "warn": 1, "skip": 2, "pass": 3}
+    checks = [
+        {
+            "name": name,
+            "state": bool(payload.get("state")),
+            "reason": str(payload.get("reason") or ""),
+            "severity": str(payload.get("severity") or "pass"),
+        }
+        for name, payload in raw.items()
+    ]
+    checks.sort(key=lambda c: (severity_order.get(c["severity"], 99), c["name"]))
+    return {
+        "id": run.id,
+        "ran_at": run.ran_at,
+        "overall_severity": run.overall_severity.value
+        if hasattr(run.overall_severity, "value")
+        else str(run.overall_severity),
+        "pass_count": run.pass_count,
+        "warn_count": run.warn_count,
+        "fail_count": run.fail_count,
+        "skip_count": run.skip_count,
+        "checks": checks,
+        "error": run.error,
+    }
 
 
 def _job_to_detail(job: UpgradeJob) -> JobDetail:

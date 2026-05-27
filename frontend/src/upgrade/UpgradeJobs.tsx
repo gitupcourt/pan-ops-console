@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useMemo } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 
 import { api, JobState, UpgradeJob } from "../api";
@@ -7,17 +7,23 @@ import { Button, Card, CardHeader, Empty } from "../core/ui/ui";
 import { JobForm } from "./JobForm";
 
 /**
- * The /upgrade landing page — list of jobs + inline create form.
+ * The /upgrade landing page — list of jobs (+ the new-job form when
+ * launched from /inventory).
  *
- * Two-column information density: each row shows the job's name,
- * target version, state badge, task progress, and timestamps. Click a
- * row → /upgrade/jobs/{id} for the detail view with per-task progress
- * and operator actions (confirm / override / retry).
+ * Job creation is initiated from /inventory (phase 13c): operators
+ * pick the devices first (with all the DG/TS filter + multi-select
+ * tooling from the inventory page) and then hand off to /upgrade
+ * with `?new=true&devices=…` to fill in version + image + checks +
+ * confirmation gates. Earlier iterations also had a "New job" button
+ * on this page, but the duplicate entry point was clutter — single
+ * entry point = single mental model ("pick devices, then upgrade
+ * them").
+ *
+ * The detail row → /upgrade/jobs/{id} for per-task progress and
+ * operator actions (confirm / override / retry).
  *
  * State filtering: a future enhancement might add "show only RUNNING"
- * etc. For now we show everything sorted newest first, and let the
- * operator scan visually — fits the operator's typical fleet size
- * (15-30 jobs in flight at most).
+ * etc. For now we show everything sorted newest first.
  */
 export default function UpgradeJobs() {
   const qc = useQueryClient();
@@ -33,10 +39,9 @@ export default function UpgradeJobs() {
 
   // Hand-off contract from /inventory (phase 13c):
   //   /upgrade?new=true&devices=1,2,3
-  // → auto-open the new-job form with those device IDs pre-checked.
-  // We init `creating` from the URL once on mount; subsequent operator
-  // toggles use plain state, and closing the form strips the params
-  // so navigating away + back doesn't re-pop the form.
+  // → render the new-job form with those device IDs pre-checked.
+  // Closing the form strips the URL params so navigating away + back
+  // doesn't re-pop the selection.
   const initialDeviceIds = useMemo(() => {
     const raw = params.get("devices");
     if (!raw) return [];
@@ -45,54 +50,54 @@ export default function UpgradeJobs() {
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isFinite(n) && n > 0);
   }, [params]);
-  const [creating, setCreating] = useState(
-    params.get("new") === "true" || initialDeviceIds.length > 0,
-  );
+  const creating =
+    params.get("new") === "true" || initialDeviceIds.length > 0;
+
+  const closeForm = () => setParams(new URLSearchParams());
 
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader
           title="Upgrade jobs"
-          description="Bulk upgrades across one or more firewalls, with HA pair awareness and confirmation gates at each major step."
+          description={
+            creating
+              ? "Configure the new job below. Cancel to return to the job list."
+              : "Bulk upgrades across one or more firewalls, with HA pair awareness and confirmation gates at each major step. Start a new job from Inventory."
+          }
           action={
-            <div className="flex items-center gap-3">
-              <NavLink
-                to="/upgrade/precheck-sets"
-                className="text-xs text-blue-400 hover:text-blue-300"
-              >
-                Manage precheck sets
-              </NavLink>
-              <Button
-                variant="primary"
-                onClick={() => {
-                  // Cancel — also clear the URL params so back/forward
-                  // doesn't re-pop the form with the inventory-handed
-                  // selection.
-                  if (creating) {
-                    setParams(new URLSearchParams());
-                  }
-                  setCreating((v) => !v);
-                }}
-              >
-                {creating ? "Cancel" : "New job"}
-              </Button>
-            </div>
+            creating ? (
+              <Button onClick={closeForm}>Cancel</Button>
+            ) : (
+              <div className="flex items-center gap-3">
+                <NavLink
+                  to="/inventory"
+                  className="text-xs text-blue-400 hover:text-blue-300"
+                >
+                  Start an upgrade from Inventory →
+                </NavLink>
+                <NavLink
+                  to="/upgrade/precheck-sets"
+                  className="text-xs text-blue-400 hover:text-blue-300"
+                >
+                  Manage precheck sets
+                </NavLink>
+              </div>
+            )
           }
         />
 
-        {creating && (
+        {creating ? (
           <JobForm
             initialDeviceIds={initialDeviceIds}
             onDone={() => {
-              setCreating(false);
-              setParams(new URLSearchParams());
+              closeForm();
               qc.invalidateQueries({ queryKey: ["upgrade-jobs"] });
             }}
           />
+        ) : (
+          <JobList jobs={jobsQ.data ?? []} loading={jobsQ.isLoading} />
         )}
-
-        <JobList jobs={jobsQ.data ?? []} loading={jobsQ.isLoading} />
       </Card>
     </div>
   );
@@ -113,8 +118,15 @@ function JobList({
   if (jobs.length === 0) {
     return (
       <Empty>
-        No upgrade jobs yet. Click <span className="text-zinc-300">New job</span>{" "}
-        above to create one.
+        No upgrade jobs yet. Head to{" "}
+        <NavLink
+          to="/inventory"
+          className="text-blue-400 hover:text-blue-300 underline"
+        >
+          Inventory
+        </NavLink>
+        , pick the devices you want to upgrade, and click{" "}
+        <span className="text-zinc-300">Upgrade selected</span>.
       </Empty>
     );
   }

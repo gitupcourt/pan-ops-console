@@ -378,11 +378,27 @@ class PanDeviceClient:
         return licenses or None
 
     # ---------- pre/post checks via pan-os-upgrade-assurance ----------
+    #
+    # `skip_force_locale=True` on every CheckFirewall ctor is load-
+    # bearing. The library's __init__ unconditionally calls
+    # `locale.setlocale(LC_ALL, "en_US.UTF-8")` — used internally for
+    # `strptime` of datetime strings from the firewall. Our container
+    # has C.UTF-8 (not en_US.UTF-8) installed, so Python raises
+    # `locale.Error: unsupported locale setting` and the readiness
+    # check call dies before evaluating any check. The library added
+    # `skip_force_locale` as the documented opt-out exactly for
+    # containerized deployments like ours. Month/weekday strptime
+    # patterns work fine under C.UTF-8 because C locale uses English.
+    #
+    # Symptom if removed: precheck/postcheck runs persist with
+    # pass=warn=fail=skip=0 and error="Readiness checks failed:
+    # unsupported locale setting" — orchestrator parks the task at
+    # AWAITING_PRECHECK_OVERRIDE indefinitely.
 
     def run_readiness_checks(self, checks: list[str] | None = None) -> dict:
         names = list(checks or DEFAULT_READINESS_CHECKS)
         try:
-            results = CheckFirewall(self._proxy).run_readiness_checks(checks_configuration=names)
+            results = CheckFirewall(self._proxy, skip_force_locale=True).run_readiness_checks(checks_configuration=names)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             # ---- Cloud-managed firewall (Strata Cloud Manager / SCM) ----
@@ -433,7 +449,7 @@ class PanDeviceClient:
             if drop is not None and synth is not None:
                 names = [n for n in names if n != drop]
                 try:
-                    results = CheckFirewall(self._proxy).run_readiness_checks(checks_configuration=names)
+                    results = CheckFirewall(self._proxy, skip_force_locale=True).run_readiness_checks(checks_configuration=names)
                 except Exception as exc2:  # noqa: BLE001
                     raise ConnectionError(_friendly_check_error(exc2)) from exc2
                 results[drop] = synth
@@ -459,7 +475,7 @@ class PanDeviceClient:
         return normalized
 
     def take_snapshot(self, snapshots: list[str] | None = None) -> dict:
-        return CheckFirewall(self._proxy).run_snapshots(
+        return CheckFirewall(self._proxy, skip_force_locale=True).run_snapshots(
             snapshots_config=list(snapshots) if snapshots else None
         )
 

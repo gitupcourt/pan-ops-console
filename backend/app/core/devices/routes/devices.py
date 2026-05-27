@@ -14,6 +14,16 @@ router = APIRouter(prefix="/devices", tags=["devices"])
 
 
 def _to_read(d: Device) -> DeviceRead:
+    # IMPORTANT: every field on DeviceRead must be passed explicitly
+    # here, because we build the response from a dict (so the
+    # `has_api_key` derived field can include `encrypted_api_key is
+    # not None` without exposing the bytes). Missing a field on this
+    # dict produces a 500 with ValidationError at response-render
+    # time — the bug that hid every device on /inventory when
+    # phase-13a added device_group + template_stack to the schema
+    # without updating this builder.
+    #
+    # If you add a field to DeviceRead, ADD IT HERE TOO.
     return DeviceRead.model_validate(
         {
             "id": d.id,
@@ -36,6 +46,8 @@ def _to_read(d: Device) -> DeviceRead:
             "last_refresh_at": d.last_refresh_at,
             "ha_role": d.ha_role,
             "ha_state": d.ha_state,
+            "device_group": d.device_group,
+            "template_stack": d.template_stack,
         }
     )
 

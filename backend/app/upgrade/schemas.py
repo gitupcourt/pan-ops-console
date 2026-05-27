@@ -107,26 +107,13 @@ class TaskDetail(TaskRead):
     progress: dict | None
 
 
-class TaskConfirm(BaseModel):
-    """Body for /upgrade/tasks/{id}/confirm.
-
-    Operator advances a parked task (reboot/failover/primary-upgrade
-    confirmation gates). Token must match the server-issued
-    `confirmation_token` on the task at the time of parking.
-    """
-
-    token: str = Field(..., min_length=1, max_length=64)
-
-
-class TaskOverride(BaseModel):
-    """Body for /upgrade/tasks/{id}/override.
-
-    Operator proceeds past a precheck/postcheck FAIL severity by
-    explicitly acknowledging the failures. Token mechanism matches
-    TaskConfirm.
-    """
-
-    token: str = Field(..., min_length=1, max_length=64)
+# /upgrade/tasks/{id}/confirm and .../override take no body. Route
+# auth (session cookie) is the access-control gate; the orchestrator's
+# poll loop picks up the route's confirmation_token set and advances.
+# Earlier iterations of these endpoints required an operator-supplied
+# token matching a server-issued one, but the orchestrator never
+# actually issued such a token — every override 409'd. Removed in
+# the same PR that fixed the override deadlock.
 
 
 # ---------- Jobs ----------

@@ -68,9 +68,7 @@ from app.upgrade.schemas import (
     JobCreate,
     JobDetail,
     JobRead,
-    TaskConfirm,
     TaskDetail,
-    TaskOverride,
     TaskRead,
 )
 from app.upgrade.tasks import drive_pair_task
@@ -440,16 +438,30 @@ _AWAITING_OVERRIDE = {
 }
 
 
-def _consume_task_token(
-    task: DeviceUpgradeTask, supplied_token: str, *, valid_phases: set
+def _signal_task_advance(
+    task: DeviceUpgradeTask, *, valid_phases: set
 ) -> None:
-    """Verify the operator's token + current task phase.
+    """Tell the orchestrator's poll loop the operator wants to advance.
+
+    The orchestrator's `_wait_for_confirm` / `_wait_for_override` loops
+    poll `task.confirmation_token` waiting for it to BECOME truthy.
+    When set, they clear it and return True to proceed. So the
+    operator-facing endpoints just need to SET the token to any
+    truthy sentinel; the orchestrator's next tick picks it up.
+
+    Earlier code in this module tried to validate a server-issued
+    token here (i.e. "expect token == previously-stored value"), but
+    the orchestrator never issued one — _wait_for_override sets the
+    phase and immediately polls. That mismatch meant every override
+    POST 409'd with "no pending confirmation token," AND the
+    frontend's button was disabled on the same empty field. Two-way
+    deadlock. Fixed by making the route issue the signal rather than
+    validate it; route-level auth via `current_user` is the real
+    access-control gate (token-validation here was defense-in-depth
+    that never actually worked given the empty-token state).
 
     Raises 409 if the task isn't parked at a phase that accepts this
-    operation. Raises 403 if the token doesn't match.
-
-    On success, clears the token (single-use) — the orchestrator's next
-    tick reads phase + cleared token to decide it's been told to advance.
+    operation.
     """
     if task.phase not in valid_phases:
         raise HTTPException(
@@ -460,14 +472,12 @@ def _consume_task_token(
                 f"{sorted(p.value for p in valid_phases)}"
             ),
         )
-    if not task.confirmation_token:
-        raise HTTPException(
-            status_code=409,
-            detail="task has no pending confirmation token",
-        )
-    if not secrets.compare_digest(task.confirmation_token, supplied_token):
-        raise HTTPException(status_code=403, detail="invalid token")
-    task.confirmation_token = None
+    # Any non-empty value satisfies the orchestrator's `if
+    # task.confirmation_token:` check. Random + short so logs/audits
+    # carry an identifier per advance, useful when correlating with
+    # the orchestrator's "Operator overrode check failure at …" log
+    # line.
+    task.confirmation_token = secrets.token_hex(8)
 
 
 @router.get("/upgrade/tasks/{task_id}", response_model=TaskDetail)
@@ -486,7 +496,6 @@ def get_task(task_id: int, db: Session = Depends(get_db)):
 )
 def confirm_task(
     task_id: int,
-    payload: TaskConfirm,
     db: Session = Depends(get_db),
 ):
     """Advance a parked task past a reboot / failover / primary-upgrade
@@ -494,20 +503,20 @@ def confirm_task(
 
     The orchestrator parks at AWAITING_*_CONFIRM phases when the job
     has the corresponding `require_*` flag set. Operator clicks
-    "Confirm" in the UI, which posts the token the orchestrator placed
-    on the task row at parking time. Token is single-use; cleared
-    here. The orchestrator's next tick advances to the actual reboot /
-    failover / install phase.
+    "Confirm" in the UI; we set `task.confirmation_token` to a
+    sentinel so the orchestrator's polling `_wait_for_confirm` loop
+    sees it on the next tick, clears it, and proceeds. Route-level
+    auth gates access; no body required.
     """
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    _consume_task_token(task, payload.token, valid_phases=_AWAITING_CONFIRM)
+    _signal_task_advance(task, valid_phases=_AWAITING_CONFIRM)
     db.commit()
     db.refresh(task)
 
     # Wake the orchestrator for THIS task's pair. The previous drive_pair
-    # call returned when it parked; the new one will see the cleared
+    # call returned when it parked; the new one will see the set
     # confirmation_token + the current phase and advance.
     drive_pair_task.delay(task.job_id, task.ha_pair_key)
 
@@ -522,19 +531,18 @@ def confirm_task(
 )
 def override_task(
     task_id: int,
-    payload: TaskOverride,
     db: Session = Depends(get_db),
 ):
     """Acknowledge a precheck or postcheck FAIL and proceed.
 
-    Same single-use token pattern as confirm_task; different valid
-    phases. The task's `progress` JSON keeps the failing-check details
-    so the audit trail is intact even after the operator overrides.
+    Same signal-pattern as confirm_task; different valid phases. The
+    task's `progress` JSON keeps the failing-check details so the
+    audit trail is intact even after the operator overrides.
     """
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    _consume_task_token(task, payload.token, valid_phases=_AWAITING_OVERRIDE)
+    _signal_task_advance(task, valid_phases=_AWAITING_OVERRIDE)
     db.commit()
     db.refresh(task)
 

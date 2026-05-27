@@ -281,12 +281,11 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
   };
 
   const confirmM = useMutation({
-    mutationFn: () => api.confirmUpgradeTask(task.id, task.confirmation_token!),
+    mutationFn: () => api.confirmUpgradeTask(task.id),
     onSuccess: invalidate,
   });
   const overrideM = useMutation({
-    mutationFn: () =>
-      api.overrideUpgradeTask(task.id, task.confirmation_token!),
+    mutationFn: () => api.overrideUpgradeTask(task.id),
     onSuccess: invalidate,
   });
   const retryM = useMutation({
@@ -299,7 +298,7 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
       <Button
         variant="primary"
         onClick={() => confirmM.mutate()}
-        disabled={!task.confirmation_token || confirmM.isPending}
+        disabled={confirmM.isPending}
       >
         {confirmM.isPending ? "Confirming…" : "Confirm"}
       </Button>
@@ -310,7 +309,7 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
       <Button
         variant="danger"
         onClick={() => overrideM.mutate()}
-        disabled={!task.confirmation_token || overrideM.isPending}
+        disabled={overrideM.isPending}
       >
         {overrideM.isPending ? "Overriding…" : "Override + proceed"}
       </Button>

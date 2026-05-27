@@ -94,6 +94,17 @@ class UpgradeJob(Base):
         Boolean, default=False, nullable=False
     )
 
+    # Which readiness-check preset to run for pre- and post-checks on
+    # this job's devices. NULL = use whichever PrecheckSet has
+    # `is_default=true` (or DEFAULT_READINESS_CHECKS if no set is
+    # flagged default). ON DELETE SET NULL — if the operator deletes
+    # a referenced set, the job falls back to the default rather
+    # than failing.
+    precheck_set_id: Mapped[int | None] = mapped_column(
+        ForeignKey("precheck_sets.id", ondelete="SET NULL"), nullable=True
+    )
+    precheck_set = relationship("PrecheckSet", lazy="joined")
+
     state: Mapped[JobState] = mapped_column(
         py_enum_column(JobState, name="job_state"), default=JobState.PENDING, nullable=False
     )

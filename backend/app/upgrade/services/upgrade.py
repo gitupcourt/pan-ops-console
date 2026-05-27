@@ -21,6 +21,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
 
 from app.core.command_proxy.pan_client import PanDeviceClient
@@ -30,6 +31,7 @@ from app.db import SessionLocal
 from app.upgrade.models.enums import JobState, Severity, TaskPhase
 from app.upgrade.models.job import DeviceUpgradeTask, UpgradeJob
 from app.upgrade.models.precheck import PrecheckRun
+from app.upgrade.models.precheck_set import PrecheckSet
 from app.upgrade.models.snapshot import Snapshot, SnapshotKind
 from app.upgrade.services import precheck as precheck_svc
 from app.upgrade.services import snapshot as snapshot_svc
@@ -77,6 +79,36 @@ HA_OP_RETRY_SLEEP_S = 30
 # the API" doesn't eat the full 10-min wait_for_passive timeout.
 RESUME_VERIFY_REISSUES = 3
 RESUME_VERIFY_WAIT_S = 30
+
+
+def _resolve_checks_for_job(db: Session, job: UpgradeJob) -> list[str] | None:
+    """Return the readiness-check name list to run for this job.
+
+    Resolution order:
+      1. job.precheck_set_id explicitly set → use that set's checks.
+      2. Else: the PrecheckSet flagged `is_default=True` (seeded as
+         "Standard" by migration 0007).
+      3. Else: return None — the precheck service then falls back to
+         the hard-coded DEFAULT_READINESS_CHECKS.
+
+    Returning None instead of inlining DEFAULT_READINESS_CHECKS here
+    keeps the per-call-site code identical to the pre-Phase-13b
+    behaviour (run_precheck_for_device's own default kicks in) and
+    avoids importing the constant into this module.
+    """
+    if job.precheck_set is not None:
+        return list(job.precheck_set.checks)
+    # Fall back to whichever set the operator flagged default.
+    default_set = (
+        db.execute(
+            sa_select(PrecheckSet).where(PrecheckSet.is_default.is_(True))
+        )
+        .scalars()
+        .first()
+    )
+    if default_set is not None:
+        return list(default_set.checks)
+    return None  # let the precheck service apply its own default
 
 
 # ---------- public entry points ----------
@@ -287,7 +319,10 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
     _set_phase(db, task, TaskPhase.PRECHECK)
     try:
         run = precheck_svc.run_precheck_for_device(
-            db, device, user_id=job.created_by_id
+            db,
+            device,
+            checks=_resolve_checks_for_job(db, job),
+            user_id=job.created_by_id,
         )
     except Exception as exc:  # noqa: BLE001
         _record(db, task, f"Pre-check raised: {exc}", phase=TaskPhase.FAILED)
@@ -663,7 +698,12 @@ def _phase_postcheck(
 
     _set_phase(db, task, finishing_phase)
     try:
-        run = precheck_svc.run_precheck_for_device(db, device, user_id=job.created_by_id)
+        run = precheck_svc.run_precheck_for_device(
+            db,
+            device,
+            checks=_resolve_checks_for_job(db, job),
+            user_id=job.created_by_id,
+        )
     except Exception as exc:  # noqa: BLE001
         _record(db, task, f"Post-check raised: {exc}", phase=TaskPhase.FAILED)
         _fail_job(db, job.id, f"Post-check failed for {device.name}")

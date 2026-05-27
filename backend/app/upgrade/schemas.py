@@ -163,6 +163,13 @@ class JobCreate(BaseModel):
     auto_ack_precheck_failures: bool = False
     auto_ack_postcheck_failures: bool = False
 
+    # Which readiness-check preset to run as pre/post-check. NULL =
+    # use whichever PrecheckSet has is_default=true (seeded as
+    # "Standard" in migration 0007). If no default exists, the
+    # orchestrator falls back to the hard-coded
+    # DEFAULT_READINESS_CHECKS in pan_client.
+    precheck_set_id: int | None = None
+
     @model_validator(mode="after")
     def _validate_image_source(self) -> "JobCreate":
         # Exactly one of image_id / device_pull_image must be set.

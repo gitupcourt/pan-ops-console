@@ -272,6 +272,17 @@ def create_job(
                 detail=f"image_id {payload.image_id} not found",
             )
 
+    # Validate precheck_set_id if supplied — same pattern as image_id.
+    if payload.precheck_set_id is not None:
+        from app.upgrade.models.precheck_set import PrecheckSet  # local — avoid cycle
+
+        ps = db.get(PrecheckSet, payload.precheck_set_id)
+        if ps is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"precheck_set_id {payload.precheck_set_id} not found",
+            )
+
     job = UpgradeJob(
         name=payload.name,
         target_version=payload.target_version,
@@ -287,6 +298,7 @@ def create_job(
         auto_reboot_after_install=payload.auto_reboot_after_install,
         auto_ack_precheck_failures=payload.auto_ack_precheck_failures,
         auto_ack_postcheck_failures=payload.auto_ack_postcheck_failures,
+        precheck_set_id=payload.precheck_set_id,
         state=JobState.PENDING,
         created_by_id=user.id,
     )

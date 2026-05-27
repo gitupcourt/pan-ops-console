@@ -681,6 +681,15 @@ export const api = {
     j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/confirm`, { method: "POST" }),
   overrideUpgradeTask: (id: number) =>
     j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/override`, { method: "POST" }),
+  // Re-run the pre/post-check at a parked-override gate. Use when
+  // the operator fixed the underlying issue externally (e.g. pushed
+  // a candidate config from Panorama) and wants to verify rather
+  // than override blindly. The orchestrator loops back into the
+  // check phase instead of advancing.
+  rerunUpgradeTaskCheck: (id: number) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/rerun-check`, {
+      method: "POST",
+    }),
   retryUpgradeTask: (id: number) =>
     j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/retry`, { method: "POST" }),
 

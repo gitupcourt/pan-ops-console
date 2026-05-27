@@ -610,6 +610,52 @@ def override_task(
     )
 
 
+@router.post(
+    "/upgrade/tasks/{task_id}/rerun-check", response_model=TaskDetail
+)
+def rerun_task_check(
+    task_id: int,
+    db: Session = Depends(get_db),
+):
+    """Re-run the pre- or post-check at an override gate.
+
+    Use case: precheck flagged a real issue (e.g. candidate config
+    pending). Operator fixed it externally (e.g. pushed from
+    Panorama), now wants to verify the fix rather than override
+    blindly.
+
+    Implementation: set `task.confirmation_token` to a sentinel that
+    starts with RERUN_ — `_wait_for_override` in the orchestrator
+    recognizes it and returns its RERUN outcome to the phase
+    function, which loops back and re-executes the check.
+    """
+    task = db.get(DeviceUpgradeTask, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.phase not in _AWAITING_OVERRIDE:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"task is in phase {task.phase.value}; "
+                f"re-run requires one of "
+                f"{sorted(p.value for p in _AWAITING_OVERRIDE)}"
+            ),
+        )
+    # RERUN_ prefix is the protocol with _wait_for_override —
+    # any token starting with this string triggers a rerun; everything
+    # else falls through to PROCEED.
+    task.confirmation_token = f"RERUN_{secrets.token_hex(8)}"
+    db.commit()
+    db.refresh(task)
+
+    drive_pair_task.delay(task.job_id, task.ha_pair_key)
+
+    base = _task_to_read(task)
+    return TaskDetail.model_validate(
+        {**base.model_dump(), "progress": task.progress}
+    )
+
+
 @router.post("/upgrade/tasks/{task_id}/retry", response_model=TaskDetail)
 def retry_task(task_id: int, db: Session = Depends(get_db)):
     """Re-enter the orchestrator for a failed or stuck task.

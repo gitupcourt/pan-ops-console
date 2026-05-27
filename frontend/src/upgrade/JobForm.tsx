@@ -1,7 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+} from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
-import { api, Device, UpgradeJobCreate } from "../api";
+import {
+  api,
+  AvailableSoftwareBulkOut,
+  Device,
+  UpgradeJobCreate,
+} from "../api";
 import { Button, Field, Input, Select } from "../core/ui/ui";
 
 /**
@@ -47,6 +57,11 @@ export function JobForm({
   // Form state.
   const [name, setName] = useState("");
   const [targetVersion, setTargetVersion] = useState("");
+  // "device" = pick from the device-reported list (model-compatible
+  // by definition); "custom" = freeform text input as an escape hatch
+  // for manually-uploaded images or beta versions not yet in the
+  // update server's catalog.
+  const [versionMode, setVersionMode] = useState<"device" | "custom">("device");
   // Seed the device selection from the inventory handoff (if any).
   // We intentionally init from the prop ONCE; subsequent prop changes
   // don't reset the selection (rare in practice — the form mounts
@@ -54,6 +69,31 @@ export function JobForm({
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<Set<number>>(
     () => new Set(initialDeviceIds),
   );
+
+  // Software-availability query for the version picker. Keyed on a
+  // stable sorted-CSV of the current selection so any change to the
+  // device set re-fetches with fresh model-compatible versions. The
+  // device's own check-now is the source of truth for "what can this
+  // model install" — no need for us to keep a model → versions table.
+  //
+  // `enabled` gates the slow per-device check-now call behind both
+  //   - operator selected at least one device
+  //   - operator chose the device-reported picker (not custom)
+  // staleTime: Infinity — call is slow and the catalog changes rarely;
+  // a manual "Refresh" button covers post-release re-poll.
+  const selectedDeviceIdsArr = useMemo(() => {
+    const arr = Array.from(selectedDeviceIds);
+    arr.sort((a, b) => a - b);
+    return arr;
+  }, [selectedDeviceIds]);
+  const softwareQ = useQuery<AvailableSoftwareBulkOut>({
+    queryKey: ["upgrade-software-bulk", selectedDeviceIdsArr.join(",")],
+    queryFn: () => api.getDeviceSoftwareBulk(selectedDeviceIdsArr),
+    enabled:
+      versionMode === "device" && selectedDeviceIdsArr.length > 0,
+    staleTime: Infinity,
+  });
+
   // Image source: either an existing PanosImage id (when imageMode = "select")
   // or device_pull_image=true (when imageMode = "pull"). Mutually exclusive.
   type ImageMode = "select" | "pull";
@@ -161,24 +201,23 @@ export function JobForm({
       }}
       className="border-b border-zinc-800 bg-zinc-950/40 p-4 grid gap-4"
     >
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <Field label="Job name">
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Q1 fleet refresh"
-            required
-          />
-        </Field>
-        <Field label="Target PAN-OS version">
-          <Input
-            value={targetVersion}
-            onChange={(e) => setTargetVersion(e.target.value)}
-            placeholder="11.1.4-h7"
-            required
-          />
-        </Field>
-      </div>
+      <Field label="Job name">
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Q1 fleet refresh"
+          required
+        />
+      </Field>
+
+      <VersionPicker
+        mode={versionMode}
+        onModeChange={setVersionMode}
+        targetVersion={targetVersion}
+        onTargetVersionChange={setTargetVersion}
+        selectedDeviceCount={selectedDeviceIds.size}
+        softwareQ={softwareQ}
+      />
 
       {/* Device picker */}
       <div className="rounded border border-zinc-800 p-3 grid gap-2">
@@ -540,4 +579,243 @@ function Toggle({
       <span>{label}</span>
     </label>
   );
+}
+
+// ----- version picker -----
+
+/**
+ * Target PAN-OS version picker.
+ *
+ * Two modes:
+ *   - "device" (default) — populate a dropdown from each selected
+ *     device's own `request system software check → info` response.
+ *     The device only lists versions it can install, so model-
+ *     compatibility is automatic (PA-220 won't report 12.x). The
+ *     dropdown annotates each version with which/how many selected
+ *     devices reported it + downloaded-status + release date.
+ *   - "custom" — freeform text input, for operator-uploaded images
+ *     or beta versions the update server doesn't yet list.
+ *
+ * Why a dropdown and not just leave the text input: operators don't
+ * remember `12.1.4-h12754`. The dropdown also catches "I picked a
+ * version this firewall model can't install" *before* the operator
+ * submits — failing fast at form-validate time vs slowly at
+ * precheck time.
+ */
+function VersionPicker({
+  mode,
+  onModeChange,
+  targetVersion,
+  onTargetVersionChange,
+  selectedDeviceCount,
+  softwareQ,
+}: {
+  mode: "device" | "custom";
+  onModeChange: (m: "device" | "custom") => void;
+  targetVersion: string;
+  onTargetVersionChange: (v: string) => void;
+  selectedDeviceCount: number;
+  softwareQ: UseQueryResult<AvailableSoftwareBulkOut>;
+}) {
+  // Aggregate per-version across all selected devices. For each
+  // version we collect: which devices report it, which already have
+  // it downloaded, and the latest released_on we've seen.
+  type Agg = {
+    version: string;
+    deviceIds: number[];
+    downloadedOn: number[];
+    latestOn: number[];
+    released_on: string | null;
+  };
+  const aggregates: Agg[] = useMemo(() => {
+    const results = softwareQ.data?.results ?? {};
+    const byVersion = new Map<string, Agg>();
+    for (const [idStr, payload] of Object.entries(results)) {
+      const did = Number(idStr);
+      for (const e of payload.available) {
+        let a = byVersion.get(e.version);
+        if (!a) {
+          a = {
+            version: e.version,
+            deviceIds: [],
+            downloadedOn: [],
+            latestOn: [],
+            released_on: e.released_on,
+          };
+          byVersion.set(e.version, a);
+        }
+        a.deviceIds.push(did);
+        if (e.downloaded) a.downloadedOn.push(did);
+        if (e.latest) a.latestOn.push(did);
+        if (e.released_on && (!a.released_on || e.released_on > a.released_on)) {
+          a.released_on = e.released_on;
+        }
+      }
+    }
+    // Sort newest-first by version string. PAN-OS versions don't sort
+    // cleanly as plain strings (10.x vs 9.x), so do a tuple compare
+    // on the numeric components, then h-suffix.
+    const arr = Array.from(byVersion.values());
+    arr.sort((a, b) => compareVersionDesc(a.version, b.version));
+    return arr;
+  }, [softwareQ.data]);
+
+  const deviceCount = Object.keys(softwareQ.data?.results ?? {}).length;
+  const errored = Object.values(softwareQ.data?.results ?? {}).filter(
+    (r) => r.error,
+  );
+
+  return (
+    <div className="rounded border border-zinc-800 p-3 grid gap-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">
+          Target PAN-OS version
+        </div>
+        <div className="inline-flex border border-zinc-700 rounded overflow-hidden text-[11px]">
+          <button
+            type="button"
+            onClick={() => onModeChange("device")}
+            className={
+              "px-3 py-1 " +
+              (mode === "device"
+                ? "bg-zinc-700 text-zinc-100"
+                : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
+            }
+          >
+            Pick from device
+          </button>
+          <button
+            type="button"
+            onClick={() => onModeChange("custom")}
+            className={
+              "px-3 py-1 " +
+              (mode === "custom"
+                ? "bg-zinc-700 text-zinc-100"
+                : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
+            }
+          >
+            Custom
+          </button>
+        </div>
+      </div>
+
+      {mode === "custom" ? (
+        <>
+          <Input
+            value={targetVersion}
+            onChange={(e) => onTargetVersionChange(e.target.value)}
+            placeholder="11.1.4-h7"
+            required
+          />
+          <p className="text-[11px] text-zinc-500">
+            Use this for manually-uploaded images or beta versions the
+            update server doesn't list. Bypasses the device's
+            model-compatibility check — the orchestrator's precheck
+            phase will still catch installs that don't apply.
+          </p>
+        </>
+      ) : selectedDeviceCount === 0 ? (
+        <p className="text-xs text-zinc-500 italic">
+          Select at least one device above to see available versions.
+        </p>
+      ) : softwareQ.isLoading || softwareQ.isFetching ? (
+        <p className="text-xs text-zinc-500">
+          Asking {selectedDeviceCount} device
+          {selectedDeviceCount === 1 ? "" : "s"} for available versions… (slow
+          on first call — the firewall contacts updates.paloaltonetworks.com)
+        </p>
+      ) : (
+        <>
+          <div className="flex items-center gap-3">
+            <Select
+              value={targetVersion}
+              onChange={(e) => onTargetVersionChange(e.target.value)}
+              required
+              className="flex-1"
+            >
+              <option value="">— pick a version —</option>
+              {aggregates.map((a) => {
+                const onAll = a.deviceIds.length === deviceCount;
+                const dlCount = a.downloadedOn.length;
+                const isLatest = a.latestOn.length > 0;
+                const compatLabel = onAll
+                  ? "all"
+                  : `${a.deviceIds.length} of ${deviceCount}`;
+                const dlLabel =
+                  dlCount === 0
+                    ? "not downloaded"
+                    : dlCount === deviceCount
+                      ? "downloaded on all"
+                      : `downloaded on ${dlCount} of ${deviceCount}`;
+                const dateLabel = a.released_on
+                  ? ` · ${a.released_on}`
+                  : "";
+                return (
+                  <option key={a.version} value={a.version}>
+                    {a.version}
+                    {isLatest ? " ★" : ""} · {compatLabel} · {dlLabel}
+                    {dateLabel}
+                  </option>
+                );
+              })}
+            </Select>
+            <button
+              type="button"
+              onClick={() => softwareQ.refetch()}
+              className="text-xs text-blue-400 hover:text-blue-300"
+              title="Re-poll each device's check-now"
+            >
+              ↻ refresh
+            </button>
+          </div>
+          {targetVersion && (() => {
+            const agg = aggregates.find((a) => a.version === targetVersion);
+            if (!agg) return null;
+            const onAll = agg.deviceIds.length === deviceCount;
+            return onAll ? (
+              <p className="text-[11px] text-emerald-400">
+                ✓ Compatible with all {deviceCount} selected device
+                {deviceCount === 1 ? "" : "s"}.
+              </p>
+            ) : (
+              <p className="text-[11px] text-amber-400">
+                ⚠ Reported by {agg.deviceIds.length} of {deviceCount} selected
+                devices. The orchestrator will fail the install on
+                non-reporting devices — usually a model-compatibility issue.
+              </p>
+            );
+          })()}
+          {errored.length > 0 && (
+            <p className="text-[11px] text-rose-400">
+              {errored.length} device{errored.length === 1 ? "" : "s"} couldn't
+              report available versions:{" "}
+              {errored
+                .map((e) => `${e.device_name} (${e.error?.split(":")[0]})`)
+                .join("; ")}
+              . Pick from the union above or use Custom.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Compare PAN-OS version strings descending (newest first).
+ * Strips leading non-digit, splits on `.` and `-h`, compares
+ * numerically. Examples sort: 12.1.4-h2 > 12.1.4 > 11.2.10 > 11.2.9.
+ */
+function compareVersionDesc(a: string, b: string): number {
+  const parse = (v: string): number[] => {
+    const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-h(\d+))?/);
+    if (!m) return [0, 0, 0, 0];
+    return [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4] ?? 0)];
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < 4; i++) {
+    if (pa[i] !== pb[i]) return pb[i] - pa[i]; // desc
+  }
+  return 0;
 }

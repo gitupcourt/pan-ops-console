@@ -272,6 +272,31 @@ export type UpgradeJobDetail = UpgradeJob & {
   tasks: UpgradeTask[];
 };
 
+// ---------- Software / version picker (phase 13d) ----------
+
+export type SoftwareEntry = {
+  version: string;
+  downloaded: boolean;
+  current: boolean;
+  latest: boolean;
+  uploaded: boolean;
+  filename: string | null;
+  released_on: string | null;
+  size_kb: string | null;
+};
+
+export type AvailableSoftwareOut = {
+  device_id: number;
+  device_name: string;
+  current_version: string | null;
+  available: SoftwareEntry[];
+  error: string | null;
+};
+
+export type AvailableSoftwareBulkOut = {
+  results: Record<number, AvailableSoftwareOut>;
+};
+
 export type UpgradeJobCreate = {
   name: string;
   target_version: string;
@@ -605,6 +630,18 @@ export const api = {
     }),
   deletePrecheckSet: (id: number) =>
     j<void>(`/upgrade/precheck-sets/${id}`, { method: "DELETE" }),
+
+  // Upgrade: per-device software availability — feeds the JobForm
+  // version picker. The bulk endpoint is the hot path; the single
+  // endpoint is here for any future "show available versions for
+  // device X" affordance (e.g. an Inventory row action).
+  getDeviceSoftware: (deviceId: number) =>
+    j<AvailableSoftwareOut>(`/upgrade/devices/${deviceId}/software`),
+  getDeviceSoftwareBulk: (deviceIds: number[]) =>
+    j<AvailableSoftwareBulkOut>(`/upgrade/devices/software/bulk`, {
+      method: "POST",
+      body: JSON.stringify({ device_ids: deviceIds }),
+    }),
 
   // Upgrade: tasks (within a job)
   getUpgradeTask: (id: number) =>

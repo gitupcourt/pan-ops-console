@@ -31,6 +31,10 @@ export function JobForm({ onDone }: { onDone: () => void }) {
     queryKey: ["upgrade-images"],
     queryFn: api.listUpgradeImages,
   });
+  const precheckSetsQ = useQuery({
+    queryKey: ["precheck-sets"],
+    queryFn: api.listPrecheckSets,
+  });
 
   // Form state.
   const [name, setName] = useState("");
@@ -51,6 +55,11 @@ export function JobForm({ onDone }: { onDone: () => void }) {
   const [filterModel, setFilterModel] = useState<string>("");
   const [filterDeviceGroup, setFilterDeviceGroup] = useState<string>("");
   const [filterTemplateStack, setFilterTemplateStack] = useState<string>("");
+
+  // Precheck set: null = "use the default" (whichever PrecheckSet has
+  // is_default=true server-side; seeded as "Standard" by migration
+  // 0007). The dropdown's blank/default option leaves the value null.
+  const [precheckSetId, setPrecheckSetId] = useState<number | null>(null);
 
   const [requireFailover, setRequireFailover] = useState(true);
   const [requirePrimaryUpgrade, setRequirePrimaryUpgrade] = useState(false);
@@ -75,6 +84,7 @@ export function JobForm({ onDone }: { onDone: () => void }) {
         auto_reboot_after_install: autoReboot,
         auto_ack_precheck_failures: autoAckPrecheck,
         auto_ack_postcheck_failures: autoAckPostcheck,
+        precheck_set_id: precheckSetId,
       };
       return api.createUpgradeJob(body);
     },
@@ -325,6 +335,42 @@ export function JobForm({ onDone }: { onDone: () => void }) {
             </Select>
           </Field>
         )}
+      </div>
+
+      {/* Precheck set picker */}
+      <div className="rounded border border-zinc-800 p-3 grid gap-3">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">
+          Pre/post-check set
+        </div>
+        <p className="text-[11px] text-zinc-500">
+          Which readiness checks to run before and after each device's
+          upgrade. Leave on default to use the system-default set
+          (currently "Standard"). Manage available sets at{" "}
+          <a
+            href="/upgrade/precheck-sets"
+            className="text-blue-400 hover:text-blue-300"
+          >
+            /upgrade/precheck-sets
+          </a>
+          .
+        </p>
+        <Select
+          value={precheckSetId ?? ""}
+          onChange={(e) =>
+            setPrecheckSetId(
+              e.target.value === "" ? null : Number(e.target.value),
+            )
+          }
+        >
+          <option value="">— use default —</option>
+          {(precheckSetsQ.data ?? []).map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+              {s.is_default ? " (default)" : ""}
+              {` — ${s.checks.length} check${s.checks.length === 1 ? "" : "s"}`}
+            </option>
+          ))}
+        </Select>
       </div>
 
       {/* Automation / safety toggles */}

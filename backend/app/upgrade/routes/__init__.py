@@ -12,8 +12,9 @@ its own `APIRouter()`, import it here, and `router.include_router(...)`.
 
 from fastapi import APIRouter
 
-from app.upgrade.routes import images, jobs
+from app.upgrade.routes import images, jobs, precheck_sets
 
 router = APIRouter()
 router.include_router(jobs.router)
 router.include_router(images.router)
+router.include_router(precheck_sets.router)

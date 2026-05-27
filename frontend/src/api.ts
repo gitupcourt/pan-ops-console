@@ -285,6 +285,38 @@ export type UpgradeJobCreate = {
   auto_reboot_after_install?: boolean;
   auto_ack_precheck_failures?: boolean;
   auto_ack_postcheck_failures?: boolean;
+  precheck_set_id?: number | null;
+};
+
+// ---------- Precheck sets (phase 13b) ----------
+
+export type PrecheckSetRead = {
+  id: number;
+  name: string;
+  description: string | null;
+  checks: string[];
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PrecheckSetCreate = {
+  name: string;
+  description?: string | null;
+  checks: string[];
+  is_default?: boolean;
+};
+
+export type PrecheckSetUpdate = {
+  name?: string;
+  description?: string | null;
+  checks?: string[];
+  is_default?: boolean;
+};
+
+export type AvailableChecks = {
+  all: string[];
+  default: string[];
 };
 
 // ---------- Capacity Analyzer (phase 8 endpoints) ----------
@@ -556,6 +588,22 @@ export const api = {
     j<UpgradeJobDetail>(`/upgrade/jobs/${id}/abort`, { method: "POST" }),
   deleteUpgradeJob: (id: number) =>
     j<void>(`/upgrade/jobs/${id}`, { method: "DELETE" }),
+
+  // Upgrade: precheck sets (phase 13b)
+  listPrecheckSets: () => j<PrecheckSetRead[]>("/upgrade/precheck-sets"),
+  listAvailableChecks: () => j<AvailableChecks>("/upgrade/precheck-sets/available"),
+  createPrecheckSet: (body: PrecheckSetCreate) =>
+    j<PrecheckSetRead>("/upgrade/precheck-sets", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updatePrecheckSet: (id: number, body: PrecheckSetUpdate) =>
+    j<PrecheckSetRead>(`/upgrade/precheck-sets/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deletePrecheckSet: (id: number) =>
+    j<void>(`/upgrade/precheck-sets/${id}`, { method: "DELETE" }),
 
   // Upgrade: tasks (within a job)
   getUpgradeTask: (id: number) =>

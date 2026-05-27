@@ -39,9 +39,17 @@ export default function UpgradeJobs() {
           title="Upgrade jobs"
           description="Bulk upgrades across one or more firewalls, with HA pair awareness and confirmation gates at each major step."
           action={
-            <Button variant="primary" onClick={() => setCreating((v) => !v)}>
-              {creating ? "Cancel" : "New job"}
-            </Button>
+            <div className="flex items-center gap-3">
+              <NavLink
+                to="/upgrade/precheck-sets"
+                className="text-xs text-blue-400 hover:text-blue-300"
+              >
+                Manage precheck sets
+              </NavLink>
+              <Button variant="primary" onClick={() => setCreating((v) => !v)}>
+                {creating ? "Cancel" : "New job"}
+              </Button>
+            </div>
           }
         />
 

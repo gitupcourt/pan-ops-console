@@ -16,6 +16,7 @@ import Users from "./core/auth/Users";
 import Inventory from "./core/devices/Inventory";
 import HomeDashboard from "./HomeDashboard";
 import JobDetail from "./upgrade/JobDetail";
+import PrecheckSets from "./upgrade/PrecheckSets";
 import UpgradeJobs from "./upgrade/UpgradeJobs";
 
 export default function App() {
@@ -94,6 +95,7 @@ export default function App() {
                 don't churn. */}
             <Route path="/upgrade" element={<UpgradeJobs />} />
             <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />
+            <Route path="/upgrade/precheck-sets" element={<PrecheckSets />} />
             {/* Authentication shell + nested admin sub-routes. The shell
                 renders a sub-nav (Users / Providers / future …) and the
                 active sub-route in an <Outlet />. Old /users + /providers

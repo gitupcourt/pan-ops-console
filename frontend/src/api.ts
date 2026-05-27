@@ -241,6 +241,28 @@ export type UpgradeJob = {
   finished_at: string | null;
 };
 
+export type PrecheckCheckResult = {
+  name: string;
+  state: boolean;
+  reason: string;
+  severity: "pass" | "warn" | "fail" | "skip";
+};
+
+export type PrecheckSummary = {
+  id: number;
+  ran_at: string;
+  overall_severity: "pass" | "warn" | "fail" | "skip" | string;
+  pass_count: number;
+  warn_count: number;
+  fail_count: number;
+  skip_count: number;
+  // Pre-sorted by backend: fail → warn → skip → pass, then name asc.
+  checks: PrecheckCheckResult[];
+  // Set when the readiness-check call itself errored (locale, network,
+  // panorama proxy). Non-null implies `checks` is empty.
+  error: string | null;
+};
+
 export type UpgradeTask = {
   id: number;
   job_id: number;
@@ -253,11 +275,16 @@ export type UpgradeTask = {
   tick_count: number;
   created_at: string;
   updated_at: string;
+  // Orchestrator-written JSON: `log` (timestamped strings),
+  // `completed_phases` (markers), phase-specific keys like
+  // `failing_checks`, `install_progress`. UI render-only.
+  progress: Record<string, unknown> | null;
+  // Latest PrecheckRun for the device, or null if not yet run.
+  precheck: PrecheckSummary | null;
 };
 
-export type UpgradeTaskDetail = UpgradeTask & {
-  progress: Record<string, unknown> | null;
-};
+// Detail type kept as an alias for API compatibility; same payload.
+export type UpgradeTaskDetail = UpgradeTask;
 
 export type UpgradeJobDetail = UpgradeJob & {
   workflow_stages: string[] | null;

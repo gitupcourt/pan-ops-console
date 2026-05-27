@@ -74,11 +74,54 @@ class ImageCreate(BaseModel):
 # ---------- Job tasks ----------
 
 
-class TaskRead(BaseModel):
-    """Compact per-device task view, embedded in JobDetail.
+class PrecheckCheckResult(BaseModel):
+    """One row in PrecheckRun.results — per-check outcome that the
+    classifier turned into pass/warn/fail/skip. The shape mirrors what
+    `PanDeviceClient.run_readiness_checks` returns post-normalize.
 
-    Excludes `progress` JSON blob — fetch via /upgrade/tasks/{id} when
-    the UI wants the full breakdown.
+    Reason is the device's own explanation (e.g. "ha not configured",
+    "candidate config has uncommitted changes"). Severity is the
+    classifier's verdict — sometimes a state=False check is still
+    classified as warn rather than fail (see precheck_classifier).
+    """
+
+    name: str
+    state: bool
+    reason: str
+    severity: str  # "pass" | "warn" | "fail" | "skip"
+
+
+class PrecheckSummary(BaseModel):
+    """Compact view of the latest PrecheckRun for this task's device.
+
+    Embedded on TaskRead so the JobDetail UI can render per-check
+    visibility inline without an extra round-trip per task. When the
+    orchestrator hasn't run a precheck yet, this is null.
+    """
+
+    id: int
+    ran_at: datetime
+    overall_severity: str
+    pass_count: int
+    warn_count: int
+    fail_count: int
+    skip_count: int
+    # The actual per-check outcomes. List form for stable UI ordering;
+    # backend sorts severity-desc then name-asc so the operator's eye
+    # lands on FAIL first.
+    checks: list[PrecheckCheckResult]
+    # Set when the library call itself errored (e.g. the locale bug
+    # before phase-13d's fix). When non-null, `checks` is typically
+    # empty.
+    error: str | None
+
+
+class TaskRead(BaseModel):
+    """Per-device task view, embedded in JobDetail.
+
+    Includes the `progress` JSON + latest precheck summary so the
+    UI doesn't have to round-trip per row. Polling at 3s on the
+    list endpoint is the operator's live view.
     """
 
     id: int
@@ -92,19 +135,25 @@ class TaskRead(BaseModel):
     tick_count: int
     created_at: datetime
     updated_at: datetime
+    # Loaded from `device_upgrade_tasks.progress` — orchestrator
+    # writes the `log` (list of timestamped lines), `completed_phases`
+    # (resume-on-retry markers), and phase-specific keys like
+    # `failing_checks`, `install_progress`. UI-side: render-only.
+    progress: dict | None
+    # Latest PrecheckRun for this task's device, or null if the
+    # orchestrator hasn't run one for this task yet.
+    precheck: PrecheckSummary | None
 
     model_config = {"from_attributes": True}
 
 
 class TaskDetail(TaskRead):
-    """Full task detail including the load-bearing `progress` JSON.
-
-    Per MIGRATION_NOTES §3.3 the `progress.completed_phases` markers
-    drive the orchestrator's resume-on-retry semantics — render-only
-    on the UI side, never mutate.
+    """Alias of TaskRead for the per-task GET endpoint. Same payload —
+    we used to gate `progress` behind this detail view but now it's on
+    the list too. Kept as a distinct type for API stability.
     """
 
-    progress: dict | None
+    pass
 
 
 # /upgrade/tasks/{id}/confirm and .../override take no body. Route

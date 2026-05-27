@@ -464,20 +464,16 @@ def test_task_confirm_requires_parked_phase(client, db):
     })
     task_id = create.json()["tasks"][0]["id"]
 
-    r = client.post(
-        f"/upgrade/tasks/{task_id}/confirm",
-        json={"token": "anything"},
-    )
+    r = client.post(f"/upgrade/tasks/{task_id}/confirm")
     assert r.status_code == 409
 
 
-def test_task_confirm_validates_token_when_parked(client, db):
-    """Set a task into a parked phase + token by hand and verify the
-    happy path + bad-token rejection.
-
-    We park the task by direct DB write rather than driving the
-    orchestrator (which doesn't exist on the worker side until phase
-    4d). That keeps this test scoped to the API contract.
+def test_task_confirm_signals_advance_when_parked(client, db):
+    """When the task is parked at an AWAITING_*_CONFIRM phase, hitting
+    /confirm sets a non-empty confirmation_token so the orchestrator's
+    `_wait_for_confirm` poll loop picks it up on the next tick and
+    proceeds. No request body required — auth via session cookie is
+    the access-control gate.
     """
     _signup(client)
     dev = _seed_standalone(db, name="fw1")
@@ -487,27 +483,16 @@ def test_task_confirm_validates_token_when_parked(client, db):
     })
     task_id = create.json()["tasks"][0]["id"]
 
-    # Park the task at AWAITING_REBOOT_CONFIRM with a known token.
+    # Park the task at AWAITING_REBOOT_CONFIRM. No pre-set token — the
+    # orchestrator never sets one; only the route does.
     task = db.get(DeviceUpgradeTask, task_id)
     task.phase = TaskPhase.AWAITING_REBOOT_CONFIRM
-    task.confirmation_token = "real-token-xyz"
     db.commit()
 
-    # Wrong token → 403.
-    r = client.post(
-        f"/upgrade/tasks/{task_id}/confirm",
-        json={"token": "wrong"},
-    )
-    assert r.status_code == 403
-
-    # Right token → 200 and token cleared.
-    r = client.post(
-        f"/upgrade/tasks/{task_id}/confirm",
-        json={"token": "real-token-xyz"},
-    )
+    r = client.post(f"/upgrade/tasks/{task_id}/confirm")
     assert r.status_code == 200
     db.refresh(task)
-    assert task.confirmation_token is None
+    assert task.confirmation_token  # non-empty sentinel set
 
 
 def test_task_override_works_on_precheck_override_phase(client, db):
@@ -520,19 +505,16 @@ def test_task_override_works_on_precheck_override_phase(client, db):
     task_id = create.json()["tasks"][0]["id"]
     task = db.get(DeviceUpgradeTask, task_id)
     task.phase = TaskPhase.AWAITING_PRECHECK_OVERRIDE
-    task.confirmation_token = "tok"
     db.commit()
 
     # Confirm endpoint refuses override phases — must use /override.
-    r = client.post(
-        f"/upgrade/tasks/{task_id}/confirm", json={"token": "tok"}
-    )
+    r = client.post(f"/upgrade/tasks/{task_id}/confirm")
     assert r.status_code == 409
 
-    r = client.post(
-        f"/upgrade/tasks/{task_id}/override", json={"token": "tok"}
-    )
+    r = client.post(f"/upgrade/tasks/{task_id}/override")
     assert r.status_code == 200
+    db.refresh(task)
+    assert task.confirmation_token  # non-empty sentinel set
 
 
 def test_task_retry_clears_error_and_resets_phase(client, db):
@@ -590,7 +572,6 @@ def test_task_retry_refuses_parked_task(client, db):
     task_id = create.json()["tasks"][0]["id"]
     task = db.get(DeviceUpgradeTask, task_id)
     task.phase = TaskPhase.AWAITING_REBOOT_CONFIRM
-    task.confirmation_token = "tok"
     db.commit()
 
     r = client.post(f"/upgrade/tasks/{task_id}/retry")

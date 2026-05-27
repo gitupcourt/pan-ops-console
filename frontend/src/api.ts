@@ -646,16 +646,14 @@ export const api = {
   // Upgrade: tasks (within a job)
   getUpgradeTask: (id: number) =>
     j<UpgradeTaskDetail>(`/upgrade/tasks/${id}`),
-  confirmUpgradeTask: (id: number, token: string) =>
-    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/confirm`, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    }),
-  overrideUpgradeTask: (id: number, token: string) =>
-    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/override`, {
-      method: "POST",
-      body: JSON.stringify({ token }),
-    }),
+  // Confirm / override take no body — the route reads the task,
+  // validates phase, and sets task.confirmation_token to a sentinel
+  // that the orchestrator's poll loop consumes on the next tick.
+  // Auth is via session cookie (`credentials: include` default).
+  confirmUpgradeTask: (id: number) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/confirm`, { method: "POST" }),
+  overrideUpgradeTask: (id: number) =>
+    j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/override`, { method: "POST" }),
   retryUpgradeTask: (id: number) =>
     j<UpgradeTaskDetail>(`/upgrade/tasks/${id}/retry`, { method: "POST" }),
 

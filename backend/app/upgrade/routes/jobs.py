@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, object_session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.auth.deps import current_user
 from app.core.auth.models.user import User
@@ -515,6 +516,11 @@ def _audit_log(task: DeviceUpgradeTask, message: str) -> None:
     The orchestrator's `_record` also writes here; this helper mirrors
     its shape (ISO-timestamped) so the rendered log reads as one
     chronologically-ordered stream of orchestrator + operator events.
+
+    Uses `flag_modified` because the `progress` column is plain JSON
+    (not `MutableDict.as_mutable(JSON)`), so in-place mutation followed
+    by self-assignment doesn't always reliably mark the column dirty.
+    `flag_modified` is the explicit "yes, persist this" signal.
     """
     progress = task.progress or {}
     log = progress.get("log") or []
@@ -523,6 +529,7 @@ def _audit_log(task: DeviceUpgradeTask, message: str) -> None:
     log.append(f"{datetime.now(timezone.utc).isoformat()} {message}")
     progress["log"] = log
     task.progress = progress
+    flag_modified(task, "progress")
 
 
 def _signal_task_advance(
@@ -662,6 +669,7 @@ def override_task(
     )
     progress["overrides"] = overrides
     task.progress = progress
+    flag_modified(task, "progress")
     _audit_log(
         task,
         f"Override ({phase_value}) by {user.username}",

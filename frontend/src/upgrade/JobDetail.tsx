@@ -426,13 +426,6 @@ function CurrentPhaseExplainer({
       </div>
     );
   }
-  if (phase === "aborted") {
-    return (
-      <div className="text-zinc-400">
-        Aborted. Job was stopped by the operator.
-      </div>
-    );
-  }
   // Active phase — describe what's happening right now.
   const active: Record<string, string> = {
     precheck: "Running readiness checks on the device.",

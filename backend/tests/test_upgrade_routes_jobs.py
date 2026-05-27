@@ -630,7 +630,12 @@ def test_task_retry_clears_error_and_resets_phase(client, db):
     assert task.error is None
     # progress.completed_phases is PRESERVED — that's what makes retry
     # resume from precheck/snapshot done instead of starting over.
-    assert task.progress == {"completed_phases": ["precheck", "snapshot"]}
+    # (We assert per-key rather than full-dict because the retry route
+    # also appends an audit-log entry to progress.log; testing it
+    # full-equality would couple this test to that side-effect.)
+    assert task.progress["completed_phases"] == ["precheck", "snapshot"]
+    log = task.progress.get("log") or []
+    assert any("Retry" in line and "admin" in line for line in log)
 
 
 def test_task_retry_refuses_done_task(client, db):

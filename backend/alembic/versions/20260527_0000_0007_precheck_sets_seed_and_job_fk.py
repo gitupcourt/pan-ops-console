@@ -80,18 +80,28 @@ _FULL_CHECKS: list[str] = [
 
 
 def upgrade() -> None:
-    # Add the FK column on upgrade_jobs. NULL is fine — orchestrator
-    # has a fallback path that uses the system-default precheck set
-    # (or DEFAULT_READINESS_CHECKS if no defaults exist).
-    op.add_column(
-        "upgrade_jobs",
-        sa.Column(
-            "precheck_set_id",
-            sa.Integer(),
-            sa.ForeignKey("precheck_sets.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
-    )
+    # Add the FK column on upgrade_jobs via batch_alter_table so the
+    # FK-constraint creation works on SQLite too (raw ALTER TABLE on
+    # SQLite can't add a constraint — alembic's batch mode does a
+    # copy-and-rebuild instead). env.py also sets render_as_batch on
+    # SQLite but the auto-wrap doesn't cover all op.add_column shapes;
+    # explicit batch is the proven-safe pattern (matches migration 0002).
+    # NULL is fine — orchestrator has a fallback path that uses the
+    # system-default precheck set (or DEFAULT_READINESS_CHECKS if no
+    # defaults exist).
+    with op.batch_alter_table("upgrade_jobs") as batch:
+        batch.add_column(
+            sa.Column(
+                "precheck_set_id",
+                sa.Integer(),
+                sa.ForeignKey(
+                    "precheck_sets.id",
+                    name="fk_upgrade_jobs_precheck_set_id",
+                    ondelete="SET NULL",
+                ),
+                nullable=True,
+            ),
+        )
     op.create_index(
         "ix_upgrade_jobs_precheck_set_id",
         "upgrade_jobs",
@@ -142,4 +152,7 @@ def downgrade() -> None:
     )
 
     op.drop_index("ix_upgrade_jobs_precheck_set_id", table_name="upgrade_jobs")
-    op.drop_column("upgrade_jobs", "precheck_set_id")
+    # batch_alter_table for symmetry with upgrade() — keeps SQLite
+    # tests happy on the downgrade path too.
+    with op.batch_alter_table("upgrade_jobs") as batch:
+        batch.drop_column("precheck_set_id")

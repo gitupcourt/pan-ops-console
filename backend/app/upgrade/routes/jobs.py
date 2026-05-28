@@ -532,6 +532,41 @@ def _audit_log(task: DeviceUpgradeTask, message: str) -> None:
     flag_modified(task, "progress")
 
 
+def _refuse_if_job_terminal(task: DeviceUpgradeTask, db: Session) -> None:
+    """409 the operator's action if the parent job is terminal.
+
+    Discovered the hard way: if the orchestrator dies (e.g. worker pod
+    restart) while a task was parked at AWAITING_*_OVERRIDE, the task
+    stays parked in the UI forever (its phase doesn't change). If
+    something else fails the job during cleanup (timeout, abort, etc.),
+    the job row goes FAILED but the task row still says "parked".
+
+    The UI renders action buttons based on task.phase alone, so the
+    operator sees Re-run / Override / Confirm buttons. They click,
+    the route happily sets the confirmation_token and dispatches
+    drive_pair — but `drive_pair` returns instantly because
+    `_job_terminal` is True, so the click silently no-ops. Operator
+    is stuck pressing buttons that do nothing.
+
+    Fix: refuse the action loudly. The frontend also hides these
+    buttons when job state is terminal (defense in depth), but the
+    route is the source of truth.
+    """
+    job = db.get(UpgradeJob, task.job_id)
+    if job is not None and job.state in (
+        JobState.COMPLETED,
+        JobState.FAILED,
+        JobState.ABORTED,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"job is in state {job.state.value}; action ignored. "
+                "Delete this job and start a new one to recover."
+            ),
+        )
+
+
 def _signal_task_advance(
     task: DeviceUpgradeTask, *, valid_phases: set
 ) -> None:
@@ -606,6 +641,7 @@ def confirm_task(
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    _refuse_if_job_terminal(task, db)
     _signal_task_advance(task, valid_phases=_AWAITING_CONFIRM)
     # Phase-aware audit line — "Confirm" means different things at
     # different gates, so capture which gate the operator cleared.
@@ -651,6 +687,7 @@ def override_task(
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    _refuse_if_job_terminal(task, db)
     _signal_task_advance(task, valid_phases=_AWAITING_OVERRIDE)
     # Persistent override record on the task so the precheck panel
     # can surface "overridden by ..." on subsequent renders.
@@ -708,6 +745,7 @@ def rerun_task_check(
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    _refuse_if_job_terminal(task, db)
     if task.phase not in _AWAITING_OVERRIDE:
         raise HTTPException(
             status_code=409,
@@ -757,6 +795,7 @@ def retry_task(
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    _refuse_if_job_terminal(task, db)
     if task.phase == TaskPhase.DONE:
         raise HTTPException(status_code=409, detail="task already DONE")
     if task.phase in _AWAITING_CONFIRM | _AWAITING_OVERRIDE:

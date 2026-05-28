@@ -858,6 +858,16 @@ def _phase_already_done(task: DeviceUpgradeTask, marker: str) -> bool:
 
 
 def _mark_phase_done(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
+    """Persist a completion marker so Retry can resume past this phase.
+
+    Relies on `task.progress` being wrapped with
+    `MutableDict.as_mutable(JSON)` at the model level — that's what
+    makes mutations to the dict (in place OR via reassignment) mark
+    the column dirty. Without that wrapper, the orchestrator's
+    "read dict, mutate, reassign same ref" pattern silently no-ops
+    half the time. We hit this in production: branch1fw02's task
+    advanced phases but `completed_phases` stayed empty in the DB.
+    """
     progress = task.progress or {}
     completed = list(progress.get("completed_phases", []))
     if marker not in completed:

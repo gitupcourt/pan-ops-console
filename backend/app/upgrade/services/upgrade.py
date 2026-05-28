@@ -398,7 +398,7 @@ def _phase_snapshot(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
     snap = snapshot_svc.capture(
         db,
         device,
-        _client_for(device),
+        _client_for(db, device),
         SnapshotKind.PRE_UPGRADE,
         task_id=task.id,
     )
@@ -435,7 +435,7 @@ def _phase_post_snapshot_and_diff(
     post = snapshot_svc.capture(
         db,
         device,
-        _client_for(device),
+        _client_for(db, device),
         SnapshotKind.POST_UPGRADE,
         task_id=task.id,
     )
@@ -491,7 +491,7 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
 
     _set_phase(db, task, TaskPhase.DOWNLOADING_IMAGE)
     try:
-        client = _client_for(device)
+        client = _client_for(db, device)
         if client.is_version_downloaded(job.target_version):
             _mark_phase_done(db, task, "ensure_image")
             return True
@@ -584,7 +584,7 @@ def _phase_install_and_wait(
         _set_phase(db, task, started_phase)
         # Step 1+2: install.
         try:
-            client = _client_for(device)
+            client = _client_for(db, device)
             install_job = client.request_software_install(job.target_version)
             if not install_job:
                 raise RuntimeError("install request returned no job id")
@@ -607,7 +607,7 @@ def _phase_install_and_wait(
 
         # Step 4+5: restart and wait for mgmt plane.
         try:
-            client = _client_for(device)
+            client = _client_for(db, device)
             _record(db, task, "Issuing system restart")
             client.restart_system()
             _record(
@@ -623,7 +623,7 @@ def _phase_install_and_wait(
             return False
 
         try:
-            precheck_svc.probe_device(db, device, client=_client_for(device))
+            precheck_svc.probe_device(db, device, client=_client_for(db, device))
             db.commit()
         except Exception as exc:  # noqa: BLE001
             log.warning("Post-reboot probe failed for %s: %s", device.name, exc)
@@ -687,7 +687,7 @@ def _phase_install_and_wait(
             return False
 
         _record(db, task, "Waiting for HA state to settle to 'passive'")
-        if not _wait_for_passive(_client_for(device), db, task, device):
+        if not _wait_for_passive(_client_for(db, device), db, task, device):
             _record(
                 db, task,
                 _format_passive_timeout_message(db, task, device),
@@ -792,7 +792,7 @@ def _phase_failover(
 
     # Probe the passive (just-upgraded) member to get its CURRENT HA state.
     try:
-        precheck_svc.probe_device(db, passive_task.device, client=_client_for(passive_task.device))
+        precheck_svc.probe_device(db, passive_task.device, client=_client_for(db, passive_task.device))
         db.commit()
     except Exception as exc:  # noqa: BLE001
         _record(db, passive_task, f"Pre-failover probe of peer failed: {exc}", phase=TaskPhase.FAILED)
@@ -833,8 +833,28 @@ def _phase_failover(
 # ---------- helpers ----------
 
 
-def _client_for(device: Device) -> PanDeviceClient:
-    return precheck_svc.build_client(device)
+def _client_for(db: Session, device: Device) -> PanDeviceClient:
+    """Build a PanDeviceClient honoring the proxy-by-default policy.
+
+    Threads the session through to `build_client_with_fallback` so the
+    builder can read credentials + linkage rows out of Postgres. The
+    builder picks proxy-via-Panorama if both `Device.proxy_via_panorama`
+    and `Panorama.proxy_upgrades` are True, falling back to direct.
+
+    Historical bug: this function was named `precheck_svc.build_client`
+    in the upgrader codebase. Phase 4b lifted the builder out into
+    `core.command_proxy.builder.build_client_with_fallback` but
+    `_client_for` was never updated — it kept calling
+    `precheck_svc.build_client(device)`, which had been deleted. The
+    error never surfaced because every upgrade attempt we'd run
+    crashed at precheck (locale bug, candidate_config FAIL, etc.)
+    before reaching the first `_phase_snapshot` call that uses
+    `_client_for`. Job #2 was the first one to clear precheck.
+    """
+    from app.core.command_proxy.builder import build_client_with_fallback  # noqa: PLC0415
+
+    client, _route = build_client_with_fallback(db, device)
+    return client
 
 
 def _is_already_at_target(device: Device, target_version: str) -> bool:
@@ -928,7 +948,7 @@ def reconcile_markers_with_device_state(
         probed = False
         # Local import to keep the top-of-file import list focused.
         from app.upgrade.services import precheck as precheck_svc  # noqa: PLC0415
-        precheck_svc.probe_device(db, device, client=_client_for(device))
+        precheck_svc.probe_device(db, device, client=_client_for(db, device))
         db.refresh(device)
         probed = True
     except Exception as exc:  # noqa: BLE001
@@ -1056,7 +1076,7 @@ def _wait_for_ha_subsystem_ready(
     last_state = None
     while time.monotonic() < deadline:
         try:
-            client = _client_for(device)
+            client = _client_for(db, device)
             info = client.get_system_info()
             state = (info.ha_state or "").lower().strip()
             if state and state != "initial":
@@ -1088,7 +1108,7 @@ def _ha_op_with_retry(
     last_exc: Exception | None = None
     for attempt in range(1, HA_OP_RETRIES + 1):
         try:
-            client = _client_for(device)  # fresh socket each attempt
+            client = _client_for(db, device)  # fresh socket each attempt
             op_fn(client)
             if attempt > 1:
                 _record(db, task, f"{op_name} succeeded on attempt {attempt}")
@@ -1139,7 +1159,7 @@ def _verify_resume_took_effect(
         last_seen = "unknown"
         while time.monotonic() < deadline:
             try:
-                info = _client_for(device).get_system_info()
+                info = _client_for(db, device).get_system_info()
                 state = (info.ha_state or "").lower().strip()
                 last_seen = state or "unknown"
                 if state and state != "suspended":
@@ -1280,7 +1300,7 @@ def _format_passive_timeout_message(
         peer = db.get(Device, device.ha_peer_id)
         if peer is not None:
             try:
-                peer_client = _client_for(peer)
+                peer_client = _client_for(db, peer)
                 peer_info = peer_client.get_system_info()
                 peer.ha_state = peer_info.ha_state
                 peer.current_version = peer_info.sw_version or peer.current_version

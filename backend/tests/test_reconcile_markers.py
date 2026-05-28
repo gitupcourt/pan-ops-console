@@ -77,7 +77,7 @@ def stub_probe_and_client(monkeypatch):
         we substitute a no-op directly on the loaded module."""
     from app.upgrade.services import precheck as real_precheck  # noqa: PLC0415
 
-    monkeypatch.setattr(upgrade_svc, "_client_for", lambda d: MagicMock())
+    monkeypatch.setattr(upgrade_svc, "_client_for", lambda db, d: MagicMock())
     monkeypatch.setattr(real_precheck, "probe_device", lambda *a, **kw: None)
     yield
 

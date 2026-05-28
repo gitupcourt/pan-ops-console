@@ -4,6 +4,7 @@ import { NavLink, useParams } from "react-router-dom";
 
 import {
   api,
+  JobState,
   PrecheckSummary,
   TaskPhase,
   UpgradeJobDetail,
@@ -83,7 +84,7 @@ export default function JobDetail() {
           title="Tasks"
           description="One row per device. HA-paired devices share a pair key and upgrade in sequence."
         />
-        <TaskList tasks={job.tasks} />
+        <TaskList tasks={job.tasks} jobState={job.state} />
       </Card>
     </div>
   );
@@ -269,7 +270,13 @@ function yesNo(b: boolean): string {
   return b ? "Yes" : "No";
 }
 
-function TaskList({ tasks }: { tasks: UpgradeTask[] }) {
+function TaskList({
+  tasks,
+  jobState,
+}: {
+  tasks: UpgradeTask[];
+  jobState: JobState;
+}) {
   // Group by ha_pair_key so paired devices render together.
   const grouped = new Map<string, UpgradeTask[]>();
   for (const t of tasks) {
@@ -301,6 +308,7 @@ function TaskList({ tasks }: { tasks: UpgradeTask[] }) {
               pairKey={key}
               isPairLead={idx === 0 && pair.length > 1}
               isPaired={pair.length > 1}
+              jobState={jobState}
             />
           )),
         )}
@@ -314,11 +322,13 @@ function TaskRow({
   pairKey,
   isPairLead,
   isPaired,
+  jobState,
 }: {
   task: UpgradeTask;
   pairKey: string;
   isPairLead: boolean;
   isPaired: boolean;
+  jobState: JobState;
 }) {
   // Auto-expand parked rows + failed rows — operator needs to see
   // what's blocked or what went wrong without an extra click. They
@@ -364,7 +374,7 @@ function TaskRow({
           {relTime(t.updated_at)}
         </td>
         <td className="px-4 py-2">
-          <TaskActionButtons task={t} />
+          <TaskActionButtons task={t} jobState={jobState} />
         </td>
       </tr>
       {expanded && (
@@ -714,7 +724,20 @@ const PARKED_OVERRIDE: TaskPhase[] = [
   "awaiting_postcheck_override",
 ];
 
-function TaskActionButtons({ task }: { task: UpgradeTask }) {
+const TERMINAL_JOB_STATES: JobState[] = ["completed", "failed", "aborted"];
+
+function TaskActionButtons({
+  task,
+  jobState,
+}: {
+  task: UpgradeTask;
+  jobState: JobState;
+}) {
+  // Hooks declared BEFORE the conditional return so the rules-of-hooks
+  // invariant holds: every render call hits the same hook sequence.
+  // (React Query's useMutation registers an effect; bailing early
+  // before declaring them would change the hook count between renders
+  // and trigger a warning.)
   const qc = useQueryClient();
   // `await` so `isPending` remains true through the refetch — gives
   // the operator a visible "still working" window between clicking
@@ -741,6 +764,24 @@ function TaskActionButtons({ task }: { task: UpgradeTask }) {
     mutationFn: () => api.retryUpgradeTask(task.id),
     onSuccess: invalidate,
   });
+
+  // If the job itself is terminal, the orchestrator won't act on any
+  // click — `drive_pair` short-circuits on terminal-job state. Render
+  // a placeholder so the operator doesn't get stuck pressing buttons
+  // that silently no-op. We hit this on Job #1 when the worker pod
+  // restarted while a task was parked at AWAITING_PRECHECK_OVERRIDE:
+  // job went FAILED, task stayed parked, buttons looked actionable
+  // but every click was swallowed.
+  if (TERMINAL_JOB_STATES.includes(jobState)) {
+    return (
+      <span
+        className="text-[11px] text-zinc-500 italic"
+        title={`Job is ${jobState}. Delete this job and start a new one to act on this device.`}
+      >
+        Job {jobState} — no actions
+      </span>
+    );
+  }
 
   if (PARKED_CONFIRM.includes(task.phase)) {
     return (

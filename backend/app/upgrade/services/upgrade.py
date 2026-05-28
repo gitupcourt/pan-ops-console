@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.command_proxy.pan_client import PanDeviceClient
 from app.core.devices.models.device import Device
@@ -858,12 +859,24 @@ def _phase_already_done(task: DeviceUpgradeTask, marker: str) -> bool:
 
 
 def _mark_phase_done(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
+    """Persist a completion marker so Retry can resume past this phase.
+
+    The `flag_modified` call is load-bearing: `task.progress` is a plain
+    `mapped_column(JSON)` (no MutableDict), so mutating the dict in
+    place + re-assigning the same reference doesn't reliably mark the
+    column dirty. Without `flag_modified`, `db.commit()` may silently
+    skip the UPDATE — and then `_phase_already_done` returns False on
+    the next entry, re-running the phase. We hit this in production:
+    branch1fw02's task advanced phases but `completed_phases` stayed
+    empty in the DB row.
+    """
     progress = task.progress or {}
     completed = list(progress.get("completed_phases", []))
     if marker not in completed:
         completed.append(marker)
         progress["completed_phases"] = completed
         task.progress = progress
+        flag_modified(task, "progress")
         db.commit()
 
 
@@ -877,6 +890,7 @@ def _unmark_phase(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
         completed.remove(marker)
         progress["completed_phases"] = completed
         task.progress = progress
+        flag_modified(task, "progress")
         db.commit()
 
 

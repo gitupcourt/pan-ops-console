@@ -30,7 +30,8 @@ from app.core.devices.models.device import Device
 from app.core.panorama.models.panorama import Panorama
 
 
-KEY = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
+# Fresh key per test run; no key value lives in this repo.
+KEY = Fernet.generate_key().decode("ascii")
 
 
 def _seed_panorama(db, name: str = "pano1") -> Panorama:

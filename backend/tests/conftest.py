@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from cryptography.fernet import Fernet
 
 # Set required env vars BEFORE the first `from app...` import anywhere.
 # pytest discovers test files alphabetically and may import modules
@@ -34,9 +35,10 @@ if _TEST_DB.exists():
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
 os.environ.setdefault(
     "FERNET_KEY",
-    # Generated once for the test suite — deterministic so two runs
-    # don't drift, but NOT used anywhere outside tests.
-    "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs=",
+    # Fresh key per test-suite run; CI's $GITHUB_ENV already sets one before
+    # we reach here, so this setdefault is the local-dev fallback. No key
+    # value lives in this repo.
+    Fernet.generate_key().decode("ascii"),
 )
 os.environ.setdefault("CATALOG_PATH", str(Path(__file__).parent / "fake_metrics.yaml"))
 # Insecure cookie attribute for tests (no HTTPS in the TestClient transport)

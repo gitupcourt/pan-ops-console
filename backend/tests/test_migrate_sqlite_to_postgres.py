@@ -27,8 +27,11 @@ from scripts.migrate_sqlite_to_postgres import (
     migrate,
 )
 
-KEY_A = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
-KEY_B = "aFKkQ2GfQEJDxKjPYsbnNg-LeFRSnB-DcdsdJZ3lGtY="
+# Two distinct keys, generated fresh per test run. Used to exercise the
+# migration's encrypted-blob rotation: rows encrypted under KEY_A in the
+# source DB must end up encrypted under KEY_B in the dest.
+KEY_A = Fernet.generate_key().decode("ascii")
+KEY_B = Fernet.generate_key().decode("ascii")
 
 
 @pytest.fixture

@@ -47,13 +47,11 @@ jobs:
       - name: Run pytest
         working-directory: backend
         env:
-          # app.config validates both keys at import time (Field(...,
-          # min_length=32)). Tests don't actually use these — they're
-          # consumed only when something tries to encrypt/decrypt creds
-          # or sign a JWT, neither of which happens in the current test
-          # suite — but module-level validation fires before any fixture
-          # has a chance to substitute.
-          FERNET_KEY: "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
+          # NOTE: This workflow is archival subtree material under _inbox/upgrader/
+          # and is not executed. The live workflow at .github/workflows/ci.yml
+          # generates an ephemeral Fernet key at job start. If you ever resurrect
+          # this file, mirror that pattern instead of hardcoding a key here.
+          FERNET_KEY: "<archived-placeholder-generate-ephemerally-if-resurrected>"
           SECRET_KEY: "ci-throwaway-secret-key-32chars-min-aaaaaaaaa"
         run: pytest
 

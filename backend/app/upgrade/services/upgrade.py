@@ -335,7 +335,7 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
             _fail_job(db, job.id, f"Pre-check failed for {device.name}")
             return False
 
-        progress = task.progress or {}
+        progress = dict(task.progress or {})
         progress["precheck_run_id"] = run.id
         progress["precheck_overall"] = run.overall_severity.value
         task.progress = progress
@@ -410,7 +410,7 @@ def _phase_snapshot(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
             f"Pre-upgrade snapshot captured (areas: {', '.join(sorted(snap.data.keys()))})",
         )
 
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     progress["pre_snapshot_id"] = snap.id
     task.progress = progress
     db.commit()
@@ -444,7 +444,7 @@ def _phase_post_snapshot_and_diff(
     else:
         _record(db, task, f"Post-upgrade snapshot captured")
 
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     progress["post_snapshot_id"] = post.id
 
     pre_id = (task.progress or {}).get("pre_snapshot_id")
@@ -732,7 +732,7 @@ def _phase_postcheck(
             _fail_job(db, job.id, f"Post-check failed for {device.name}")
             return False
 
-        progress = task.progress or {}
+        progress = dict(task.progress or {})
         progress["postcheck_run_id"] = run.id
         progress["postcheck_overall"] = run.overall_severity.value
         task.progress = progress
@@ -880,15 +880,20 @@ def _phase_already_done(task: DeviceUpgradeTask, marker: str) -> bool:
 def _mark_phase_done(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
     """Persist a completion marker so Retry can resume past this phase.
 
-    Relies on `task.progress` being wrapped with
-    `MutableDict.as_mutable(JSON)` at the model level — that's what
-    makes mutations to the dict (in place OR via reassignment) mark
-    the column dirty. Without that wrapper, the orchestrator's
-    "read dict, mutate, reassign same ref" pattern silently no-ops
-    half the time. We hit this in production: branch1fw02's task
-    advanced phases but `completed_phases` stayed empty in the DB.
+    Uses the dict-copy + reassign pattern: `dict(task.progress or {})`
+    creates a fresh plain dict, mutations happen locally, then we set
+    `task.progress = progress` to a NEW reference so SQLAlchemy's
+    change detection sees a dirty attribute on the next commit.
+
+    Why the copy: the orchestrator commits between mutations in
+    places like `_phase_post_snapshot_and_diff` (snapshot_svc.compare
+    commits internally). A previous attempt at
+    `MutableDict.as_mutable(JSON)` on the column blew up there —
+    MutableDict's `flag_modified` raised `InvalidRequestError: not
+    present in the object state` against the expired-by-commit
+    attribute. Plain JSON + dict copy sidesteps the whole class of bug.
     """
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     completed = list(progress.get("completed_phases", []))
     if marker not in completed:
         completed.append(marker)
@@ -901,7 +906,7 @@ def _unmark_phase(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
     """Remove a phase-completion marker. Used by state reconciliation when
     we observe the device hasn't actually completed the phase the marker
     claims. Idempotent — no-op if the marker wasn't set."""
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     completed = list(progress.get("completed_phases", []))
     if marker in completed:
         completed.remove(marker)
@@ -1255,7 +1260,7 @@ def _wait_for_passive(
 
     # Stash the diagnostic context on task.progress so the failure handler
     # (and the UI) can render a much more useful error than just "timed out."
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     progress["wait_for_passive_diagnostics"] = {
         "last_state": last_state or "unknown",
         "states_seen": states_seen,
@@ -1378,7 +1383,7 @@ def _set_job_progress(db: Session, task: DeviceUpgradeTask, key: str, percent) -
         new_pct = int(percent)
     except (TypeError, ValueError):
         return
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     if progress.get(key) == new_pct:
         return
     progress[key] = new_pct
@@ -1513,7 +1518,7 @@ def _set_phase(db: Session, task: DeviceUpgradeTask, phase: TaskPhase) -> None:
 
 def _record(db: Session, task: DeviceUpgradeTask, message: str, *, phase: TaskPhase | None = None) -> None:
     """Append a timestamped line to task.progress.log and optionally set phase + error."""
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     log_lines = progress.get("log") or []
     log_lines.append(f"{_now_iso()} {message}")
     progress["log"] = log_lines

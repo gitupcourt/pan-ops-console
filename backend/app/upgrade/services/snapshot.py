@@ -111,10 +111,31 @@ def compare(
         )
         return None
 
+    # Compare ONLY the areas captured in both snapshots.
+    #
+    # `compare_snapshots(reports=None)` does NOT mean "every area present
+    # in both snapshots" — that was a wrong assumption. The library
+    # expands a None `reports` to its full built-in report list (nics,
+    # routes, license, …, plus areas we never capture like
+    # `global_jumbo_frame` and `fib_routes`). It then raises
+    # MissingKeyException on the first unknown area ("global_jumbo_frame
+    # (some elements if set/list) is missing in both snapshots") and the
+    # whole diff is lost. Passing the explicit intersection of captured
+    # areas keeps the comparison scoped to what we actually have, and is
+    # also robust to a left/right pair captured with different area sets
+    # (e.g. an ad-hoc snapshot with a custom list).
+    areas_to_compare = sorted(set(left.data.keys()) & set(right.data.keys()))
+    if not areas_to_compare:
+        log.info(
+            "Skipping snapshot diff (left=%s right=%s): no overlapping areas",
+            left.id, right.id,
+        )
+        return None
+
     try:
-        # SnapshotCompare needs the two dicts; `reports=None` means "every
-        # area present in both snapshots, default comparison rules."
-        report = SnapshotCompare(left.data, right.data).compare_snapshots()
+        report = SnapshotCompare(left.data, right.data).compare_snapshots(
+            reports=areas_to_compare
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("Snapshot compare failed: %s", exc)
         # Persist the failure so the UI doesn't silently miss the diff.

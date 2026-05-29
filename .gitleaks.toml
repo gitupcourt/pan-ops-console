@@ -1,0 +1,39 @@
+# gitleaks config for pan-ops-console.
+#
+# Used by the `secrets` job in .github/workflows/security.yml and by any
+# local/out-of-band gitleaks run. Extends the upstream default ruleset and
+# adds a tight, value-free allowlist.
+#
+# DISCIPLINE: this file never contains a secret value, not even a
+# known-dead test fixture. Allowlisting is by path or by structural rule —
+# never by pasting the secret. (See gitupcourt/homelab incident registry
+# for why: every committed secret value, even a rotated one, is recon.)
+
+title = "pan-ops-console gitleaks config"
+
+[extend]
+# Inherit gitleaks' built-in rules (AWS, GCP, GitHub, Stripe, private keys,
+# JWTs, generic high-entropy, etc.). We only add allowlisting on top.
+useDefault = true
+
+[allowlist]
+description = "Known-safe paths — lockfiles and archival subtree"
+# Lockfiles are full of high-entropy integrity hashes that trip the generic
+# entropy rule but are not secrets.
+paths = [
+  '''package-lock\.json''',
+  '''.*\.lock$''',
+  # Archival subtree carried in from the pan-fw-upgrader merge. Not built,
+  # not run; the one hot literal it held was neutralized to a placeholder.
+  # Its eventual removal is a dev-session call. Until then, don't let it
+  # generate noise in the PR-scoped gate.
+  '''_inbox/.*''',
+]
+
+# NOTE on test-fixture Fernet keys:
+# Earlier commits hardcoded test Fernet keys in ci.yml + backend/tests/*.
+# Those are being removed in PR #91 (ephemeral generation). They are NOT
+# allowlisted here by value — the security.yml `secrets` job scans only the
+# PR's *new* commit range, so a key already living on main is never re-flagged
+# by a later PR. If you run a full-history gitleaks sweep manually you'll see
+# them in pre-#91 history; that's expected and tracked, not a new leak.

@@ -1,0 +1,50 @@
+# Dependabot — automated dependency update PRs.
+#
+# Part of Phase 2 (gitupcourt/homelab#118). Pairs with the security.yml
+# dependency-audit jobs: pip-audit/npm audit tell us when something is
+# vulnerable; Dependabot opens the PR that fixes it.
+#
+# Grouped minor+patch updates to keep PR volume sane on a solo-operated
+# project — majors come as individual PRs (they're likelier to break and
+# deserve individual review).
+
+version: 2
+updates:
+  # --- Python backend ---
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      python-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # --- React frontend ---
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # --- GitHub Actions (pin/refresh action versions) ---
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"

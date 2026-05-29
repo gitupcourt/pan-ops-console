@@ -36,6 +36,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, model_validator
 
 from app.upgrade.models.enums import JobState, TaskPhase, WorkflowType
+from app.upgrade.models.snapshot import SnapshotKind
 
 
 # ---------- Images ----------
@@ -143,6 +144,16 @@ class TaskRead(BaseModel):
     # Latest PrecheckRun for this task's device, or null if the
     # orchestrator hasn't run one for this task yet.
     precheck: PrecheckSummary | None
+    # Snapshot + diff IDs surfaced here so the UI can render
+    # "View pre / View post / Compare" buttons without scraping
+    # `progress`. Mirrors keys the orchestrator writes into
+    # `progress.pre_snapshot_id` / `post_snapshot_id` /
+    # `snapshot_diff_id` — kept in sync via `_task_to_read`.
+    pre_snapshot_id: int | None = None
+    post_snapshot_id: int | None = None
+    snapshot_diff_id: int | None = None
+    snapshot_diff_all_passed: bool | None = None
+    snapshot_diff_failing_areas: list[str] | None = None
 
     model_config = {"from_attributes": True}
 
@@ -279,5 +290,63 @@ class JobDetail(JobRead):
     auto_ack_postcheck_failures: bool
 
     tasks: list[TaskRead]
+
+    model_config = {"from_attributes": True}
+
+
+# ---------- Snapshots ----------
+
+
+class SnapshotRead(BaseModel):
+    """A single captured device-state snapshot, including the full
+    per-area `data` blob. Returned by GET /upgrade/snapshots/{id}.
+
+    The blob is whatever panos-upgrade-assurance's snapshot runner
+    captured for the configured areas (arp_table, content_version,
+    ip_sec_tunnels, license, nics, routes, session_stats, etc.).
+    Schema per area varies — the UI renders generically.
+    """
+
+    id: int
+    device_id: int
+    device_name: str
+    task_id: int | None
+    kind: SnapshotKind
+    taken_at: datetime
+    pan_os_version: str | None
+    error: str | None
+    # The full per-area data blob. Can be sizable; the UI renders area-by-area.
+    data: dict
+
+    model_config = {"from_attributes": True}
+
+
+class SnapshotDiffRead(BaseModel):
+    """The compare report between two snapshots, plus the IDs of both
+    sides and a rolled-up pass/fail flag. Returned by
+    GET /upgrade/snapshot-diffs/{id}.
+
+    `report` shape per area:
+        {area: {"passed": bool, "added": [...], "missing": [...],
+                "changed": {...}}}
+    where `added` and `missing` are lists of identifying tuples and
+    `changed` is a per-row before/after map. UI is expected to
+    collapse passing areas by default and highlight failing ones.
+    """
+
+    id: int
+    left_snapshot_id: int
+    right_snapshot_id: int
+    task_id: int | None
+    computed_at: datetime
+    all_passed: bool
+    # Comma-joined area list from the model; the UI splits on `,`.
+    failing_areas: str | None
+    report: dict
+    # PAN-OS versions on each side, denormalized for the diff header
+    # ("10.2.0 → 11.2.7-h15"). Null when the underlying snapshot row
+    # didn't carry a version (rare — usually only on capture-failure rows).
+    left_version: str | None
+    right_version: str | None
 
     model_config = {"from_attributes": True}

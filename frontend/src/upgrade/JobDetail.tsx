@@ -1,11 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useState } from "react";
+import { Fragment, ReactNode, useState } from "react";
 import { NavLink, useParams } from "react-router-dom";
 
 import {
   api,
   JobState,
   PrecheckSummary,
+  SnapshotDiff,
+  SnapshotDiffAreaReport,
   TaskPhase,
   UpgradeJobDetail,
   UpgradeTask,
@@ -423,6 +425,8 @@ function TaskExpandedDetail({ task: t }: { task: UpgradeTask }) {
       )}
 
       {t.precheck && <PrecheckResultsTable precheck={t.precheck} />}
+
+      <SnapshotsSection task={t} />
 
       {log.length > 0 && (
         <div>
@@ -876,4 +880,431 @@ function relTime(iso: string): string {
   const hr = Math.floor(min / 60);
   if (hr < 48) return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+// ============================================================
+// Snapshots: View pre / View post / Compare diff
+// ============================================================
+
+/**
+ * Section rendered in TaskExpandedDetail when the task has snapshot
+ * data. Surfaces three actions: View Pre, View Post, Compare Diff.
+ * Each opens a side-panel overlay; only one is open at a time.
+ *
+ * Renders nothing when the task has no snapshot ids — keeps the
+ * expanded panel quiet for pending / pre-snapshot tasks.
+ */
+function SnapshotsSection({ task: t }: { task: UpgradeTask }) {
+  const [open, setOpen] = useState<
+    | { kind: "snapshot"; id: number; label: string }
+    | { kind: "diff"; id: number }
+    | null
+  >(null);
+
+  if (
+    t.pre_snapshot_id == null &&
+    t.post_snapshot_id == null &&
+    t.snapshot_diff_id == null
+  ) {
+    return null;
+  }
+
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1">
+        Snapshots
+      </div>
+      <div className="flex flex-wrap gap-2 text-[11px]">
+        {t.pre_snapshot_id != null && (
+          <Button
+            onClick={() =>
+              setOpen({
+                kind: "snapshot",
+                id: t.pre_snapshot_id!,
+                label: "Pre-upgrade",
+              })
+            }
+          >
+            View pre
+          </Button>
+        )}
+        {t.post_snapshot_id != null && (
+          <Button
+            onClick={() =>
+              setOpen({
+                kind: "snapshot",
+                id: t.post_snapshot_id!,
+                label: "Post-upgrade",
+              })
+            }
+          >
+            View post
+          </Button>
+        )}
+        {t.snapshot_diff_id != null && (
+          <Button
+            variant={t.snapshot_diff_all_passed ? "default" : "danger"}
+            onClick={() =>
+              setOpen({ kind: "diff", id: t.snapshot_diff_id! })
+            }
+            title={
+              t.snapshot_diff_all_passed
+                ? "All snapshot areas match between pre and post."
+                : "Some areas changed between pre and post — click to review."
+            }
+          >
+            Compare diff
+            {t.snapshot_diff_all_passed === true && " ✓"}
+            {t.snapshot_diff_all_passed === false &&
+              t.snapshot_diff_failing_areas &&
+              t.snapshot_diff_failing_areas.length > 0 && (
+                <span className="ml-1 text-rose-300">
+                  ⚠ {t.snapshot_diff_failing_areas.length}
+                </span>
+              )}
+          </Button>
+        )}
+      </div>
+
+      {open?.kind === "snapshot" && (
+        <SnapshotSidePanel
+          snapshotId={open.id}
+          label={open.label}
+          onClose={() => setOpen(null)}
+        />
+      )}
+      {open?.kind === "diff" && (
+        <SnapshotDiffSidePanel
+          diffId={open.id}
+          onClose={() => setOpen(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Modal-style side panel — fixed right slab, click backdrop to close.
+ * Used for both snapshot and diff views; shared shell to keep the
+ * behavior identical regardless of payload kind.
+ */
+function SidePanelShell({
+  title,
+  subtitle,
+  onClose,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-3xl h-full bg-zinc-950 border-l border-zinc-800 overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 bg-zinc-950 border-b border-zinc-800 px-4 py-3 flex items-start justify-between">
+          <div>
+            <div className="text-sm font-semibold text-zinc-100">{title}</div>
+            {subtitle && (
+              <div className="text-[11px] text-zinc-500 mt-0.5">{subtitle}</div>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            className="text-zinc-500 hover:text-zinc-200 text-sm"
+            aria-label="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function SnapshotSidePanel({
+  snapshotId,
+  label,
+  onClose,
+}: {
+  snapshotId: number;
+  label: string;
+  onClose: () => void;
+}) {
+  const q = useQuery({
+    queryKey: ["snapshot", snapshotId],
+    queryFn: () => api.getSnapshot(snapshotId),
+  });
+
+  const snap = q.data;
+  const subtitle = snap
+    ? `${snap.device_name} · ${snap.pan_os_version ?? "unknown version"} · ${fmtTime(
+        snap.taken_at,
+      )}`
+    : "Loading…";
+
+  return (
+    <SidePanelShell
+      title={`${label} snapshot`}
+      subtitle={subtitle}
+      onClose={onClose}
+    >
+      {q.isLoading && (
+        <div className="text-xs text-zinc-500">Loading snapshot…</div>
+      )}
+      {q.error && (
+        <div className="text-xs text-rose-400">
+          Failed to load snapshot: {(q.error as Error).message}
+        </div>
+      )}
+      {snap && snap.error && (
+        <div className="text-xs p-2 rounded bg-rose-950/40 border border-rose-900/40 text-rose-300 mb-3">
+          Capture errored: <span className="font-mono">{snap.error}</span>
+        </div>
+      )}
+      {snap && Object.keys(snap.data).length === 0 && (
+        <div className="text-xs text-zinc-500 italic">
+          No areas captured (the snapshot row exists but the
+          panos-upgrade-assurance runner returned no data — usually
+          because the device was unreachable at capture time).
+        </div>
+      )}
+      {snap && (
+        <div className="space-y-2">
+          {Object.entries(snap.data).map(([area, payload]) => (
+            <AreaAccordion key={area} title={area} initiallyOpen={false}>
+              <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap break-all font-mono">
+                {jsonPretty(payload)}
+              </pre>
+            </AreaAccordion>
+          ))}
+        </div>
+      )}
+    </SidePanelShell>
+  );
+}
+
+function SnapshotDiffSidePanel({
+  diffId,
+  onClose,
+}: {
+  diffId: number;
+  onClose: () => void;
+}) {
+  const q = useQuery({
+    queryKey: ["snapshot-diff", diffId],
+    queryFn: () => api.getSnapshotDiff(diffId),
+  });
+
+  const diff = q.data;
+  const subtitle = diff
+    ? `${diff.left_version ?? "?"} → ${diff.right_version ?? "?"} · ${fmtTime(
+        diff.computed_at,
+      )}`
+    : "Loading…";
+
+  return (
+    <SidePanelShell
+      title="Snapshot diff"
+      subtitle={subtitle}
+      onClose={onClose}
+    >
+      {q.isLoading && (
+        <div className="text-xs text-zinc-500">Loading diff…</div>
+      )}
+      {q.error && (
+        <div className="text-xs text-rose-400">
+          Failed to load diff: {(q.error as Error).message}
+        </div>
+      )}
+      {diff && <DiffReport diff={diff} />}
+    </SidePanelShell>
+  );
+}
+
+function DiffReport({ diff }: { diff: SnapshotDiff }) {
+  // Headline summary then per-area accordion. Failing areas open by
+  // default — operator's eyes go there first.
+  const areas = Object.entries(diff.report);
+  const failing = areas.filter(([, a]) => !a.passed);
+  const passing = areas.filter(([, a]) => a.passed);
+
+  return (
+    <div className="space-y-3 text-xs">
+      <div
+        className={`px-3 py-2 rounded border ${
+          diff.all_passed
+            ? "bg-emerald-950/40 border-emerald-900/40 text-emerald-200"
+            : "bg-amber-950/40 border-amber-900/40 text-amber-200"
+        }`}
+      >
+        {diff.all_passed ? (
+          <strong>All {areas.length} areas match.</strong>
+        ) : (
+          <>
+            <strong>
+              {failing.length} of {areas.length} areas changed.
+            </strong>{" "}
+            Review each below and decide whether the change is expected for
+            this upgrade (license bumps and content-DB updates usually are;
+            session-table drift across a reboot is normal; routing table
+            drift is worth a closer look).
+          </>
+        )}
+      </div>
+
+      {failing.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-amber-400/80">
+            Changed
+          </div>
+          {failing.map(([area, report]) => (
+            <DiffAreaAccordion key={area} area={area} report={report} startOpen />
+          ))}
+        </div>
+      )}
+
+      {passing.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-[10px] uppercase tracking-wider text-emerald-400/80">
+            Unchanged
+          </div>
+          {passing.map(([area, report]) => (
+            <DiffAreaAccordion
+              key={area}
+              area={area}
+              report={report}
+              startOpen={false}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiffAreaAccordion({
+  area,
+  report,
+  startOpen,
+}: {
+  area: string;
+  report: SnapshotDiffAreaReport;
+  startOpen: boolean;
+}) {
+  const addedCount = Array.isArray(report.added) ? report.added.length : 0;
+  const missingCount = Array.isArray(report.missing) ? report.missing.length : 0;
+  const changedCount =
+    report.changed && typeof report.changed === "object"
+      ? Object.keys(report.changed).length
+      : 0;
+  const summary = report.passed
+    ? "no change"
+    : [
+        addedCount && `${addedCount} added`,
+        missingCount && `${missingCount} removed`,
+        changedCount && `${changedCount} modified`,
+      ]
+        .filter(Boolean)
+        .join(", ") || "see details";
+
+  return (
+    <AreaAccordion
+      title={area}
+      titleSuffix={
+        <span
+          className={`text-[10px] uppercase tracking-wider ${
+            report.passed ? "text-emerald-400/80" : "text-amber-400/80"
+          }`}
+        >
+          {summary}
+        </span>
+      }
+      initiallyOpen={startOpen}
+    >
+      <div className="space-y-2">
+        {addedCount > 0 && (
+          <div>
+            <div className="text-[10px] uppercase text-emerald-400/80 mb-1">
+              + Added ({addedCount})
+            </div>
+            <pre className="text-[11px] text-emerald-200 whitespace-pre-wrap break-all font-mono">
+              {jsonPretty(report.added)}
+            </pre>
+          </div>
+        )}
+        {missingCount > 0 && (
+          <div>
+            <div className="text-[10px] uppercase text-rose-400/80 mb-1">
+              − Removed ({missingCount})
+            </div>
+            <pre className="text-[11px] text-rose-200 whitespace-pre-wrap break-all font-mono">
+              {jsonPretty(report.missing)}
+            </pre>
+          </div>
+        )}
+        {changedCount > 0 && (
+          <div>
+            <div className="text-[10px] uppercase text-amber-400/80 mb-1">
+              ~ Modified ({changedCount})
+            </div>
+            <pre className="text-[11px] text-amber-200 whitespace-pre-wrap break-all font-mono">
+              {jsonPretty(report.changed)}
+            </pre>
+          </div>
+        )}
+        {report.passed && (
+          <div className="text-[11px] text-emerald-300 italic">
+            All items match between the two snapshots.
+          </div>
+        )}
+      </div>
+    </AreaAccordion>
+  );
+}
+
+function AreaAccordion({
+  title,
+  titleSuffix,
+  initiallyOpen,
+  children,
+}: {
+  title: string;
+  titleSuffix?: ReactNode;
+  initiallyOpen: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
+  return (
+    <div className="border border-zinc-800/60 rounded">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between px-2 py-1.5 text-left hover:bg-zinc-900/60"
+      >
+        <span className="flex items-center gap-2">
+          <span className="text-zinc-500">{open ? "▾" : "▸"}</span>
+          <span className="font-mono text-zinc-200 text-[11px]">{title}</span>
+        </span>
+        {titleSuffix}
+      </button>
+      {open && (
+        <div className="px-3 py-2 border-t border-zinc-800/60">{children}</div>
+      )}
+    </div>
+  );
+}
+
+function jsonPretty(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }

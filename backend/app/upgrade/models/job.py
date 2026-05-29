@@ -24,7 +24,6 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db_types import py_enum_column
@@ -158,16 +157,20 @@ class DeviceUpgradeTask(Base):
     # MIGRATION_NOTES §3.3: this is load-bearing state, not just
     # observability. The orchestrator's "Retry == resume" property
     # depends on `progress.completed_phases` markers.
-    # MutableDict.as_mutable(JSON) wraps the column type so SQLAlchemy
-    # detects in-place dict mutations (progress["foo"] = bar). Without
-    # this wrapper, the orchestrator's "read dict, mutate, assign same
-    # reference back" pattern silently no-ops half the time — we hit
-    # this in production where completed_phases stayed empty even after
-    # phases finished. With MutableDict, both in-place mutation and
-    # attribute reassignment mark the column dirty.
-    progress: Mapped[dict | None] = mapped_column(
-        MutableDict.as_mutable(JSON), nullable=True
-    )
+    # Plain JSON column — NOT wrapped with MutableDict.as_mutable().
+    # MutableDict was tried in PR #89 but caused crashes when any code
+    # path committed between two dict mutations (e.g.
+    # _phase_post_snapshot_and_diff: snapshot_svc.compare() commits
+    # internally, expiring task.progress, then the next mutation hit
+    # `InvalidRequestError: Can't flag attribute 'progress' modified;
+    # it's not present in the object state`).
+    #
+    # Discipline for all callers: mutate via a fresh dict copy and
+    # reassign — `progress = dict(task.progress or {})`,  then
+    # `task.progress = progress` before commit. The new-reference
+    # assignment is what SA's change detection actually needs; in-place
+    # mutation of the loaded dict alone is not enough.
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # When phase is awaiting_*_confirm, this task blocks until a user

@@ -6,7 +6,6 @@ import {
   api,
   JobState,
   PrecheckSummary,
-  Snapshot,
   SnapshotDiff,
   SnapshotDiffAreaReport,
   TaskPhase,

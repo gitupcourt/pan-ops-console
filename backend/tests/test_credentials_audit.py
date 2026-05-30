@@ -33,6 +33,12 @@ def _capture_audit():
 
     handler = _Collector()
     prev_level = logger.level
+    # Another test in the suite can leave a global `logging.disable()` set,
+    # which short-circuits Logger.info BEFORE any handler runs — that's why
+    # neither caplog nor a direct handler saw the record. Clear it for the
+    # duration and restore after.
+    prev_disable = logging.root.manager.disable
+    logging.disable(logging.NOTSET)
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     try:
@@ -40,6 +46,7 @@ def _capture_audit():
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prev_level)
+        logging.disable(prev_disable)
 
 
 def test_decrypt_key_emits_audit_event():

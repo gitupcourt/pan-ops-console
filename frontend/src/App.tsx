@@ -7,12 +7,13 @@ import CapacityTable from "./capacity/CapacityTable";
 import CapacityTrend from "./capacity/CapacityTrend";
 import Dashboard from "./capacity/Dashboard";
 import { useAuth } from "./core/auth/AuthContext";
-import AuthenticationLayout from "./core/auth/AuthenticationLayout";
 import Bootstrap from "./core/auth/Bootstrap";
 import Login from "./core/auth/Login";
 import Profile from "./core/auth/Profile";
 import Providers from "./core/auth/Providers";
 import Users from "./core/auth/Users";
+import PollingSettings from "./core/settings/PollingSettings";
+import SettingsLayout from "./core/settings/SettingsLayout";
 import { GlobalSearch } from "./core/devices/GlobalSearch";
 import Inventory from "./core/devices/Inventory";
 import HomeDashboard from "./HomeDashboard";
@@ -57,9 +58,7 @@ export default function App() {
               <NavTab to="/capacity">Capacity</NavTab>
               <NavTab to="/upgrade">Jobs</NavTab>
               <NavTab to="/inventory">Inventory</NavTab>
-              {user.is_admin && (
-                <NavTab to="/authentication">Authentication</NavTab>
-              )}
+              {user.is_admin && <NavTab to="/settings">Settings</NavTab>}
             </nav>
             <div className="ml-auto flex items-center gap-4">
               <GlobalSearch />
@@ -99,29 +98,43 @@ export default function App() {
                 don't churn. */}
             <Route path="/upgrade" element={<UpgradeJobs />} />
             <Route path="/upgrade/jobs/:jobId" element={<JobDetail />} />
-            <Route path="/upgrade/precheck-sets" element={<PrecheckSets />} />
-            {/* Authentication shell + nested admin sub-routes. The shell
-                renders a sub-nav (Users / Providers / future …) and the
-                active sub-route in an <Outlet />. Old /users + /providers
-                URLs redirect into the shell so existing bookmarks
-                continue to work. */}
+            {/* Settings shell (admin-only): a sub-nav over Polling,
+                Pre/post-check sets, and the auth admin (Users /
+                Providers). The active sub-route renders in an <Outlet />.
+                Old top-level URLs (/authentication, /users, /providers,
+                /upgrade/precheck-sets) redirect into here so existing
+                bookmarks keep working. */}
             <Route
-              path="/authentication"
-              element={
-                user.is_admin ? <AuthenticationLayout /> : <NotAuthorized />
-              }
+              path="/settings"
+              element={user.is_admin ? <SettingsLayout /> : <NotAuthorized />}
             >
-              <Route index element={<Navigate to="users" replace />} />
+              <Route index element={<Navigate to="polling" replace />} />
+              <Route path="polling" element={<PollingSettings />} />
+              <Route path="precheck-sets" element={<PrecheckSets />} />
               <Route path="users" element={<Users />} />
               <Route path="providers" element={<Providers />} />
             </Route>
+            {/* Back-compat redirects for the pre-Settings URLs. */}
             <Route
-              path="/users"
-              element={<Navigate to="/authentication/users" replace />}
+              path="/upgrade/precheck-sets"
+              element={<Navigate to="/settings/precheck-sets" replace />}
             />
             <Route
+              path="/authentication"
+              element={<Navigate to="/settings/users" replace />}
+            />
+            <Route
+              path="/authentication/users"
+              element={<Navigate to="/settings/users" replace />}
+            />
+            <Route
+              path="/authentication/providers"
+              element={<Navigate to="/settings/providers" replace />}
+            />
+            <Route path="/users" element={<Navigate to="/settings/users" replace />} />
+            <Route
               path="/providers"
-              element={<Navigate to="/authentication/providers" replace />}
+              element={<Navigate to="/settings/providers" replace />}
             />
             <Route path="/profile" element={<Profile />} />
           </Routes>

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -338,6 +338,77 @@ function PanoramaForm({ initial, onDone }: { initial?: Panorama; onDone: () => v
 // Devices
 // =====================================================================
 
+type SortKey =
+  | "name"
+  | "host"
+  | "serial"
+  | "model"
+  | "group"
+  | "template"
+  | "polling"
+  | "last_poll";
+
+// Comparable value per sort key. Strings lower-cased for case-insensitive
+// ordering; nulls sort last by mapping to a high/low sentinel.
+function sortValue(d: Device, key: SortKey): string | number {
+  switch (key) {
+    case "name":
+      return (d.name || "").toLowerCase();
+    case "host":
+      return (d.ip_address || d.hostname || "").toLowerCase();
+    case "serial":
+      return (d.serial || "~").toLowerCase(); // "~" sorts after alnum
+    case "model":
+      return (d.model || "~").toLowerCase();
+    case "group":
+      return (d.device_group || "~").toLowerCase();
+    case "template":
+      return (d.template_stack || "~").toLowerCase();
+    case "polling":
+      return d.polling_enabled ? 0 : 1;
+    case "last_poll":
+      // Epoch ms; never-polled sorts last on asc.
+      return d.last_poll_at ? new Date(d.last_poll_at).getTime() : Number.MAX_SAFE_INTEGER;
+    default:
+      return "";
+  }
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  dir,
+  onClick,
+  className = "",
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey | null;
+  dir: "asc" | "desc";
+  onClick: (k: SortKey) => void;
+  className?: string;
+}) {
+  const active = activeKey === sortKey;
+  return (
+    <th className={`text-left px-4 py-2 font-medium ${className}`}>
+      <button
+        type="button"
+        onClick={() => onClick(sortKey)}
+        className={`inline-flex items-center gap-1 hover:text-zinc-200 ${
+          active ? "text-zinc-200" : ""
+        }`}
+        title={`Sort by ${label}`}
+      >
+        {label}
+        <span className="text-[9px] text-zinc-500">
+          {active ? (dir === "asc" ? "▲" : "▼") : "↕"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
 function DevicesSection() {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -357,6 +428,14 @@ function DevicesSection() {
   // pre-stage) want both halves, so default ON. Operators with a
   // genuine reason to act on one half can flip it off.
   const [groupHA, setGroupHA] = useState(true);
+  // Search + filter + sort state (phase: inventory enrich).
+  const [search, setSearch] = useState("");
+  const [filterGroup, setFilterGroup] = useState(""); // "" = all
+  const [filterTemplate, setFilterTemplate] = useState(""); // "" = all
+  // null sortKey → fall back to the HA-grouping order. Picking a column
+  // sorts by it explicitly (and HA adjacency yields to the sort).
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const test = useMutation({
     mutationFn: async (id: number) => ({ id, result: await api.testDevice(id) }),
@@ -393,20 +472,87 @@ function DevicesSection() {
 
   const devs: Device[] = devsQ.data ?? [];
 
-  // Order devices so HA peers land adjacent in the table when grouping
-  // is on. Pair key = min(id, peer_id) so both halves sort together;
-  // within a pair, lower id first (active is usually lower-id by
-  // convention but we don't depend on that — just deterministic).
-  // When grouping is off, fall back to id-asc to match the unsorted
-  // /devices response order.
-  const orderedDevs = groupHA
-    ? [...devs].sort((a, b) => {
+  // Distinct device-group / template-stack values for the filter
+  // dropdowns. Sorted, nulls excluded (a "—" device just won't match a
+  // specific filter; the "All" option covers it).
+  const groupOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(devs.map((d) => d.device_group).filter((g): g is string => !!g)),
+      ).sort(),
+    [devs],
+  );
+  const templateOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          devs.map((d) => d.template_stack).filter((t): t is string => !!t),
+        ),
+      ).sort(),
+    [devs],
+  );
+
+  // Search + filter, then order. An explicit column sort overrides the
+  // HA-adjacency ordering; with no column chosen we keep HA peers
+  // adjacent (when grouping is on) exactly as before.
+  const visibleDevs = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const matched = devs.filter((d) => {
+      if (filterGroup && d.device_group !== filterGroup) return false;
+      if (filterTemplate && d.template_stack !== filterTemplate) return false;
+      if (!q) return true;
+      const hay = [
+        d.name,
+        d.hostname,
+        d.ip_address,
+        d.serial,
+        d.device_group,
+        d.template_stack,
+        d.model,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+
+    if (sortKey) {
+      const dir = sortDir === "asc" ? 1 : -1;
+      return [...matched].sort((a, b) => {
+        const av = sortValue(a, sortKey);
+        const bv = sortValue(b, sortKey);
+        // Type-safe compare: numeric branch subtracts, string branch
+        // localeCompares. Avoids TS2365 (relational op on string|number)
+        // and gives proper locale string ordering.
+        const cmp =
+          typeof av === "number" && typeof bv === "number"
+            ? av - bv
+            : String(av).localeCompare(String(bv));
+        return cmp !== 0 ? cmp * dir : a.id - b.id;
+      });
+    }
+    if (groupHA) {
+      return [...matched].sort((a, b) => {
         const aKey = a.ha_peer_id == null ? a.id : Math.min(a.id, a.ha_peer_id);
         const bKey = b.ha_peer_id == null ? b.id : Math.min(b.id, b.ha_peer_id);
         if (aKey !== bKey) return aKey - bKey;
         return a.id - b.id;
-      })
-    : devs;
+      });
+    }
+    return matched;
+  }, [devs, search, filterGroup, filterTemplate, sortKey, sortDir, groupHA]);
+
+  // Backwards-compatible alias — the rest of the section iterates this.
+  const orderedDevs = visibleDevs;
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
 
   // Selection toggle that auto-includes the HA peer when grouping is
   // on. Used by both the per-row checkbox and the "select all" header
@@ -450,6 +596,62 @@ function DevicesSection() {
         }
       />
       {adding && <DeviceForm panos={panosQ.data ?? []} onDone={() => setAdding(false)} />}
+      {devs.length > 0 && (
+        <div className="px-4 py-3 border-b border-zinc-800 flex flex-wrap items-center gap-3 text-xs">
+          <Input
+            placeholder="Search name, IP, serial, group, template…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-72"
+          />
+          <label className="flex items-center gap-1.5 text-zinc-400">
+            <span className="text-zinc-500">Group</span>
+            <Select
+              value={filterGroup}
+              onChange={(e) => setFilterGroup(e.target.value)}
+              className="text-xs"
+            >
+              <option value="">All</option>
+              {groupOptions.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label className="flex items-center gap-1.5 text-zinc-400">
+            <span className="text-zinc-500">Template</span>
+            <Select
+              value={filterTemplate}
+              onChange={(e) => setFilterTemplate(e.target.value)}
+              className="text-xs"
+            >
+              <option value="">All</option>
+              {templateOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </Select>
+          </label>
+          {(search || filterGroup || filterTemplate || sortKey) && (
+            <button
+              onClick={() => {
+                setSearch("");
+                setFilterGroup("");
+                setFilterTemplate("");
+                setSortKey(null);
+              }}
+              className="text-zinc-500 hover:text-zinc-200"
+            >
+              reset
+            </button>
+          )}
+          <span className="text-zinc-600 ml-auto">
+            {visibleDevs.length} of {devs.length} shown
+          </span>
+        </div>
+      )}
       {selectedIds.size > 0 && (
         <div className="px-4 py-2 border-b border-zinc-800 bg-blue-950/30 flex items-center gap-3 text-xs">
           <span className="text-zinc-200">
@@ -501,16 +703,26 @@ function DevicesSection() {
                   title="Select all"
                 />
               </th>
-              <th className="text-left px-4 py-2 font-medium">Name</th>
-              <th className="text-left px-4 py-2 font-medium">Host</th>
-              <th className="text-left px-4 py-2 font-medium">Model</th>
+              <SortHeader label="Name" sortKey="name" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Host" sortKey="host" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Serial" sortKey="serial" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Model" sortKey="model" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Group" sortKey="group" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Template" sortKey="template" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
               <th className="text-left px-4 py-2 font-medium">Access</th>
-              <th className="text-left px-4 py-2 font-medium">Polling</th>
-              <th className="text-left px-4 py-2 font-medium">Last poll</th>
+              <SortHeader label="Polling" sortKey="polling" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Last poll" sortKey="last_poll" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
               <th className="px-4 py-2"></th>
             </tr>
           </thead>
           <tbody>
+            {orderedDevs.length === 0 && (
+              <tr>
+                <td colSpan={11} className="px-4 py-6 text-center text-xs text-zinc-500">
+                  No devices match the current search / filters.
+                </td>
+              </tr>
+            )}
             {orderedDevs.map((d) => {
               // HA-pair visual stitching: a thin left border on both
               // rows of a pair when grouping is on, so the eye reads
@@ -546,7 +758,22 @@ function DevicesSection() {
                     </div>
                   </td>
                   <td className="px-4 py-2 text-zinc-400">{d.ip_address ?? d.hostname}</td>
+                  <td className="px-4 py-2 text-zinc-500 text-xs font-mono">
+                    {d.serial ?? "—"}
+                  </td>
                   <td className="px-4 py-2 text-zinc-400">{d.model ?? "—"}</td>
+                  <td
+                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate"
+                    title={d.device_group ?? ""}
+                  >
+                    {d.device_group ?? "—"}
+                  </td>
+                  <td
+                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate"
+                    title={d.template_stack ?? ""}
+                  >
+                    {d.template_stack ?? "—"}
+                  </td>
                   <td className="px-4 py-2 text-zinc-500 text-xs">
                     {d.proxy_via_panorama ? "via Panorama" : d.has_api_key ? "direct" : "no key"}
                     <div className="text-[10px] text-zinc-600">{d.source}</div>
@@ -595,14 +822,14 @@ function DevicesSection() {
                 </tr>
                 {capacityFor === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={8} className="p-0">
+                    <td colSpan={11} className="p-0">
                       <CapacityPanel deviceId={d.id} onClose={() => setCapacityFor(null)} />
                     </td>
                   </tr>
                 )}
                 {testResult?.id === d.id && (
                   <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
-                    <td colSpan={8} className="px-4 py-2">
+                    <td colSpan={11} className="px-4 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <pre className={`text-xs whitespace-pre-wrap ${testResult.ok ? "text-emerald-300" : "text-rose-300"}`}>
                           {testResult.text}
@@ -616,7 +843,7 @@ function DevicesSection() {
                 )}
                 {editing === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={8} className="p-0">
+                    <td colSpan={11} className="p-0">
                       <DeviceForm panos={panosQ.data ?? []} initial={d} onDone={() => setEditing(null)} />
                     </td>
                   </tr>

@@ -63,18 +63,25 @@ export default function UpgradeJobs() {
           description={
             creating
               ? "Configure the new job below. Cancel to return to the job list."
-              : "Bulk upgrades across one or more firewalls, with HA pair awareness and confirmation gates at each major step. Start a new job from Inventory."
+              : "Bulk upgrades across one or more firewalls, with HA pair awareness and confirmation gates at each major step. Pick devices on Inventory, or Start Job to choose them here."
           }
           action={
             creating ? (
-              <Button onClick={closeForm}>Cancel</Button>
+              <Button onClick={closeForm}>← Back to jobs</Button>
             ) : (
               <div className="flex items-center gap-3">
+                <Button
+                  variant="primary"
+                  onClick={() => setParams(new URLSearchParams({ new: "true" }))}
+                  title="Open the job form with an empty device picker"
+                >
+                  + Start Job
+                </Button>
                 <NavLink
                   to="/inventory"
                   className="text-xs text-blue-400 hover:text-blue-300"
                 >
-                  Start an upgrade from Inventory →
+                  Pick from Inventory →
                 </NavLink>
                 <NavLink
                   to="/upgrade/precheck-sets"

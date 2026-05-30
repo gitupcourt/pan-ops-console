@@ -117,6 +117,7 @@ def test_oidc_callback_invite_only(client, monkeypatch):
     monkeypatch.setattr(oidc, "complete_login", lambda db, state, code: {
         "sub": "stranger-sub-id",
         "email": "stranger@example.com",
+        "email_verified": True,  # verified, but still no invited row
         "preferred_username": "stranger",
     })
 

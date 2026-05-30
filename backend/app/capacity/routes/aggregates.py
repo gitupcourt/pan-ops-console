@@ -80,6 +80,11 @@ class TableRow(BaseModel):
 
     device_id: int
     device_name: str
+    # serial + ip surfaced so the table search can match a device by
+    # the same identifiers as Inventory (name / IP / serial), not just
+    # display name. Null on devices that haven't reported them yet.
+    serial: str | None
+    ip_address: str | None
     model: str | None
     software_version: str | None
     device_group: str | None
@@ -349,6 +354,8 @@ def get_table(
         select(
             Device.id.label("device_id"),
             Device.name.label("device_name"),
+            Device.serial,
+            Device.ip_address,
             Device.model,
             Device.current_version,
             Device.device_group,
@@ -395,6 +402,8 @@ def get_table(
             TableRow(
                 device_id=r.device_id,
                 device_name=r.device_name,
+                serial=r.serial,
+                ip_address=r.ip_address,
                 model=r.model,
                 software_version=r.current_version,
                 device_group=r.device_group,

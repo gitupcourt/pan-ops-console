@@ -207,6 +207,25 @@ def test_table_returns_latest_sample_per_device_metric(client, db):
     assert body["rows"][0]["current"] == 900.0
 
 
+def test_table_row_exposes_serial_and_ip(client, db):
+    """The table row carries serial + ip_address so the page's search box
+    can match a device by the same identifiers as Inventory."""
+    _signup(client)
+    dev = _seed_device(db, name="A", model="PA-220")
+    dev.serial = "0123456789"
+    dev.ip_address = "10.9.8.7"
+    db.commit()
+    _seed_sample(
+        db, device_id=dev.id, metric="address_objects",
+        ts=datetime.now(timezone.utc), current=100.0,
+    )
+
+    r = client.get("/capacity/table")
+    row = r.json()["rows"][0]
+    assert row["serial"] == "0123456789"
+    assert row["ip_address"] == "10.9.8.7"
+
+
 def test_table_sorts_by_pct_desc(client, db):
     _signup(client)
     a = _seed_device(db, name="A", model="PA-220")

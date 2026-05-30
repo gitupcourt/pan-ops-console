@@ -362,7 +362,10 @@ function TaskRow({
           {isPaired ? pairKey : "—"}
         </td>
         <td className="px-4 py-2">
-          <TaskPhaseBadge phase={t.phase} />
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <TaskPhaseBadge phase={t.phase} />
+            <PhaseSubstep task={t} />
+          </div>
           {t.error && (
             <div
               className="text-[10px] text-rose-400 mt-0.5 max-w-md truncate"
@@ -868,6 +871,74 @@ function TaskPhaseBadge({ phase }: { phase: TaskPhase }) {
       {phase.replace(/_/g, " ")}
     </span>
   );
+}
+
+// Human-readable labels for the orchestrator's `progress.phase_substep`
+// values. Unknown keys fall back to underscores→spaces so a new backend
+// substep still renders sanely without a frontend deploy.
+const SUBSTEP_LABELS: Record<string, string> = {
+  installing: "installing",
+  rebooting: "rebooting",
+  verifying: "verifying",
+  resuming_ha: "resuming HA",
+  waiting_for_passive: "waiting for HA sync",
+  partner_upgrading: "partner upgrading",
+};
+
+/**
+ * Renders the within-phase sub-step + install/download progress % next
+ * to the phase badge, e.g. "· rebooting" or "· installing 47%".
+ *
+ * Reads straight from task.progress (phase_substep / install_progress /
+ * download_progress) — the orchestrator writes them there, no dedicated
+ * TaskRead fields needed. Renders nothing when there's no substep and no
+ * relevant percent for the current phase.
+ */
+function PhaseSubstep({ task: t }: { task: UpgradeTask }) {
+  const substep = readSubstep(t.progress);
+  const pct = readPhasePercent(t.phase, t.progress);
+
+  if (!substep && pct == null) return null;
+
+  const label = substep
+    ? SUBSTEP_LABELS[substep] ?? substep.replace(/_/g, " ")
+    : null;
+
+  return (
+    <span className="text-[10px] text-zinc-400 inline-flex items-center gap-1">
+      <span className="text-zinc-600">·</span>
+      {label && <span>{label}</span>}
+      {pct != null && (
+        <span className="font-mono text-blue-300">{pct}%</span>
+      )}
+    </span>
+  );
+}
+
+function readSubstep(progress: Record<string, unknown> | null): string | null {
+  const v = progress?.phase_substep;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+// install_progress applies to the UPGRADE_* phases; download_progress to
+// DOWNLOADING_IMAGE. Returns the relevant percent for the current phase,
+// or null when there's nothing meaningful to show.
+function readPhasePercent(
+  phase: TaskPhase,
+  progress: Record<string, unknown> | null,
+): number | null {
+  if (!progress) return null;
+  const key =
+    phase === "downloading_image"
+      ? "download_progress"
+      : phase === "upgrade_secondary" || phase === "upgrade_primary"
+        ? "install_progress"
+        : null;
+  if (!key) return null;
+  const v = progress[key];
+  if (typeof v !== "number" || Number.isNaN(v)) return null;
+  if (v < 0 || v > 100) return null;
+  return v;
 }
 
 function relTime(iso: string): string {

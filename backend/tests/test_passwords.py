@@ -65,3 +65,23 @@ def test_verify_handles_no_hash():
     not be able to authenticate via the password path."""
     assert verify_password("anything", None) is False
     assert verify_password("anything", "") is False
+
+
+def test_verify_no_hash_still_runs_argon2_for_timing(monkeypatch):
+    """F-6: the no-hash path must still exercise Argon2 (against the dummy
+    hash) so its response time matches the wrong-password path — otherwise
+    an instant False leaks which usernames exist. We assert the hasher's
+    verify is invoked even when there's no stored hash."""
+    from app.core.auth.services import passwords
+
+    calls = {"n": 0}
+    real_verify = passwords._hasher.verify
+
+    def _spy(h, p):
+        calls["n"] += 1
+        return real_verify(h, p)
+
+    monkeypatch.setattr(passwords._hasher, "verify", _spy)
+    assert verify_password("anything", None) is False
+    # The dummy verify ran (and mismatched) — work was done, not skipped.
+    assert calls["n"] == 1

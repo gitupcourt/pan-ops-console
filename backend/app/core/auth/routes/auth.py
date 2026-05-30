@@ -373,59 +373,89 @@ def oidc_callback(
 
     sub = claims.get("sub")
     email = (claims.get("email") or "").strip().lower()
+    # AppSec F-1(a): an `email` claim is only trustworthy when the IdP
+    # asserts it verified. Treat absent-or-false identically — both fail
+    # the gate. Multi-tenant / consumer IdPs let a principal assert an
+    # email it doesn't own; matching a pre-invited row on an unverified
+    # email is account takeover (incl. admin). `email_verified` may
+    # arrive as a real bool or, from some IdPs, the string "true".
+    ev = claims.get("email_verified")
+    email_verified = ev is True or (isinstance(ev, str) and ev.lower() == "true")
+    verified_email = email if (email and email_verified) else ""
     preferred = claims.get("preferred_username") or claims.get("nickname")
     if not sub:
         return _oidc_error_redirect("IdP response missing sub claim")
 
-    # Log every callback's identifying claims. The match below is brittle
-    # in subtle ways (Entra returns email only when an optional claim is
-    # enabled; some IdPs lowercase, some don't; some return UPN as
-    # preferred_username, some return the bare local-part). Surfacing
-    # what we actually got makes mismatches trivial to diagnose.
+    # Log every callback's identifying claims. Surfacing what we actually
+    # got makes mismatches trivial to diagnose (Entra returns email only
+    # when an optional claim is enabled; verification varies by IdP).
     import logging
     logging.getLogger(__name__).info(
-        "OIDC callback claims provider=%s sub=%s email=%r preferred_username=%r name=%r",
-        provider_name, sub, email, preferred, claims.get("name"),
+        "OIDC callback claims provider=%s sub=%s email=%r email_verified=%s "
+        "preferred_username=%r name=%r",
+        provider_name, sub, email, email_verified, preferred, claims.get("name"),
     )
 
-    # Bootstrap path: no users yet → first OIDC user becomes admin.
-    any_user = db.query(User.id).first() is not None
-    if not any_user:
-        username = preferred or (email.split("@")[0] if email else f"oidc-{sub[:8]}")
-        user = User(
-            username=username,
-            email=email or None,
-            is_admin=True,
-            is_active=True,
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    else:
-        # Invite-only: must already have a user row.
-        user = None
-        if email:
-            user = db.query(User).filter(User.email == email).first()
-        if user is None and preferred:
-            # Match preferred_username against either email or username —
-            # Entra's preferred_username is the UPN (often == email).
-            user = db.query(User).filter(
-                (User.username == preferred) | (User.email == preferred.lower())
-            ).first()
-        if user is None or not user.is_active:
-            # Include the would-be-matched values in the error so the
-            # operator doesn't have to chase logs to understand why it
-            # didn't match. These are the user's own claims, not anyone
-            # else's, so surfacing them in their own URL is fine.
-            details = []
-            if email:
-                details.append(f"email={email}")
-            if preferred:
-                details.append(f"upn/preferred_username={preferred}")
-            hint = " (" + ", ".join(details) + ")" if details else ""
-            return _oidc_error_redirect(
-                f"no account matches this identity{hint}. Ask an admin to invite you."
+    # AppSec F-1(b): identity is keyed on the durable (provider, sub),
+    # NOT on mutable email / UPN. We match that FIRST; it's set the first
+    # time a user links, so a reused UPN or changed email can never
+    # silently hijack an existing account.
+    user = (
+        db.query(User)
+        .filter(User.oidc_provider == provider_name, User.oidc_sub == sub)
+        .first()
+    )
+
+    if user is None:
+        any_user = db.query(User.id).first() is not None
+        if not any_user:
+            # Bootstrap: first user becomes admin. Persist the durable
+            # link immediately so every subsequent login uses (provider,
+            # sub), not email.
+            username = preferred or (email.split("@")[0] if email else f"oidc-{sub[:8]}")
+            user = User(
+                username=username,
+                email=email or None,
+                is_admin=True,
+                is_active=True,
+                oidc_provider=provider_name,
+                oidc_sub=sub,
             )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        else:
+            # Invite-only INITIAL link. The only attribute we'll auto-link
+            # on is a VERIFIED email matching a pre-invited row — never an
+            # unverified email and never a bare username/UPN (both are
+            # attacker-controllable on an untrusted IdP). Once linked, the
+            # (provider, sub) branch above handles all future logins.
+            user = None
+            if verified_email:
+                user = db.query(User).filter(User.email == verified_email).first()
+            if user is None or not user.is_active:
+                # Distinguish the two failure modes so the operator can
+                # act. Only ever echo the user's OWN claims back to them.
+                if email and not email_verified:
+                    return _oidc_error_redirect(
+                        "your IdP did not assert email_verified for "
+                        f"{email}, so we won't link an account on it. "
+                        "Ask an admin to enable the verified-email claim "
+                        "on the IdP, or sign in with username + password."
+                    )
+                hint = f" (email={verified_email})" if verified_email else ""
+                return _oidc_error_redirect(
+                    f"no active account matches this identity{hint}. "
+                    "Ask an admin to invite you (by email)."
+                )
+            # First successful link — bind the durable identity so future
+            # logins don't depend on email at all.
+            user.oidc_provider = provider_name
+            user.oidc_sub = sub
+            db.commit()
+            db.refresh(user)
+    elif not user.is_active:
+        return _oidc_error_redirect("your account is disabled. Ask an admin.")
 
     # Issue a session cookie and bounce to the SPA.
     token = create_session(db, user, user_agent=request.headers.get("user-agent"))

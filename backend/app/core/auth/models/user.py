@@ -30,6 +30,16 @@ class User(Base):
     # future OIDC-only user might have no local password.
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    # Durable OIDC identity binding (AppSec F-1). OIDC's stable
+    # identifier is (issuer, sub) — `sub` is unique only within an
+    # issuer, so we scope it by the provider the claim came from.
+    # Persisted at first successful link (bootstrap / invite match) and
+    # matched FIRST on every subsequent callback, so identity no longer
+    # rides on mutable email / UPN. Nullable: local-only users and
+    # not-yet-linked invitees have neither.
+    oidc_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    oidc_sub: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 

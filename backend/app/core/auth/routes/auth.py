@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.config import get_settings
 from app.core.auth.deps import current_user
+from app.core.auth import ratelimit
 from app.core.auth.models.user import BackupCode, User
 from app.core.auth.schemas import (
     BootstrapStatus,
@@ -145,6 +146,15 @@ def login(
       - password right, no TOTP (or TOTP correct) → 200 with the user
         object and a session cookie set.
     """
+    # F-3: throttle per (ip, username) so one IP can't grind an account
+    # and a shared NAT can't lock everyone out. Covers password AND
+    # TOTP/backup-code guessing — they're all attempts on this endpoint.
+    ratelimit.hit(
+        f"login:{ratelimit.client_ip(request)}:{payload.username.lower()}",
+        limit=10,
+        window_s=300,
+    )
+
     user = db.query(User).filter(User.username == payload.username).first()
     pwd_ok = verify_password(payload.password, user.password_hash if user else None)
     if user is None or not pwd_ok or not user.is_active:
@@ -283,6 +293,11 @@ def totp_verify(
     db: DBSession = Depends(get_db),
     user: User = Depends(current_user),
 ):
+    # F-3: light per-user throttle on the enrollment-confirm step. The
+    # high-value TOTP/backup-code guessing surface is /login (covered);
+    # this is authenticated and confirms the user's own secret, so a
+    # generous cap is plenty.
+    ratelimit.hit(f"totp-verify:{user.id}", limit=10, window_s=300)
     if user.totp_enabled:
         raise HTTPException(status_code=400, detail="TOTP is already enabled")
     if not user.encrypted_totp_secret:
@@ -365,6 +380,13 @@ def oidc_callback(
         return _oidc_error_redirect(error_description or error)
     if not code or not state:
         return _oidc_error_redirect("missing code or state from IdP")
+
+    # F-3: throttle callbacks per IP. Legit flow is a handful of redirects;
+    # a flood is either abuse or a misconfig loop. Keyed by IP only — there's
+    # no username yet at this point.
+    ratelimit.hit(
+        f"oidc-cb:{ratelimit.client_ip(request)}", limit=30, window_s=300
+    )
 
     try:
         claims = oidc.complete_login(db, state, code)

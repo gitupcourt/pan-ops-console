@@ -71,17 +71,23 @@ def test_verify_no_hash_still_runs_argon2_for_timing(monkeypatch):
     """F-6: the no-hash path must still exercise Argon2 (against the dummy
     hash) so its response time matches the wrong-password path — otherwise
     an instant False leaks which usernames exist. We assert the hasher's
-    verify is invoked even when there's no stored hash."""
+    verify is invoked even when there's no stored hash.
+
+    argon2's PasswordHasher.verify is a read-only C method, so we swap
+    the module-level `_hasher` for a fake that records the call and
+    mismatches (exactly what a wrong dummy verify would do)."""
+    from argon2.exceptions import VerifyMismatchError
+
     from app.core.auth.services import passwords
 
     calls = {"n": 0}
-    real_verify = passwords._hasher.verify
 
-    def _spy(h, p):
-        calls["n"] += 1
-        return real_verify(h, p)
+    class _FakeHasher:
+        def verify(self, h, p):
+            calls["n"] += 1
+            raise VerifyMismatchError("nope")
 
-    monkeypatch.setattr(passwords._hasher, "verify", _spy)
-    assert verify_password("anything", None) is False
+    monkeypatch.setattr(passwords, "_hasher", _FakeHasher())
+    assert passwords.verify_password("anything", None) is False
     # The dummy verify ran (and mismatched) — work was done, not skipped.
     assert calls["n"] == 1

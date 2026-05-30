@@ -78,6 +78,16 @@ export default function JobDetail() {
           description={`Target ${job.target_version} · ${job.workflow} workflow · ${job.task_count} device(s)`}
           action={<JobLifecycleActions job={job} />}
         />
+        {job.state === "failed" && job.failure_reason && (
+          <div className="mx-4 mt-1 mb-2 px-3 py-2 rounded bg-rose-950/40 border border-rose-900/50 text-rose-200 text-xs">
+            <span className="font-semibold">Job failed:</span>{" "}
+            {job.failure_reason}
+            <div className="text-[11px] text-rose-300/70 mt-1">
+              Expand the affected device row below for the per-phase
+              activity log, or check the worker logs for a full traceback.
+            </div>
+          </div>
+        )}
         <JobConfigSummary job={job} />
       </Card>
 

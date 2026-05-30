@@ -109,6 +109,7 @@ def _job_to_read(job: UpgradeJob, task_count: int) -> JobRead:
             "created_at": job.created_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
+            "failure_reason": job.failure_reason,
         }
     )
 
@@ -217,6 +218,7 @@ def _job_to_detail(job: UpgradeJob) -> JobDetail:
             "created_at": job.created_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
+            "failure_reason": job.failure_reason,
             "workflow_stages": job.workflow_stages,
             "image_id": job.image_id,
             "device_pull_image": job.device_pull_image,

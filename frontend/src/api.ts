@@ -239,6 +239,9 @@ export type UpgradeJob = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  // Why the job failed (orchestrator crash / timeout / first task
+  // failure). Null unless state === "failed".
+  failure_reason: string | null;
 };
 
 export type PrecheckCheckResult = {

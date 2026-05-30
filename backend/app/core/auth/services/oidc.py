@@ -84,7 +84,7 @@ def list_enabled_providers(db: DBSession) -> list[OIDCProviderConfig]:
     rows = db.query(OIDCProvider).filter(OIDCProvider.enabled == True).all()  # noqa: E712
     for row in rows:
         try:
-            secret = decrypt_key(row.encrypted_client_secret)
+            secret = decrypt_key(row.encrypted_client_secret, purpose=f"oidc:{row.slug}")
         except Exception as exc:
             log.warning("OIDC provider %s: client secret decrypt failed (%s); skipping",
                         row.slug, type(exc).__name__)

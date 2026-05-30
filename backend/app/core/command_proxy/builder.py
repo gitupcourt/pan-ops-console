@@ -100,7 +100,7 @@ def _build_proxy_client(device: Device) -> PanDeviceClient:
         raise ValueError(
             f"Device {device.name}: proxy_via_panorama requires a known serial"
         )
-    api_key = decrypt_key(pano.encrypted_api_key)
+    api_key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
     return PanDeviceClient.via_panorama(
         panorama_host=pano.hostname,
         panorama_api_key=api_key,
@@ -114,7 +114,7 @@ def _build_direct_client(device: Device) -> PanDeviceClient:
         raise ValueError(
             f"Device {device.name} has no API key for direct connection"
         )
-    api_key = decrypt_key(device.encrypted_api_key)
+    api_key = decrypt_key(device.encrypted_api_key, purpose=f"device:{device.id}")
     target = device.ip_address or device.hostname
     return PanDeviceClient.direct(
         host=target, api_key=api_key, verify_tls=device.verify_tls

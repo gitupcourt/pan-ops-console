@@ -163,7 +163,7 @@ def get_capacity(device_id: int, db: Session = Depends(get_db)):
             )
         if not device.panorama.encrypted_api_key:
             raise HTTPException(status_code=400, detail="parent Panorama has no API key")
-        api_key = decrypt_key(device.panorama.encrypted_api_key)
+        api_key = decrypt_key(device.panorama.encrypted_api_key, purpose=f"panorama:{device.panorama.id}")
         client = PanDeviceClient.via_panorama(
             device.panorama.hostname, api_key, device.serial,
             verify_tls=device.panorama.verify_tls,
@@ -171,7 +171,7 @@ def get_capacity(device_id: int, db: Session = Depends(get_db)):
     else:
         if not device.encrypted_api_key:
             raise HTTPException(status_code=400, detail="device has no API key")
-        api_key = decrypt_key(device.encrypted_api_key)
+        api_key = decrypt_key(device.encrypted_api_key, purpose=f"device:{device.id}")
         target = device.ip_address or device.hostname
         client = PanDeviceClient.direct(target, api_key, verify_tls=device.verify_tls)
 
@@ -226,7 +226,7 @@ def test_device(device_id: int, db: Session = Depends(get_db)):
             )
         if not device.panorama.encrypted_api_key:
             raise HTTPException(status_code=400, detail="parent Panorama has no API key")
-        api_key = decrypt_key(device.panorama.encrypted_api_key)
+        api_key = decrypt_key(device.panorama.encrypted_api_key, purpose=f"panorama:{device.panorama.id}")
         client = PanDeviceClient.via_panorama(
             device.panorama.hostname, api_key, device.serial,
             verify_tls=device.panorama.verify_tls,
@@ -234,7 +234,7 @@ def test_device(device_id: int, db: Session = Depends(get_db)):
     else:
         if not device.encrypted_api_key:
             raise HTTPException(status_code=400, detail="device has no API key")
-        api_key = decrypt_key(device.encrypted_api_key)
+        api_key = decrypt_key(device.encrypted_api_key, purpose=f"device:{device.id}")
         target = device.ip_address or device.hostname
         client = PanDeviceClient.direct(target, api_key, verify_tls=device.verify_tls)
 

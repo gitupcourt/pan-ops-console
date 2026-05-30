@@ -13,6 +13,7 @@ import Login from "./core/auth/Login";
 import Profile from "./core/auth/Profile";
 import Providers from "./core/auth/Providers";
 import Users from "./core/auth/Users";
+import { GlobalSearch } from "./core/devices/GlobalSearch";
 import Inventory from "./core/devices/Inventory";
 import HomeDashboard from "./HomeDashboard";
 import JobDetail from "./upgrade/JobDetail";
@@ -60,7 +61,10 @@ export default function App() {
                 <NavTab to="/authentication">Authentication</NavTab>
               )}
             </nav>
-            <UserMenu />
+            <div className="ml-auto flex items-center gap-4">
+              <GlobalSearch />
+              <UserMenu />
+            </div>
           </div>
         </header>
 

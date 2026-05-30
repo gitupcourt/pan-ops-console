@@ -1584,10 +1584,18 @@ def _fail_job(db: Session, job_id: int, reason: str) -> None:
     job = db.get(UpgradeJob, job_id)
     if job is None:
         return
+    # First-write-wins on the reason: the first thing to fail a job is the
+    # root cause; later cascade failures (e.g. a second task tripping over
+    # the now-FAILED job) must not overwrite it. We set it even if the job
+    # is already terminal-without-a-reason, to cover a state flipped
+    # elsewhere. Without this the orchestrator-crash / timeout paths left
+    # the UI showing a bare "FAILED" with no explanation.
+    if reason and not job.failure_reason:
+        job.failure_reason = reason
     if job.state not in (JobState.COMPLETED, JobState.FAILED, JobState.ABORTED):
         job.state = JobState.FAILED
         job.finished_at = datetime.now(timezone.utc)
-        db.commit()
+    db.commit()
 
 
 def _job_terminal(db: Session, job: UpgradeJob) -> bool:

@@ -270,6 +270,15 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     if not _phase_failover(db, job, active, passive):
         return
 
+    # The failover itself is now complete — the (former) passive is the
+    # active member serving traffic, and it has nothing more to do until
+    # the whole pair finishes. Without this, its badge sits frozen on
+    # "FAILOVER" for the entire (often 30+ min) primary-upgrade window.
+    # The sub-step makes it read "FAILOVER · partner upgrading" so the
+    # operator knows it's parked-by-design, not stuck. It flips to DONE
+    # at the end of the pair flow.
+    _set_substep(db, passive, "partner_upgrading")
+
     # ---- Optional gate before upgrading the (former) active ----
     if job.require_primary_upgrade_confirmation:
         if not _wait_for_confirm(db, active, TaskPhase.AWAITING_PRIMARY_UPGRADE_CONFIRM):
@@ -585,6 +594,7 @@ def _phase_install_and_wait(
         # Step 1+2: install.
         try:
             client = _client_for(db, device)
+            _set_substep(db, task, "installing")
             install_job = client.request_software_install(job.target_version)
             if not install_job:
                 raise RuntimeError("install request returned no job id")
@@ -600,14 +610,18 @@ def _phase_install_and_wait(
         # Step 3: optional pause before reboot. Default behavior — the
         # operator explicitly clicks Reboot now.
         if not job.auto_reboot_after_install:
+            _set_substep(db, task, None)
             _record(db, task, "Install done; awaiting operator confirmation to reboot")
             if not _wait_for_confirm(db, task, TaskPhase.AWAITING_REBOOT_CONFIRM):
                 return False
             _set_phase(db, task, started_phase)
 
-        # Step 4+5: restart and wait for mgmt plane.
+        # Step 4+5: restart and wait for mgmt plane. The "rebooting"
+        # sub-step covers the whole down→up window (often ~10 min) so the
+        # badge isn't frozen on the bare phase label the entire time.
         try:
             client = _client_for(db, device)
+            _set_substep(db, task, "rebooting")
             _record(db, task, "Issuing system restart")
             client.restart_system()
             _record(
@@ -623,6 +637,7 @@ def _phase_install_and_wait(
             return False
 
         try:
+            _set_substep(db, task, "verifying")
             precheck_svc.probe_device(db, device, client=_client_for(db, device))
             db.commit()
         except Exception as exc:  # noqa: BLE001
@@ -645,6 +660,7 @@ def _phase_install_and_wait(
     # when the state is already passive. So even when this block re-runs
     # against a healthy device, it's cheap and safe.
     if device.ha_peer_id is not None and not _phase_already_done(task, "ha_resume_complete"):
+        _set_substep(db, task, "resuming_ha")
         _record(
             db, task,
             "Waiting for HA subsystem readiness before issuing resume"
@@ -686,6 +702,7 @@ def _phase_install_and_wait(
             _fail_job(db, job.id, f"HA resume was silently ignored on {device.name}")
             return False
 
+        _set_substep(db, task, "waiting_for_passive")
         _record(db, task, "Waiting for HA state to settle to 'passive'")
         if not _wait_for_passive(_client_for(db, device), db, task, device):
             _record(
@@ -1512,8 +1529,37 @@ def _wait_for_override(
 def _set_phase(db: Session, task: DeviceUpgradeTask, phase: TaskPhase) -> None:
     task.phase = phase
     task.tick_count = (task.tick_count or 0) + 1
+    # Clear any sub-step label when the MAJOR phase changes — a stale
+    # "rebooting" must not bleed into POSTCHECK. The substep is a
+    # within-phase refinement; the phase change is the reset point.
+    progress = dict(task.progress or {})
+    if progress.get("phase_substep") is not None:
+        progress["phase_substep"] = None
+        task.progress = progress
     db.commit()
     db.refresh(task)
+
+
+def _set_substep(db: Session, task: DeviceUpgradeTask, substep: str | None) -> None:
+    """Set the within-phase sub-step label shown in the UI as
+    "UPGRADE SECONDARY · rebooting".
+
+    The big phases (UPGRADE_*, FAILOVER) span several minutes of distinct
+    internal work — install, reboot, mgmt-plane wait, HA resume,
+    wait-for-passive — that all share one phase enum value. Without a
+    sub-step the badge looks frozen for ~10 min during a reboot. This
+    writes `progress.phase_substep`; the frontend renders it next to the
+    phase badge and falls back to the raw phase when it's null.
+
+    No schema change — `phase_substep` rides in the existing progress
+    JSON. Idempotent on no-op (same value → skip the commit).
+    """
+    progress = dict(task.progress or {})
+    if progress.get("phase_substep") == substep:
+        return
+    progress["phase_substep"] = substep
+    task.progress = progress
+    db.commit()
 
 
 def _record(db: Session, task: DeviceUpgradeTask, message: str, *, phase: TaskPhase | None = None) -> None:

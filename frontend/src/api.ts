@@ -447,6 +447,8 @@ export type HeatmapCell = {
 export type CapacityTableRow = {
   device_id: number;
   device_name: string;
+  serial: string | null;
+  ip_address: string | null;
   model: string | null;
   software_version: string | null;
   device_group: string | null;

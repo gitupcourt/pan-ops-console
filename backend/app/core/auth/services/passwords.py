@@ -18,6 +18,15 @@ from zxcvbn import zxcvbn
 # `time_cost`; do not lower `memory_cost`.
 _hasher = PasswordHasher()
 
+# A throwaway hash used ONLY to equalize verify timing for users that have
+# no password set (unknown username, or OIDC-only account). Without this,
+# `verify_password(pw, None)` returns instantly while a real user's wrong
+# password burns ~80 ms of Argon2 — a timing oracle that distinguishes
+# valid usernames (AppSec F-6). Computed once at import; never a real
+# credential. The plaintext is irrelevant — we only need the verify to do
+# the same work and then fail.
+_DUMMY_HASH = _hasher.hash("timing-equalizer-placeholder-not-a-secret")
+
 # Minimums. zxcvbn score is 0..4 (4 = "very strong"). We require >=3
 # ("safely unguessable; moderate protection from offline slow-hash scenario").
 MIN_LENGTH = 12
@@ -32,8 +41,18 @@ def verify_password(plain: str, hashed: str | None) -> bool:
     """Constant-time compare. Returns False (not raises) on mismatch so the
     caller can decide how to respond. Returns False for users with no
     password set (e.g. OIDC-only accounts).
+
+    When there's no stored hash, we still run a verify against a fixed
+    dummy hash so the response time matches the wrong-password path —
+    otherwise the fast "no hash → instant False" leaks which usernames
+    exist (AppSec F-6). The dummy verify always mismatches; we discard
+    its result and return False.
     """
     if not hashed:
+        try:
+            _hasher.verify(_DUMMY_HASH, plain)
+        except Exception:  # noqa: BLE001 — always mismatches; timing only
+            pass
         return False
     try:
         _hasher.verify(hashed, plain)

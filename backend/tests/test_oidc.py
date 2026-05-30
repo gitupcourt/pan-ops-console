@@ -330,3 +330,66 @@ def test_oidc_sub_unique_per_provider_scope(client, monkeypatch, db):
     r = client.get("/auth/oidc/other/callback?code=b&state=s2", follow_redirects=False)
     assert "oidc_error" in r.headers["location"]
     assert client.get("/auth/me").status_code == 401
+
+
+# ---------- AppSec F-2 / F-5 / F-7 (auth hardening) ----------
+
+
+def test_provider_issuer_must_be_https(client):
+    """F-2: cleartext issuer is rejected at config time (422)."""
+    client.post("/auth/signup-first", json={"username": "admin", "password": STRONG})
+    r = client.post("/providers/oidc", json={**DEFAULT_PAYLOAD, "issuer": "http://idp.test"})
+    assert r.status_code == 422
+    assert "https" in r.text.lower()
+
+
+def test_provider_issuer_rejects_private_host(client):
+    """F-2: an issuer pointing at a private/loopback IP is rejected —
+    blocks the obvious SSRF-to-internal-metadata target."""
+    client.post("/auth/signup-first", json={"username": "admin", "password": STRONG})
+    for bad in ("https://127.0.0.1", "https://169.254.169.254", "https://10.0.0.5"):
+        r = client.post("/providers/oidc", json={**DEFAULT_PAYLOAD, "issuer": bad})
+        assert r.status_code == 422, f"{bad} should be rejected"
+
+
+def test_oidc_callback_failure_is_generic(client, monkeypatch):
+    """F-5: a raw exception from complete_login must NOT be reflected into
+    the redirect URL — it can carry internal/token-endpoint detail."""
+    _seed_provider(client)
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+
+    def _boom(db, state, code):
+        raise ValueError("token endpoint https://secret-internal.local/token failed")
+
+    monkeypatch.setattr(oidc, "complete_login", _boom)
+    r = client.get("/auth/oidc/fake/callback?code=abc&state=anything", follow_redirects=False)
+    assert r.status_code == 302
+    loc = r.headers["location"].lower()
+    assert "oidc_error" in loc
+    assert "secret-internal" not in loc  # raw detail not leaked
+    assert "administrator" in loc
+
+
+def test_oidc_never_bootstraps_admin(client, monkeypatch, db):
+    """F-7: with zero users, an OIDC sign-in must NOT create an admin —
+    bootstrap is local-only via /auth/signup-first."""
+    from app.core.auth.models.user import User
+
+    # No signup → empty users table.
+    assert db.query(User).count() == 0
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "would-be-admin", "email": "attacker@evil.test", "email_verified": True,
+    })
+    r = client.get("/auth/oidc/fake/callback?code=abc&state=anything", follow_redirects=False)
+    assert r.status_code == 302
+    assert "oidc_error" in r.headers["location"]
+    # Crucially: no user was created.
+    db.expire_all()
+    assert db.query(User).count() == 0
+    assert client.get("/auth/me").status_code == 401

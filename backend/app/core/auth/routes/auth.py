@@ -369,7 +369,18 @@ def oidc_callback(
     try:
         claims = oidc.complete_login(db, state, code)
     except Exception as exc:  # noqa: BLE001
-        return _oidc_error_redirect(f"OIDC failure: {exc}")
+        # F-5: don't reflect raw exception text into the redirect URL —
+        # it can carry token-endpoint URLs / httpx internals into the
+        # user's history, and is a reflected-XSS sink if the SPA ever
+        # rendered it unescaped. Log the detail server-side; return a
+        # generic message.
+        import logging
+        logging.getLogger(__name__).warning(
+            "OIDC complete_login failed for provider=%s: %s", provider_name, exc
+        )
+        return _oidc_error_redirect(
+            "OIDC sign-in failed. Contact your administrator if it persists."
+        )
 
     sub = claims.get("sub")
     email = (claims.get("email") or "").strip().lower()
@@ -407,53 +418,41 @@ def oidc_callback(
     )
 
     if user is None:
-        any_user = db.query(User.id).first() is not None
-        if not any_user:
-            # Bootstrap: first user becomes admin. Persist the durable
-            # link immediately so every subsequent login uses (provider,
-            # sub), not email.
-            username = preferred or (email.split("@")[0] if email else f"oidc-{sub[:8]}")
-            user = User(
-                username=username,
-                email=email or None,
-                is_admin=True,
-                is_active=True,
-                oidc_provider=provider_name,
-                oidc_sub=sub,
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        else:
-            # Invite-only INITIAL link. The only attribute we'll auto-link
-            # on is a VERIFIED email matching a pre-invited row — never an
-            # unverified email and never a bare username/UPN (both are
-            # attacker-controllable on an untrusted IdP). Once linked, the
-            # (provider, sub) branch above handles all future logins.
-            user = None
-            if verified_email:
-                user = db.query(User).filter(User.email == verified_email).first()
-            if user is None or not user.is_active:
-                # Distinguish the two failure modes so the operator can
-                # act. Only ever echo the user's OWN claims back to them.
-                if email and not email_verified:
-                    return _oidc_error_redirect(
-                        "your IdP did not assert email_verified for "
-                        f"{email}, so we won't link an account on it. "
-                        "Ask an admin to enable the verified-email claim "
-                        "on the IdP, or sign in with username + password."
-                    )
-                hint = f" (email={verified_email})" if verified_email else ""
+        # AppSec F-7: OIDC is strictly invite-only — it NEVER bootstraps
+        # an admin. The first admin is created locally via
+        # /auth/signup-first; a provider can only be configured by an
+        # existing admin, so "first OIDC sign-in becomes admin" was both
+        # unreachable in normal flow and a latent footgun. Removed.
+        #
+        # Invite-only INITIAL link: the only attribute we'll auto-link on
+        # is a VERIFIED email matching a pre-invited row — never an
+        # unverified email and never a bare username/UPN (both are
+        # attacker-controllable on an untrusted IdP). Once linked, the
+        # (provider, sub) branch above handles all future logins.
+        user = None
+        if verified_email:
+            user = db.query(User).filter(User.email == verified_email).first()
+        if user is None or not user.is_active:
+            # Distinguish the two failure modes so the operator can act.
+            # Only ever echo the user's OWN claims back to them.
+            if email and not email_verified:
                 return _oidc_error_redirect(
-                    f"no active account matches this identity{hint}. "
-                    "Ask an admin to invite you (by email)."
+                    "your IdP did not assert email_verified for "
+                    f"{email}, so we won't link an account on it. "
+                    "Ask an admin to enable the verified-email claim "
+                    "on the IdP, or sign in with username + password."
                 )
-            # First successful link — bind the durable identity so future
-            # logins don't depend on email at all.
-            user.oidc_provider = provider_name
-            user.oidc_sub = sub
-            db.commit()
-            db.refresh(user)
+            hint = f" (email={verified_email})" if verified_email else ""
+            return _oidc_error_redirect(
+                f"no active account matches this identity{hint}. "
+                "Ask an admin to invite you (by email)."
+            )
+        # First successful link — bind the durable identity so future
+        # logins don't depend on email at all.
+        user.oidc_provider = provider_name
+        user.oidc_sub = sub
+        db.commit()
+        db.refresh(user)
     elif not user.is_active:
         return _oidc_error_redirect("your account is disabled. Ask an admin.")
 

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -409,6 +409,85 @@ function SortHeader({
   );
 }
 
+type RowAction = {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+};
+
+/**
+ * Compact "⋯" row-actions menu. Folds the secondary per-device actions
+ * (Test / Capacity / Edit / Delete) into one trigger so the Inventory
+ * row stops running off the page.
+ *
+ * The menu is `position: fixed`, anchored to the trigger via its
+ * bounding rect, so it is NOT clipped by the table's `overflow-x-auto`
+ * scroll container (an absolutely-positioned menu would be). A
+ * transparent full-screen backdrop handles click-outside; Esc closes.
+ */
+function RowActionsMenu({ actions, label }: { actions: RowAction[]; label: string }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const openMenu = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={() => (open ? setOpen(false) : openMenu())}
+        aria-label={label}
+        aria-haspopup="menu"
+        className="px-2 py-1 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm leading-none"
+      >
+        ⋯
+      </button>
+      {open && pos && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            role="menu"
+            className="fixed z-50 min-w-40 rounded border border-zinc-700 bg-zinc-950 shadow-xl py-1 text-sm"
+            style={{ top: pos.top, right: pos.right }}
+          >
+            {actions.map((a) => (
+              <button
+                key={a.label}
+                role="menuitem"
+                disabled={a.disabled}
+                onClick={() => {
+                  setOpen(false);
+                  a.onClick();
+                }}
+                className={`block w-full text-left px-3 py-1.5 hover:bg-zinc-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  a.danger ? "text-rose-300 hover:bg-rose-950/40" : "text-zinc-200"
+                }`}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function DevicesSection() {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -679,7 +758,8 @@ function DevicesSection() {
       {devs.length === 0 ? (
         <Empty>No devices yet. Add one directly, or sync a Panorama to import its managed devices.</Empty>
       ) : (
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full text-sm min-w-[64rem]">
           <thead className="text-xs uppercase text-zinc-500 border-b border-zinc-800">
             <tr>
               <th className="px-4 py-2 w-8">
@@ -799,25 +879,42 @@ function DevicesSection() {
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
-                    <Button onClick={() => test.mutate(d.id)} disabled={test.isPending}>
-                      Test
-                    </Button>
-                    <Button
-                      onClick={() => navigate(`/upgrade?new=true&devices=${d.id}`)}
-                      title="Open a new upgrade job pre-filled with just this device"
-                    >
-                      Upgrade
-                    </Button>
-                    <Button onClick={() => setCapacityFor(capacityFor === d.id ? null : d.id)}>
-                      {capacityFor === d.id ? "Close" : "Capacity"}
-                    </Button>
-                    <Button onClick={() => setEditing(editing === d.id ? null : d.id)}>
-                      {editing === d.id ? "Close" : "Edit"}
-                    </Button>
-                    <Button variant="danger" onClick={() => del.mutate(d.id)}>
-                      Delete
-                    </Button>
+                  <td className="px-4 py-2 text-right whitespace-nowrap">
+                    {/* Primary action stays visible (Inventory is the
+                        upgrade launch point); the rest fold into a kebab
+                        so the row doesn't run off the page. */}
+                    <div className="flex items-center justify-end gap-2">
+                      <Button
+                        onClick={() => navigate(`/upgrade?new=true&devices=${d.id}`)}
+                        title="Open a new upgrade job pre-filled with just this device"
+                      >
+                        Upgrade
+                      </Button>
+                      <RowActionsMenu
+                        label={`Actions for ${d.name}`}
+                        actions={[
+                          {
+                            label: "Test connection",
+                            onClick: () => test.mutate(d.id),
+                            disabled: test.isPending,
+                          },
+                          {
+                            label: capacityFor === d.id ? "Hide capacity" : "Capacity",
+                            onClick: () =>
+                              setCapacityFor(capacityFor === d.id ? null : d.id),
+                          },
+                          {
+                            label: editing === d.id ? "Close editor" : "Edit",
+                            onClick: () => setEditing(editing === d.id ? null : d.id),
+                          },
+                          {
+                            label: "Delete",
+                            onClick: () => del.mutate(d.id),
+                            danger: true,
+                          },
+                        ]}
+                      />
+                    </div>
                   </td>
                 </tr>
                 {capacityFor === d.id && (
@@ -853,6 +950,7 @@ function DevicesSection() {
             })}
           </tbody>
         </table>
+        </div>
       )}
     </Card>
   );

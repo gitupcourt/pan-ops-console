@@ -84,7 +84,7 @@ export default function UpgradeJobs() {
                   Pick from Inventory →
                 </NavLink>
                 <NavLink
-                  to="/upgrade/precheck-sets"
+                  to="/settings/precheck-sets"
                   className="text-xs text-blue-400 hover:text-blue-300"
                 >
                   Manage precheck sets

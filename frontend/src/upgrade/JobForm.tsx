@@ -398,10 +398,10 @@ export function JobForm({
           upgrade. Leave on default to use the system-default set
           (currently "Standard"). Manage available sets at{" "}
           <a
-            href="/upgrade/precheck-sets"
+            href="/settings/precheck-sets"
             className="text-blue-400 hover:text-blue-300"
           >
-            /upgrade/precheck-sets
+            Settings → Pre/post-check sets
           </a>
           .
         </p>

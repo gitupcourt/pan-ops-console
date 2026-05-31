@@ -267,6 +267,10 @@ class JobRead(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    # Why the job failed (orchestrator-level crash / timeout / first
+    # task failure). Null unless state == failed. The UI renders it in
+    # the job header so a FAILED job explains itself.
+    failure_reason: str | None = None
 
     model_config = {"from_attributes": True}
 

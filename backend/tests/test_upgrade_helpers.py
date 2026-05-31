@@ -24,6 +24,7 @@ from app.upgrade.services.upgrade import (
     _is_ha_healthy,
     _mark_phase_done,
     _phase_already_done,
+    _set_substep,
 )
 
 
@@ -137,3 +138,38 @@ def test_phase_marker_handles_null_progress(fake_db):
     task = SimpleNamespace(id=1, progress=None)
     _mark_phase_done(fake_db, task, "precheck")
     assert task.progress["completed_phases"] == ["precheck"]
+
+
+# ---------- _set_substep ----------
+
+
+def test_set_substep_writes_value(fake_task, fake_db):
+    _set_substep(fake_db, fake_task, "rebooting")
+    assert fake_task.progress["phase_substep"] == "rebooting"
+    fake_db.commit.assert_called_once()
+
+
+def test_set_substep_is_noop_when_unchanged(fake_task, fake_db):
+    _set_substep(fake_db, fake_task, "rebooting")
+    fake_db.commit.reset_mock()
+    # Same value again → no second commit (avoids DB spam while a phase
+    # sits on one substep across many orchestrator ticks).
+    _set_substep(fake_db, fake_task, "rebooting")
+    fake_db.commit.assert_not_called()
+
+
+def test_set_substep_none_clears(fake_task, fake_db):
+    _set_substep(fake_db, fake_task, "installing")
+    _set_substep(fake_db, fake_task, None)
+    assert fake_task.progress["phase_substep"] is None
+
+
+def test_set_substep_preserves_other_progress_keys(fake_db):
+    from types import SimpleNamespace
+    task = SimpleNamespace(
+        id=1, progress={"completed_phases": ["precheck"], "install_progress": 60}
+    )
+    _set_substep(fake_db, task, "rebooting")
+    assert task.progress["completed_phases"] == ["precheck"]
+    assert task.progress["install_progress"] == 60
+    assert task.progress["phase_substep"] == "rebooting"

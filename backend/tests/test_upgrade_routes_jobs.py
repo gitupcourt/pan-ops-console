@@ -347,6 +347,34 @@ def test_get_unknown_job_404s(client):
 # ---------- /upgrade/jobs lifecycle ----------
 
 
+def test_fail_job_persists_first_reason_and_surfaces_via_api(client, db):
+    """_fail_job records WHY a job failed (first-write-wins) so the
+    JobDetail header can explain a bare FAILED state — including the
+    orchestrator-crash path where no task is marked FAILED."""
+    from app.upgrade.services.upgrade import _fail_job
+
+    _signup(client)
+    dev = _seed_standalone(db, name="fw1")
+    create = client.post("/upgrade/jobs", json={
+        "name": "j", "target_version": "11.1.4-h7",
+        "device_ids": [dev.id], "device_pull_image": True,
+    })
+    job_id = create.json()["id"]
+    # Fresh job has no failure reason.
+    assert create.json()["failure_reason"] is None
+
+    # First failure sets the reason + flips state.
+    _fail_job(db, job_id, "driver crashed; see worker logs")
+    # A later cascade failure must NOT overwrite the root cause.
+    _fail_job(db, job_id, "some downstream symptom")
+
+    r = client.get(f"/upgrade/jobs/{job_id}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["state"] == JobState.FAILED.value
+    assert body["failure_reason"] == "driver crashed; see worker logs"
+
+
 def test_start_job_transitions_pending_to_running(client, db):
     _signup(client)
     dev = _seed_standalone(db, name="fw1")

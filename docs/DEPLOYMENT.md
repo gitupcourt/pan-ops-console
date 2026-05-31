@@ -169,7 +169,9 @@ Everything is environment variables on the backend:
 | `FERNET_KEY` | *(required)* | Generated once, kept forever. Encrypts API credentials at rest. |
 | `DATABASE_URL` | `sqlite:///data/capacity.db` | Anything SQLAlchemy supports. Postgres tested but unsupported until storage swap lands. |
 | `CATALOG_PATH` | `/app/catalog/metrics.yaml` | Where to load the metric catalog from at startup. |
-| `POLL_INTERVAL_SECONDS` | `300` | Polling cadence. Each full cycle takes ~10s × number-of-devices. |
+| `POLL_INTERVAL_SECONDS` | `300` | Fast (live-telemetry) polling cadence. Back-compat single knob; `POLL_SYSTEM_INTERVAL_SECONDS` inherits it when unset. |
+| `POLL_SYSTEM_INTERVAL_SECONDS` | *(inherits `POLL_INTERVAL_SECONDS`)* | Explicit fast cadence for live telemetry (CPU, memory, sessions, throughput). |
+| `POLL_CONFIG_INTERVAL_SECONDS` | `3600` | Slow cadence for config-class counts (objects, policies, NAT, VPN peers) — they only change on commit. |
 | `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated. Set to your public frontend origin in prod. |
 
 Frontend (build-time and dev-server only):

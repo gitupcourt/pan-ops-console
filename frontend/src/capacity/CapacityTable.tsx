@@ -7,7 +7,7 @@ import {
 } from "react-router-dom";
 
 import { api, CapacityTableRow, MetricCategory } from "../api";
-import { Button, Card, CardHeader, Select } from "../core/ui/ui";
+import { Button, Card, CardHeader, Input, Select } from "../core/ui/ui";
 import { CapacityViewToggle } from "./CapacityViewToggle";
 
 // Sortable columns. "alert" and "predicted" aren't sortable yet
@@ -61,6 +61,10 @@ export default function CapacityTable() {
   const metric = params.get("metric") ?? "";
   const deviceGroup = params.get("device_group") ?? "";
   const templateStack = params.get("template_stack") ?? "";
+  // Free-text search (client-side over the fetched rows). Matches a
+  // resource check (metric / description) OR a device (name / IP /
+  // serial). In the URL so a searched view is shareable.
+  const queryText = params.get("q") ?? "";
 
   // Sort state also lives in URL params so a sorted view is sharable.
   // Default is pct desc — what's on fire surfaces first — matching the
@@ -119,19 +123,41 @@ export default function CapacityTable() {
   const rows = tableQ.data?.rows ?? [];
   const total = tableQ.data?.total ?? 0;
 
-  // Surface available models / metrics / DGs / TSs from the current
-  // result set so dropdowns are populated dynamically. Like the heat
-  // map: no hardcoded lists.
+  // Surface available models / metrics / DGs / TSs from the FULL result
+  // set (not the searched subset) so the dropdowns don't collapse as you
+  // type. Like the heat map: no hardcoded lists.
   const { models, metrics, deviceGroups, templateStacks } = useMemo(
     () => deriveOptions(rows),
     [rows],
   );
 
+  // Apply the free-text search client-side. Matches resource check
+  // (metric id + human description) OR device identity (name / IP /
+  // serial) — the same identifiers Inventory searches on.
+  const searchedRows = useMemo(() => {
+    const needle = queryText.trim().toLowerCase();
+    if (!needle) return rows;
+    return rows.filter((r) => {
+      const hay = [
+        r.metric,
+        r.metric_description,
+        r.device_name,
+        r.ip_address,
+        r.serial,
+        r.model,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(needle);
+    });
+  }, [rows, queryText]);
+
   // Group rows by category for the section layout, with the active
   // sort applied within each category.
   const byCategory = useMemo(
-    () => groupByCategory(rows, sortBy, sortDir),
-    [rows, sortBy, sortDir],
+    () => groupByCategory(searchedRows, sortBy, sortDir),
+    [searchedRows, sortBy, sortDir],
   );
 
   const title = describeFilters({ model, metric, deviceGroup, templateStack });
@@ -155,6 +181,12 @@ export default function CapacityTable() {
 
       <Card>
         <div className="px-4 py-3 flex flex-wrap items-center gap-3 text-xs border-b border-zinc-800">
+          <Input
+            placeholder="Search check or device (name, IP, serial)…"
+            value={queryText}
+            onChange={(e) => updateFilter("q", e.target.value)}
+            className="w-72 text-xs"
+          />
           <FilterDropdown
             label="Metric"
             value={metric}
@@ -200,18 +232,23 @@ export default function CapacityTable() {
         <CardHeader
           title={title}
           description={
-            rows.length === total
-              ? `${rows.length} row${rows.length === 1 ? "" : "s"}`
-              : `Showing ${rows.length} of ${total} rows (backend cap)`
+            queryText
+              ? `${searchedRows.length} row${searchedRows.length === 1 ? "" : "s"} match “${queryText}”${
+                  rows.length === total ? "" : ` (of ${total} before backend cap)`
+                }`
+              : rows.length === total
+                ? `${rows.length} row${rows.length === 1 ? "" : "s"}`
+                : `Showing ${rows.length} of ${total} rows (backend cap)`
           }
         />
 
         {tableQ.isLoading ? (
           <div className="p-8 text-center text-xs text-zinc-500">Loading…</div>
-        ) : rows.length === 0 ? (
+        ) : searchedRows.length === 0 ? (
           <div className="p-8 text-center text-xs text-zinc-500">
-            No rows match the current filters. Try Clear all filters above,
-            or check the heat map for what models / metrics have samples.
+            {queryText
+              ? `No checks or devices match “${queryText}”. Clear the search or broaden it.`
+              : "No rows match the current filters. Try Clear all filters above, or check the heat map for what models / metrics have samples."}
           </div>
         ) : (
           <>

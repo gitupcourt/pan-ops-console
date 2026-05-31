@@ -96,7 +96,7 @@ def test_panorama(pano_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="not found")
     if not pano.encrypted_api_key:
         raise HTTPException(status_code=400, detail="no API key stored")
-    api_key = decrypt_key(pano.encrypted_api_key)
+    api_key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
     client = PanoramaClient(pano.hostname, api_key, verify_tls=pano.verify_tls)
     try:
         info = client.test_connection()
@@ -119,7 +119,7 @@ def preview_devices(pano_id: int, db: Session = Depends(get_db)):
     if not pano.encrypted_api_key:
         raise HTTPException(status_code=400, detail="no API key stored")
 
-    api_key = decrypt_key(pano.encrypted_api_key)
+    api_key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
     client = PanoramaClient(pano.hostname, api_key, verify_tls=pano.verify_tls)
     try:
         managed = client.list_managed_devices()

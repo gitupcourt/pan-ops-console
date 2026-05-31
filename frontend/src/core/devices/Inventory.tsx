@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -338,6 +338,182 @@ function PanoramaForm({ initial, onDone }: { initial?: Panorama; onDone: () => v
 // Devices
 // =====================================================================
 
+type SortKey =
+  | "name"
+  | "host"
+  | "serial"
+  | "model"
+  | "group"
+  | "template"
+  | "polling"
+  | "last_poll";
+
+// Comparable value per sort key. Strings lower-cased for case-insensitive
+// ordering; nulls sort last by mapping to a high/low sentinel.
+function sortValue(d: Device, key: SortKey): string | number {
+  switch (key) {
+    case "name":
+      return (d.name || "").toLowerCase();
+    case "host":
+      return (d.ip_address || d.hostname || "").toLowerCase();
+    case "serial":
+      return (d.serial || "~").toLowerCase(); // "~" sorts after alnum
+    case "model":
+      return (d.model || "~").toLowerCase();
+    case "group":
+      return (d.device_group || "~").toLowerCase();
+    case "template":
+      return (d.template_stack || "~").toLowerCase();
+    case "polling":
+      return d.polling_enabled ? 0 : 1;
+    case "last_poll":
+      // Epoch ms; never-polled sorts last on asc.
+      return d.last_poll_at ? new Date(d.last_poll_at).getTime() : Number.MAX_SAFE_INTEGER;
+    default:
+      return "";
+  }
+}
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  dir,
+  onClick,
+  className = "",
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey | null;
+  dir: "asc" | "desc";
+  onClick: (k: SortKey) => void;
+  className?: string;
+}) {
+  const active = activeKey === sortKey;
+  return (
+    <th className={`text-left px-4 py-2 font-medium ${className}`}>
+      <button
+        type="button"
+        onClick={() => onClick(sortKey)}
+        className={`inline-flex items-center gap-1 hover:text-zinc-200 ${
+          active ? "text-zinc-200" : ""
+        }`}
+        title={`Sort by ${label}`}
+      >
+        {label}
+        <span className="text-[9px] text-zinc-500">
+          {active ? (dir === "asc" ? "▲" : "▼") : "↕"}
+        </span>
+      </button>
+    </th>
+  );
+}
+
+/** One label/value pair in the responsive "Details" disclosure row. */
+function DetailKV({
+  label,
+  value,
+  mono,
+  error,
+}: {
+  label: string;
+  value?: string | null;
+  mono?: boolean;
+  error?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[10px] uppercase tracking-wide text-zinc-600">{label}</dt>
+      <dd
+        className={`break-words ${mono ? "font-mono " : ""}${
+          error ? "text-rose-300" : "text-zinc-300"
+        }`}
+      >
+        {value ?? "—"}
+      </dd>
+    </div>
+  );
+}
+
+type RowAction = {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+};
+
+/**
+ * Compact "⋯" row-actions menu. Folds the secondary per-device actions
+ * (Test / Capacity / Edit / Delete) into one trigger so the Inventory
+ * row stops running off the page.
+ *
+ * The menu is `position: fixed`, anchored to the trigger via its
+ * bounding rect, so it is NOT clipped by the table's `overflow-x-auto`
+ * scroll container (an absolutely-positioned menu would be). A
+ * transparent full-screen backdrop handles click-outside; Esc closes.
+ */
+function RowActionsMenu({ actions, label }: { actions: RowAction[]; label: string }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+
+  const openMenu = () => {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+    setOpen(true);
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={() => (open ? setOpen(false) : openMenu())}
+        aria-label={label}
+        aria-haspopup="menu"
+        className="px-2 py-1 rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm leading-none"
+      >
+        ⋯
+      </button>
+      {open && pos && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            role="menu"
+            className="fixed z-50 min-w-40 rounded border border-zinc-700 bg-zinc-950 shadow-xl py-1 text-sm"
+            style={{ top: pos.top, right: pos.right }}
+          >
+            {actions.map((a) => (
+              <button
+                key={a.label}
+                role="menuitem"
+                disabled={a.disabled}
+                onClick={() => {
+                  setOpen(false);
+                  a.onClick();
+                }}
+                className={`block w-full text-left px-3 py-1.5 hover:bg-zinc-900 disabled:opacity-50 disabled:cursor-not-allowed ${
+                  a.danger ? "text-rose-300 hover:bg-rose-950/40" : "text-zinc-200"
+                }`}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 function DevicesSection() {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -357,6 +533,14 @@ function DevicesSection() {
   // pre-stage) want both halves, so default ON. Operators with a
   // genuine reason to act on one half can flip it off.
   const [groupHA, setGroupHA] = useState(true);
+  // Search + filter + sort state (phase: inventory enrich).
+  const [search, setSearch] = useState("");
+  const [filterGroup, setFilterGroup] = useState(""); // "" = all
+  const [filterTemplate, setFilterTemplate] = useState(""); // "" = all
+  // null sortKey → fall back to the HA-grouping order. Picking a column
+  // sorts by it explicitly (and HA adjacency yields to the sort).
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const test = useMutation({
     mutationFn: async (id: number) => ({ id, result: await api.testDevice(id) }),
@@ -390,23 +574,95 @@ function DevicesSection() {
 
   // Per-device "Capacity" panel — fetches cfg.general.max-* on demand.
   const [capacityFor, setCapacityFor] = useState<number | null>(null);
+  // Per-device "Details" disclosure — shows the secondary attributes
+  // (serial / group / template / access / last poll) that responsive
+  // breakpoints hide on narrower viewports, so nothing is ever lost and
+  // we never need a horizontal scrollbar.
+  const [detailFor, setDetailFor] = useState<number | null>(null);
 
   const devs: Device[] = devsQ.data ?? [];
 
-  // Order devices so HA peers land adjacent in the table when grouping
-  // is on. Pair key = min(id, peer_id) so both halves sort together;
-  // within a pair, lower id first (active is usually lower-id by
-  // convention but we don't depend on that — just deterministic).
-  // When grouping is off, fall back to id-asc to match the unsorted
-  // /devices response order.
-  const orderedDevs = groupHA
-    ? [...devs].sort((a, b) => {
+  // Distinct device-group / template-stack values for the filter
+  // dropdowns. Sorted, nulls excluded (a "—" device just won't match a
+  // specific filter; the "All" option covers it).
+  const groupOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(devs.map((d) => d.device_group).filter((g): g is string => !!g)),
+      ).sort(),
+    [devs],
+  );
+  const templateOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          devs.map((d) => d.template_stack).filter((t): t is string => !!t),
+        ),
+      ).sort(),
+    [devs],
+  );
+
+  // Search + filter, then order. An explicit column sort overrides the
+  // HA-adjacency ordering; with no column chosen we keep HA peers
+  // adjacent (when grouping is on) exactly as before.
+  const visibleDevs = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const matched = devs.filter((d) => {
+      if (filterGroup && d.device_group !== filterGroup) return false;
+      if (filterTemplate && d.template_stack !== filterTemplate) return false;
+      if (!q) return true;
+      const hay = [
+        d.name,
+        d.hostname,
+        d.ip_address,
+        d.serial,
+        d.device_group,
+        d.template_stack,
+        d.model,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(q);
+    });
+
+    if (sortKey) {
+      const dir = sortDir === "asc" ? 1 : -1;
+      return [...matched].sort((a, b) => {
+        const av = sortValue(a, sortKey);
+        const bv = sortValue(b, sortKey);
+        // Type-safe compare: numeric branch subtracts, string branch
+        // localeCompares. Avoids TS2365 (relational op on string|number)
+        // and gives proper locale string ordering.
+        const cmp =
+          typeof av === "number" && typeof bv === "number"
+            ? av - bv
+            : String(av).localeCompare(String(bv));
+        return cmp !== 0 ? cmp * dir : a.id - b.id;
+      });
+    }
+    if (groupHA) {
+      return [...matched].sort((a, b) => {
         const aKey = a.ha_peer_id == null ? a.id : Math.min(a.id, a.ha_peer_id);
         const bKey = b.ha_peer_id == null ? b.id : Math.min(b.id, b.ha_peer_id);
         if (aKey !== bKey) return aKey - bKey;
         return a.id - b.id;
-      })
-    : devs;
+      });
+    }
+    return matched;
+  }, [devs, search, filterGroup, filterTemplate, sortKey, sortDir, groupHA]);
+
+  // Backwards-compatible alias — the rest of the section iterates this.
+  const orderedDevs = visibleDevs;
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
 
   // Selection toggle that auto-includes the HA peer when grouping is
   // on. Used by both the per-row checkbox and the "select all" header
@@ -450,6 +706,62 @@ function DevicesSection() {
         }
       />
       {adding && <DeviceForm panos={panosQ.data ?? []} onDone={() => setAdding(false)} />}
+      {devs.length > 0 && (
+        <div className="px-4 py-3 border-b border-zinc-800 flex flex-wrap items-center gap-3 text-xs">
+          <Input
+            placeholder="Search name, IP, serial, group, template…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-72"
+          />
+          <label className="flex items-center gap-1.5 text-zinc-400">
+            <span className="text-zinc-500">Group</span>
+            <Select
+              value={filterGroup}
+              onChange={(e) => setFilterGroup(e.target.value)}
+              className="text-xs"
+            >
+              <option value="">All</option>
+              {groupOptions.map((g) => (
+                <option key={g} value={g}>
+                  {g}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label className="flex items-center gap-1.5 text-zinc-400">
+            <span className="text-zinc-500">Template</span>
+            <Select
+              value={filterTemplate}
+              onChange={(e) => setFilterTemplate(e.target.value)}
+              className="text-xs"
+            >
+              <option value="">All</option>
+              {templateOptions.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </Select>
+          </label>
+          {(search || filterGroup || filterTemplate || sortKey) && (
+            <button
+              onClick={() => {
+                setSearch("");
+                setFilterGroup("");
+                setFilterTemplate("");
+                setSortKey(null);
+              }}
+              className="text-zinc-500 hover:text-zinc-200"
+            >
+              reset
+            </button>
+          )}
+          <span className="text-zinc-600 ml-auto">
+            {visibleDevs.length} of {devs.length} shown
+          </span>
+        </div>
+      )}
       {selectedIds.size > 0 && (
         <div className="px-4 py-2 border-b border-zinc-800 bg-blue-950/30 flex items-center gap-3 text-xs">
           <span className="text-zinc-200">
@@ -477,7 +789,7 @@ function DevicesSection() {
       {devs.length === 0 ? (
         <Empty>No devices yet. Add one directly, or sync a Panorama to import its managed devices.</Empty>
       ) : (
-        <table className="w-full text-sm">
+        <table className="w-full text-sm table-auto">
           <thead className="text-xs uppercase text-zinc-500 border-b border-zinc-800">
             <tr>
               <th className="px-4 py-2 w-8">
@@ -501,16 +813,26 @@ function DevicesSection() {
                   title="Select all"
                 />
               </th>
-              <th className="text-left px-4 py-2 font-medium">Name</th>
-              <th className="text-left px-4 py-2 font-medium">Host</th>
-              <th className="text-left px-4 py-2 font-medium">Model</th>
-              <th className="text-left px-4 py-2 font-medium">Access</th>
-              <th className="text-left px-4 py-2 font-medium">Polling</th>
-              <th className="text-left px-4 py-2 font-medium">Last poll</th>
+              <SortHeader label="Name" sortKey="name" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Host" sortKey="host" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Serial" sortKey="serial" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden xl:table-cell" />
+              <SortHeader label="Model" sortKey="model" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden sm:table-cell" />
+              <SortHeader label="Group" sortKey="group" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden lg:table-cell" />
+              <SortHeader label="Template" sortKey="template" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden xl:table-cell" />
+              <th className="text-left px-4 py-2 font-medium hidden lg:table-cell">Access</th>
+              <SortHeader label="Polling" sortKey="polling" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Last poll" sortKey="last_poll" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden md:table-cell" />
               <th className="px-4 py-2"></th>
             </tr>
           </thead>
           <tbody>
+            {orderedDevs.length === 0 && (
+              <tr>
+                <td colSpan={11} className="px-4 py-6 text-center text-xs text-zinc-500">
+                  No devices match the current search / filters.
+                </td>
+              </tr>
+            )}
             {orderedDevs.map((d) => {
               // HA-pair visual stitching: a thin left border on both
               // rows of a pair when grouping is on, so the eye reads
@@ -533,6 +855,21 @@ function DevicesSection() {
                   </td>
                   <td className="px-4 py-2 text-zinc-100">
                     <div className="flex items-center gap-2">
+                      {/* Disclosure for the columns hidden at this width.
+                          Only rendered below xl, where some columns drop —
+                          at full width everything's inline so it'd be noise. */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDetailFor(detailFor === d.id ? null : d.id)
+                        }
+                        className="xl:hidden shrink-0 text-zinc-500 hover:text-zinc-200 w-4 text-center"
+                        title={detailFor === d.id ? "Hide details" : "Show all fields"}
+                        aria-expanded={detailFor === d.id}
+                        aria-label={`Toggle details for ${d.name}`}
+                      >
+                        {detailFor === d.id ? "▾" : "▸"}
+                      </button>
                       <span>{d.name}</span>
                       {inHAPair && (
                         <span
@@ -546,8 +883,23 @@ function DevicesSection() {
                     </div>
                   </td>
                   <td className="px-4 py-2 text-zinc-400">{d.ip_address ?? d.hostname}</td>
-                  <td className="px-4 py-2 text-zinc-400">{d.model ?? "—"}</td>
-                  <td className="px-4 py-2 text-zinc-500 text-xs">
+                  <td className="px-4 py-2 text-zinc-500 text-xs font-mono hidden xl:table-cell">
+                    {d.serial ?? "—"}
+                  </td>
+                  <td className="px-4 py-2 text-zinc-400 hidden sm:table-cell">{d.model ?? "—"}</td>
+                  <td
+                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate hidden lg:table-cell"
+                    title={d.device_group ?? ""}
+                  >
+                    {d.device_group ?? "—"}
+                  </td>
+                  <td
+                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate hidden xl:table-cell"
+                    title={d.template_stack ?? ""}
+                  >
+                    {d.template_stack ?? "—"}
+                  </td>
+                  <td className="px-4 py-2 text-zinc-500 text-xs hidden lg:table-cell">
                     {d.proxy_via_panorama ? "via Panorama" : d.has_api_key ? "direct" : "no key"}
                     <div className="text-[10px] text-zinc-600">{d.source}</div>
                   </td>
@@ -564,7 +916,7 @@ function DevicesSection() {
                       {d.polling_enabled ? "on" : "off"}
                     </button>
                   </td>
-                  <td className="px-4 py-2 text-xs text-zinc-500">
+                  <td className="px-4 py-2 text-xs text-zinc-500 hidden md:table-cell">
                     {d.last_poll_at ? new Date(d.last_poll_at).toLocaleString() : "never"}
                     {d.last_poll_error && (
                       <div className="text-rose-400 mt-0.5" title={d.last_poll_error}>
@@ -572,37 +924,88 @@ function DevicesSection() {
                       </div>
                     )}
                   </td>
-                  <td className="px-4 py-2 text-right space-x-2 whitespace-nowrap">
-                    <Button onClick={() => test.mutate(d.id)} disabled={test.isPending}>
-                      Test
-                    </Button>
-                    <Button
-                      onClick={() => navigate(`/upgrade?new=true&devices=${d.id}`)}
-                      title="Open a new upgrade job pre-filled with just this device"
-                    >
-                      Upgrade
-                    </Button>
-                    <Button onClick={() => setCapacityFor(capacityFor === d.id ? null : d.id)}>
-                      {capacityFor === d.id ? "Close" : "Capacity"}
-                    </Button>
-                    <Button onClick={() => setEditing(editing === d.id ? null : d.id)}>
-                      {editing === d.id ? "Close" : "Edit"}
-                    </Button>
-                    <Button variant="danger" onClick={() => del.mutate(d.id)}>
-                      Delete
-                    </Button>
+                  <td className="px-4 py-2 text-right whitespace-nowrap">
+                    {/* Primary action stays visible (Inventory is the
+                        upgrade launch point); the rest fold into a kebab
+                        so the row doesn't run off the page. */}
+                    <div className="flex items-center justify-end gap-2">
+                      <Button
+                        onClick={() => navigate(`/upgrade?new=true&devices=${d.id}`)}
+                        title="Open a new upgrade job pre-filled with just this device"
+                      >
+                        Upgrade
+                      </Button>
+                      <RowActionsMenu
+                        label={`Actions for ${d.name}`}
+                        actions={[
+                          {
+                            label: "Test connection",
+                            onClick: () => test.mutate(d.id),
+                            disabled: test.isPending,
+                          },
+                          {
+                            label: capacityFor === d.id ? "Hide capacity" : "Capacity",
+                            onClick: () =>
+                              setCapacityFor(capacityFor === d.id ? null : d.id),
+                          },
+                          {
+                            label: editing === d.id ? "Close editor" : "Edit",
+                            onClick: () => setEditing(editing === d.id ? null : d.id),
+                          },
+                          {
+                            label: "Delete",
+                            onClick: () => del.mutate(d.id),
+                            danger: true,
+                          },
+                        ]}
+                      />
+                    </div>
                   </td>
                 </tr>
+                {detailFor === d.id && (
+                  <tr className="bg-zinc-950/40 xl:hidden">
+                    <td colSpan={11} className="px-4 pl-10 py-3">
+                      <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
+                        <DetailKV label="Serial" value={d.serial} mono />
+                        <DetailKV label="Model" value={d.model} />
+                        <DetailKV label="Device group" value={d.device_group} />
+                        <DetailKV label="Template stack" value={d.template_stack} />
+                        <DetailKV
+                          label="Access"
+                          value={
+                            d.proxy_via_panorama
+                              ? "via Panorama"
+                              : d.has_api_key
+                                ? "direct"
+                                : "no key"
+                          }
+                        />
+                        <DetailKV label="Source" value={d.source} />
+                        <DetailKV
+                          label="Last poll"
+                          value={
+                            d.last_poll_at
+                              ? new Date(d.last_poll_at).toLocaleString()
+                              : "never"
+                          }
+                        />
+                        {d.last_poll_error && (
+                          <DetailKV label="Last poll error" value={d.last_poll_error} error />
+                        )}
+                      </dl>
+                    </td>
+                  </tr>
+                )}
                 {capacityFor === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={8} className="p-0">
+                    <td colSpan={11} className="p-0">
                       <CapacityPanel deviceId={d.id} onClose={() => setCapacityFor(null)} />
                     </td>
                   </tr>
                 )}
                 {testResult?.id === d.id && (
                   <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
-                    <td colSpan={8} className="px-4 py-2">
+                    <td colSpan={11} className="px-4 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <pre className={`text-xs whitespace-pre-wrap ${testResult.ok ? "text-emerald-300" : "text-rose-300"}`}>
                           {testResult.text}
@@ -616,7 +1019,7 @@ function DevicesSection() {
                 )}
                 {editing === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={8} className="p-0">
+                    <td colSpan={11} className="p-0">
                       <DeviceForm panos={panosQ.data ?? []} initial={d} onDone={() => setEditing(null)} />
                     </td>
                   </tr>

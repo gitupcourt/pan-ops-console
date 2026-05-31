@@ -91,12 +91,24 @@ celery.conf.update(
     result_expires=86400,
     # Beat schedule — populated at phase 2e cutover. The in-process
     # APScheduler that lived in app.main.lifespan was retired in the
-    # same commit. capacity.poll_all is the only entry today; phase 4d
-    # will add upgrade-side tasks (refresh.sync_all_panoramas, etc.).
+    # same commit.
+    #
+    # Capacity polling runs on TWO cadences (#89): config-class metrics
+    # (object/policy counts that only change on commit) on a slow beat,
+    # and live telemetry (CPU/memory/sessions/throughput) on a fast one.
+    # Splitting them keeps the heavy, rarely-changing config reads off the
+    # fast loop so a single Panorama can proxy many more devices within
+    # its API budget. capacity.poll_all stays defined for the manual
+    # "poll now" route but is deliberately NOT scheduled (would double the
+    # fast-metric reads).
     beat_schedule={
-        "capacity-poll-all": {
-            "task": "capacity.poll_all",
-            "schedule": float(_settings.POLL_INTERVAL_SECONDS),
+        "capacity-poll-system": {
+            "task": "capacity.poll_system_metrics",
+            "schedule": float(_settings.POLL_SYSTEM_INTERVAL_SECONDS),
+        },
+        "capacity-poll-config": {
+            "task": "capacity.poll_config_metrics",
+            "schedule": float(_settings.POLL_CONFIG_INTERVAL_SECONDS),
         },
         # Scheduled refresh of Panorama-imported device state. Without
         # this, Device.connected / last_seen_at only update on operator

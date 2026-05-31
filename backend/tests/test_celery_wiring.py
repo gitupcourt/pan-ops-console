@@ -21,12 +21,14 @@ def test_celery_app_loads():
     assert celery.conf.result_expires == 86400
 
 
-def test_capacity_poll_all_task_registered():
-    """The capacity poller's Celery task must be discoverable by name.
+def test_capacity_poll_tasks_registered():
+    """The capacity poller's Celery tasks must be discoverable by name.
 
-    Phase 2e's beat schedule entry looks up the task by the string
-    "capacity.poll_all"; if the task is unregistered or named
-    differently, beat silently does nothing.
+    Beat looks tasks up by string name; if a task is unregistered or
+    renamed, beat silently does nothing. #89 split scheduled polling into
+    `capacity.poll_config_metrics` (slow) + `capacity.poll_system_metrics`
+    (fast); `capacity.poll_all` stays registered for the manual
+    "poll now" route.
     """
     # Importing the tasks module is what registers the @celery.task
     # decorator. The worker `include` list does this implicitly at boot;
@@ -34,32 +36,44 @@ def test_capacity_poll_all_task_registered():
     import app.capacity.tasks  # noqa: F401
     from app.workers.celery_app import celery
 
-    assert "capacity.poll_all" in celery.tasks, (
-        f"capacity.poll_all not registered. Available: "
-        f"{[name for name in celery.tasks if not name.startswith('celery.')]}"
-    )
+    available = [name for name in celery.tasks if not name.startswith("celery.")]
+    for name in (
+        "capacity.poll_all",
+        "capacity.poll_config_metrics",
+        "capacity.poll_system_metrics",
+    ):
+        assert name in celery.tasks, f"{name} not registered. Available: {available}"
 
 
-def test_capacity_beat_schedule_entry():
-    """Phase 2e cutover wired capacity.poll_all into the beat schedule.
+def test_capacity_beat_schedule_split_cadences():
+    """#89 split capacity polling into two beats: a fast one for live
+    telemetry and a slow one for config-class metrics.
 
-    The matching APScheduler removal lives in the same PR — the two
-    must move in lockstep or polling would double-fire (during the
-    transition window) or stop entirely. This test guards the beat
-    side; the lifespan-no-longer-starts-APScheduler guard is the
-    absence of a scheduler.start() call in app.main.
+    Guards both entries point at the right task and read the right
+    interval setting. `capacity.poll_all` must NOT be on the schedule —
+    scheduling it alongside the system beat would double-poll the fast
+    metrics every fast cycle.
     """
     from app.config import get_settings
     from app.workers.celery_app import celery
 
     settings = get_settings()
     schedule = celery.conf.beat_schedule
-    assert "capacity-poll-all" in schedule, (
-        f"capacity.poll_all not in beat_schedule. Entries: {list(schedule)}"
-    )
-    entry = schedule["capacity-poll-all"]
-    assert entry["task"] == "capacity.poll_all"
-    assert entry["schedule"] == float(settings.POLL_INTERVAL_SECONDS)
+
+    assert "capacity-poll-system" in schedule, list(schedule)
+    sys_entry = schedule["capacity-poll-system"]
+    assert sys_entry["task"] == "capacity.poll_system_metrics"
+    assert sys_entry["schedule"] == float(settings.POLL_SYSTEM_INTERVAL_SECONDS)
+
+    assert "capacity-poll-config" in schedule, list(schedule)
+    cfg_entry = schedule["capacity-poll-config"]
+    assert cfg_entry["task"] == "capacity.poll_config_metrics"
+    assert cfg_entry["schedule"] == float(settings.POLL_CONFIG_INTERVAL_SECONDS)
+
+    # The full-sweep task is intentionally manual-only.
+    assert not any(
+        e.get("task") == "capacity.poll_all" for e in schedule.values()
+    ), "capacity.poll_all must not be scheduled (would double-poll fast metrics)"
 
 
 def test_panorama_sync_all_task_registered():

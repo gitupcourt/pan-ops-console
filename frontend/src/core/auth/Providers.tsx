@@ -33,7 +33,7 @@ export default function Providers() {
     <Card>
       <CardHeader
         title="Authentication providers"
-        description="Single sign-on via OIDC. Add a provider (Authentik, Microsoft Entra, Keycloak, Google, etc.) and a 'Sign in with…' button appears on the login page. Invite-only — OIDC sign-in matches an existing user by email or username."
+        description="Single sign-on via OIDC. Add a provider (Authentik, Microsoft Entra, Keycloak, Google, etc.) and a 'Sign in with…' button appears on the login page. Invite-only: sign-in links to a pre-existing account by verified email — or, for a provider you mark Trusted, by email/UPN without email_verified (needed for Entra)."
         action={
           <Button variant="primary" onClick={() => setAdding((v) => !v)}>
             {adding ? "Cancel" : "Add provider"}
@@ -118,6 +118,9 @@ function ProviderForm({
   const [clientSecret, setClientSecret] = useState("");
   const [scopes, setScopes] = useState(initial?.scopes ?? "openid email profile");
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [trustedIdentity, setTrustedIdentity] = useState(
+    initial?.trusted_identity ?? false,
+  );
   const [err, setErr] = useState<string | null>(null);
 
   const save = useMutation({
@@ -131,6 +134,7 @@ function ProviderForm({
           client_secret: clientSecret || null,
           scopes: scopes || null,
           enabled,
+          trusted_identity: trustedIdentity,
         });
       }
       const body: OIDCProviderCreate = {
@@ -141,6 +145,7 @@ function ProviderForm({
         client_secret: clientSecret,
         scopes,
         enabled,
+        trusted_identity: trustedIdentity,
       };
       return api.createOIDCProvider(body);
     },
@@ -227,6 +232,33 @@ function ProviderForm({
         <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
         Enabled (provider appears on the login page)
       </label>
+
+      <div className="rounded border border-amber-800/60 bg-amber-950/20 p-3">
+        <label className="flex items-start gap-2 text-xs text-zinc-300">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={trustedIdentity}
+            onChange={(e) => setTrustedIdentity(e.target.checked)}
+          />
+          <span>
+            <span className="text-amber-300 font-medium">
+              Trusted identity — link without <code>email_verified</code>
+            </span>
+            <br />
+            Lets a new sign-in link to a pre-invited account by matching the
+            IdP's email / UPN even when it doesn't assert{" "}
+            <code>email_verified</code> (e.g. Microsoft Entra, which never
+            sends it). Still invite-only — a matching local account must
+            already exist.{" "}
+            <span className="text-amber-400">
+              Enable ONLY for an IdP you control (your own tenant)
+            </span>
+            : on a multi-tenant or untrusted IdP this would allow account
+            takeover by asserting someone else's address.
+          </span>
+        </label>
+      </div>
 
       {err && <div className="text-xs text-rose-400">{err}</div>}
 

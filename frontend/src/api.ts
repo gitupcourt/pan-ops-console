@@ -55,6 +55,7 @@ export type OIDCProvider = {
   client_id: string;
   scopes: string;
   enabled: boolean;
+  trusted_identity: boolean;
   has_client_secret: boolean;
   created_at: string;
   updated_at: string;
@@ -68,6 +69,7 @@ export type OIDCProviderCreate = {
   client_secret: string;
   scopes?: string;
   enabled?: boolean;
+  trusted_identity?: boolean;
 };
 
 export type OIDCProviderUpdate = {
@@ -77,6 +79,7 @@ export type OIDCProviderUpdate = {
   client_secret?: string | null;
   scopes?: string | null;
   enabled?: boolean | null;
+  trusted_identity?: boolean | null;
 };
 
 export type AuthFromUserpass = { mode: "userpass"; username: string; password: string };

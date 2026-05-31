@@ -155,6 +155,10 @@ class OIDCProviderCreate(BaseModel):
     client_secret: str = Field(min_length=1)
     scopes: str = "openid email profile"
     enabled: bool = True
+    # Opt-in: trust this IdP's asserted identity for linking without
+    # email_verified (e.g. Entra). Default off — only enable for an IdP
+    # you control. See OIDCProvider.trusted_identity.
+    trusted_identity: bool = False
 
     @field_validator("issuer")
     @classmethod
@@ -171,6 +175,7 @@ class OIDCProviderUpdate(BaseModel):
     client_secret: str | None = None
     scopes: str | None = None
     enabled: bool | None = None
+    trusted_identity: bool | None = None
 
     @field_validator("issuer")
     @classmethod
@@ -189,6 +194,7 @@ class OIDCProviderRead(BaseModel):
     client_id: str
     scopes: str
     enabled: bool
+    trusted_identity: bool
     has_client_secret: bool
     created_at: datetime
     updated_at: datetime

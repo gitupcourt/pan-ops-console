@@ -25,7 +25,7 @@ panos-upgrade-assurance==2.1.1
 # Utilities
 httpx==0.27.2
 tenacity==9.0.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 
 # Dev: lets `watchmedo` restart Celery when backend/app/** changes.
 # Without this, code edits don't reach long-lived worker/beat processes.

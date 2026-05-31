@@ -409,6 +409,32 @@ function SortHeader({
   );
 }
 
+/** One label/value pair in the responsive "Details" disclosure row. */
+function DetailKV({
+  label,
+  value,
+  mono,
+  error,
+}: {
+  label: string;
+  value?: string | null;
+  mono?: boolean;
+  error?: boolean;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-[10px] uppercase tracking-wide text-zinc-600">{label}</dt>
+      <dd
+        className={`break-words ${mono ? "font-mono " : ""}${
+          error ? "text-rose-300" : "text-zinc-300"
+        }`}
+      >
+        {value ?? "—"}
+      </dd>
+    </div>
+  );
+}
+
 type RowAction = {
   label: string;
   onClick: () => void;
@@ -548,6 +574,11 @@ function DevicesSection() {
 
   // Per-device "Capacity" panel — fetches cfg.general.max-* on demand.
   const [capacityFor, setCapacityFor] = useState<number | null>(null);
+  // Per-device "Details" disclosure — shows the secondary attributes
+  // (serial / group / template / access / last poll) that responsive
+  // breakpoints hide on narrower viewports, so nothing is ever lost and
+  // we never need a horizontal scrollbar.
+  const [detailFor, setDetailFor] = useState<number | null>(null);
 
   const devs: Device[] = devsQ.data ?? [];
 
@@ -758,8 +789,7 @@ function DevicesSection() {
       {devs.length === 0 ? (
         <Empty>No devices yet. Add one directly, or sync a Panorama to import its managed devices.</Empty>
       ) : (
-        <div className="overflow-x-auto">
-        <table className="w-full text-sm min-w-[64rem]">
+        <table className="w-full text-sm table-auto">
           <thead className="text-xs uppercase text-zinc-500 border-b border-zinc-800">
             <tr>
               <th className="px-4 py-2 w-8">
@@ -785,13 +815,13 @@ function DevicesSection() {
               </th>
               <SortHeader label="Name" sortKey="name" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
               <SortHeader label="Host" sortKey="host" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
-              <SortHeader label="Serial" sortKey="serial" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
-              <SortHeader label="Model" sortKey="model" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
-              <SortHeader label="Group" sortKey="group" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
-              <SortHeader label="Template" sortKey="template" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
-              <th className="text-left px-4 py-2 font-medium">Access</th>
+              <SortHeader label="Serial" sortKey="serial" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden xl:table-cell" />
+              <SortHeader label="Model" sortKey="model" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden sm:table-cell" />
+              <SortHeader label="Group" sortKey="group" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden lg:table-cell" />
+              <SortHeader label="Template" sortKey="template" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden xl:table-cell" />
+              <th className="text-left px-4 py-2 font-medium hidden lg:table-cell">Access</th>
               <SortHeader label="Polling" sortKey="polling" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
-              <SortHeader label="Last poll" sortKey="last_poll" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
+              <SortHeader label="Last poll" sortKey="last_poll" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden md:table-cell" />
               <th className="px-4 py-2"></th>
             </tr>
           </thead>
@@ -825,6 +855,21 @@ function DevicesSection() {
                   </td>
                   <td className="px-4 py-2 text-zinc-100">
                     <div className="flex items-center gap-2">
+                      {/* Disclosure for the columns hidden at this width.
+                          Only rendered below xl, where some columns drop —
+                          at full width everything's inline so it'd be noise. */}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setDetailFor(detailFor === d.id ? null : d.id)
+                        }
+                        className="xl:hidden shrink-0 text-zinc-500 hover:text-zinc-200 w-4 text-center"
+                        title={detailFor === d.id ? "Hide details" : "Show all fields"}
+                        aria-expanded={detailFor === d.id}
+                        aria-label={`Toggle details for ${d.name}`}
+                      >
+                        {detailFor === d.id ? "▾" : "▸"}
+                      </button>
                       <span>{d.name}</span>
                       {inHAPair && (
                         <span
@@ -838,23 +883,23 @@ function DevicesSection() {
                     </div>
                   </td>
                   <td className="px-4 py-2 text-zinc-400">{d.ip_address ?? d.hostname}</td>
-                  <td className="px-4 py-2 text-zinc-500 text-xs font-mono">
+                  <td className="px-4 py-2 text-zinc-500 text-xs font-mono hidden xl:table-cell">
                     {d.serial ?? "—"}
                   </td>
-                  <td className="px-4 py-2 text-zinc-400">{d.model ?? "—"}</td>
+                  <td className="px-4 py-2 text-zinc-400 hidden sm:table-cell">{d.model ?? "—"}</td>
                   <td
-                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate"
+                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate hidden lg:table-cell"
                     title={d.device_group ?? ""}
                   >
                     {d.device_group ?? "—"}
                   </td>
                   <td
-                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate"
+                    className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate hidden xl:table-cell"
                     title={d.template_stack ?? ""}
                   >
                     {d.template_stack ?? "—"}
                   </td>
-                  <td className="px-4 py-2 text-zinc-500 text-xs">
+                  <td className="px-4 py-2 text-zinc-500 text-xs hidden lg:table-cell">
                     {d.proxy_via_panorama ? "via Panorama" : d.has_api_key ? "direct" : "no key"}
                     <div className="text-[10px] text-zinc-600">{d.source}</div>
                   </td>
@@ -871,7 +916,7 @@ function DevicesSection() {
                       {d.polling_enabled ? "on" : "off"}
                     </button>
                   </td>
-                  <td className="px-4 py-2 text-xs text-zinc-500">
+                  <td className="px-4 py-2 text-xs text-zinc-500 hidden md:table-cell">
                     {d.last_poll_at ? new Date(d.last_poll_at).toLocaleString() : "never"}
                     {d.last_poll_error && (
                       <div className="text-rose-400 mt-0.5" title={d.last_poll_error}>
@@ -917,6 +962,40 @@ function DevicesSection() {
                     </div>
                   </td>
                 </tr>
+                {detailFor === d.id && (
+                  <tr className="bg-zinc-950/40 xl:hidden">
+                    <td colSpan={11} className="px-4 pl-10 py-3">
+                      <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
+                        <DetailKV label="Serial" value={d.serial} mono />
+                        <DetailKV label="Model" value={d.model} />
+                        <DetailKV label="Device group" value={d.device_group} />
+                        <DetailKV label="Template stack" value={d.template_stack} />
+                        <DetailKV
+                          label="Access"
+                          value={
+                            d.proxy_via_panorama
+                              ? "via Panorama"
+                              : d.has_api_key
+                                ? "direct"
+                                : "no key"
+                          }
+                        />
+                        <DetailKV label="Source" value={d.source} />
+                        <DetailKV
+                          label="Last poll"
+                          value={
+                            d.last_poll_at
+                              ? new Date(d.last_poll_at).toLocaleString()
+                              : "never"
+                          }
+                        />
+                        {d.last_poll_error && (
+                          <DetailKV label="Last poll error" value={d.last_poll_error} error />
+                        )}
+                      </dl>
+                    </td>
+                  </tr>
+                )}
                 {capacityFor === d.id && (
                   <tr className="bg-zinc-950/60">
                     <td colSpan={11} className="p-0">
@@ -950,7 +1029,6 @@ function DevicesSection() {
             })}
           </tbody>
         </table>
-        </div>
       )}
     </Card>
   );

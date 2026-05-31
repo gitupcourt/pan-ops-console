@@ -270,6 +270,15 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     if not _phase_failover(db, job, active, passive):
         return
 
+    # The failover itself is now complete — the (former) passive is the
+    # active member serving traffic, and it has nothing more to do until
+    # the whole pair finishes. Without this, its badge sits frozen on
+    # "FAILOVER" for the entire (often 30+ min) primary-upgrade window.
+    # The sub-step makes it read "FAILOVER · partner upgrading" so the
+    # operator knows it's parked-by-design, not stuck. It flips to DONE
+    # at the end of the pair flow.
+    _set_substep(db, passive, "partner_upgrading")
+
     # ---- Optional gate before upgrading the (former) active ----
     if job.require_primary_upgrade_confirmation:
         if not _wait_for_confirm(db, active, TaskPhase.AWAITING_PRIMARY_UPGRADE_CONFIRM):
@@ -335,7 +344,7 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
             _fail_job(db, job.id, f"Pre-check failed for {device.name}")
             return False
 
-        progress = task.progress or {}
+        progress = dict(task.progress or {})
         progress["precheck_run_id"] = run.id
         progress["precheck_overall"] = run.overall_severity.value
         task.progress = progress
@@ -398,7 +407,7 @@ def _phase_snapshot(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
     snap = snapshot_svc.capture(
         db,
         device,
-        _client_for(device),
+        _client_for(db, device),
         SnapshotKind.PRE_UPGRADE,
         task_id=task.id,
     )
@@ -410,7 +419,7 @@ def _phase_snapshot(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
             f"Pre-upgrade snapshot captured (areas: {', '.join(sorted(snap.data.keys()))})",
         )
 
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     progress["pre_snapshot_id"] = snap.id
     task.progress = progress
     db.commit()
@@ -435,7 +444,7 @@ def _phase_post_snapshot_and_diff(
     post = snapshot_svc.capture(
         db,
         device,
-        _client_for(device),
+        _client_for(db, device),
         SnapshotKind.POST_UPGRADE,
         task_id=task.id,
     )
@@ -444,7 +453,7 @@ def _phase_post_snapshot_and_diff(
     else:
         _record(db, task, f"Post-upgrade snapshot captured")
 
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     progress["post_snapshot_id"] = post.id
 
     pre_id = (task.progress or {}).get("pre_snapshot_id")
@@ -491,7 +500,7 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
 
     _set_phase(db, task, TaskPhase.DOWNLOADING_IMAGE)
     try:
-        client = _client_for(device)
+        client = _client_for(db, device)
         if client.is_version_downloaded(job.target_version):
             _mark_phase_done(db, task, "ensure_image")
             return True
@@ -584,7 +593,8 @@ def _phase_install_and_wait(
         _set_phase(db, task, started_phase)
         # Step 1+2: install.
         try:
-            client = _client_for(device)
+            client = _client_for(db, device)
+            _set_substep(db, task, "installing")
             install_job = client.request_software_install(job.target_version)
             if not install_job:
                 raise RuntimeError("install request returned no job id")
@@ -600,14 +610,18 @@ def _phase_install_and_wait(
         # Step 3: optional pause before reboot. Default behavior — the
         # operator explicitly clicks Reboot now.
         if not job.auto_reboot_after_install:
+            _set_substep(db, task, None)
             _record(db, task, "Install done; awaiting operator confirmation to reboot")
             if not _wait_for_confirm(db, task, TaskPhase.AWAITING_REBOOT_CONFIRM):
                 return False
             _set_phase(db, task, started_phase)
 
-        # Step 4+5: restart and wait for mgmt plane.
+        # Step 4+5: restart and wait for mgmt plane. The "rebooting"
+        # sub-step covers the whole down→up window (often ~10 min) so the
+        # badge isn't frozen on the bare phase label the entire time.
         try:
-            client = _client_for(device)
+            client = _client_for(db, device)
+            _set_substep(db, task, "rebooting")
             _record(db, task, "Issuing system restart")
             client.restart_system()
             _record(
@@ -623,7 +637,8 @@ def _phase_install_and_wait(
             return False
 
         try:
-            precheck_svc.probe_device(db, device, client=_client_for(device))
+            _set_substep(db, task, "verifying")
+            precheck_svc.probe_device(db, device, client=_client_for(db, device))
             db.commit()
         except Exception as exc:  # noqa: BLE001
             log.warning("Post-reboot probe failed for %s: %s", device.name, exc)
@@ -645,6 +660,7 @@ def _phase_install_and_wait(
     # when the state is already passive. So even when this block re-runs
     # against a healthy device, it's cheap and safe.
     if device.ha_peer_id is not None and not _phase_already_done(task, "ha_resume_complete"):
+        _set_substep(db, task, "resuming_ha")
         _record(
             db, task,
             "Waiting for HA subsystem readiness before issuing resume"
@@ -686,8 +702,9 @@ def _phase_install_and_wait(
             _fail_job(db, job.id, f"HA resume was silently ignored on {device.name}")
             return False
 
+        _set_substep(db, task, "waiting_for_passive")
         _record(db, task, "Waiting for HA state to settle to 'passive'")
-        if not _wait_for_passive(_client_for(device), db, task, device):
+        if not _wait_for_passive(_client_for(db, device), db, task, device):
             _record(
                 db, task,
                 _format_passive_timeout_message(db, task, device),
@@ -732,7 +749,7 @@ def _phase_postcheck(
             _fail_job(db, job.id, f"Post-check failed for {device.name}")
             return False
 
-        progress = task.progress or {}
+        progress = dict(task.progress or {})
         progress["postcheck_run_id"] = run.id
         progress["postcheck_overall"] = run.overall_severity.value
         task.progress = progress
@@ -792,7 +809,7 @@ def _phase_failover(
 
     # Probe the passive (just-upgraded) member to get its CURRENT HA state.
     try:
-        precheck_svc.probe_device(db, passive_task.device, client=_client_for(passive_task.device))
+        precheck_svc.probe_device(db, passive_task.device, client=_client_for(db, passive_task.device))
         db.commit()
     except Exception as exc:  # noqa: BLE001
         _record(db, passive_task, f"Pre-failover probe of peer failed: {exc}", phase=TaskPhase.FAILED)
@@ -833,8 +850,28 @@ def _phase_failover(
 # ---------- helpers ----------
 
 
-def _client_for(device: Device) -> PanDeviceClient:
-    return precheck_svc.build_client(device)
+def _client_for(db: Session, device: Device) -> PanDeviceClient:
+    """Build a PanDeviceClient honoring the proxy-by-default policy.
+
+    Threads the session through to `build_client_with_fallback` so the
+    builder can read credentials + linkage rows out of Postgres. The
+    builder picks proxy-via-Panorama if both `Device.proxy_via_panorama`
+    and `Panorama.proxy_upgrades` are True, falling back to direct.
+
+    Historical bug: this function was named `precheck_svc.build_client`
+    in the upgrader codebase. Phase 4b lifted the builder out into
+    `core.command_proxy.builder.build_client_with_fallback` but
+    `_client_for` was never updated — it kept calling
+    `precheck_svc.build_client(device)`, which had been deleted. The
+    error never surfaced because every upgrade attempt we'd run
+    crashed at precheck (locale bug, candidate_config FAIL, etc.)
+    before reaching the first `_phase_snapshot` call that uses
+    `_client_for`. Job #2 was the first one to clear precheck.
+    """
+    from app.core.command_proxy.builder import build_client_with_fallback  # noqa: PLC0415
+
+    client, _route = build_client_with_fallback(db, device)
+    return client
 
 
 def _is_already_at_target(device: Device, target_version: str) -> bool:
@@ -860,15 +897,20 @@ def _phase_already_done(task: DeviceUpgradeTask, marker: str) -> bool:
 def _mark_phase_done(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
     """Persist a completion marker so Retry can resume past this phase.
 
-    Relies on `task.progress` being wrapped with
-    `MutableDict.as_mutable(JSON)` at the model level — that's what
-    makes mutations to the dict (in place OR via reassignment) mark
-    the column dirty. Without that wrapper, the orchestrator's
-    "read dict, mutate, reassign same ref" pattern silently no-ops
-    half the time. We hit this in production: branch1fw02's task
-    advanced phases but `completed_phases` stayed empty in the DB.
+    Uses the dict-copy + reassign pattern: `dict(task.progress or {})`
+    creates a fresh plain dict, mutations happen locally, then we set
+    `task.progress = progress` to a NEW reference so SQLAlchemy's
+    change detection sees a dirty attribute on the next commit.
+
+    Why the copy: the orchestrator commits between mutations in
+    places like `_phase_post_snapshot_and_diff` (snapshot_svc.compare
+    commits internally). A previous attempt at
+    `MutableDict.as_mutable(JSON)` on the column blew up there —
+    MutableDict's `flag_modified` raised `InvalidRequestError: not
+    present in the object state` against the expired-by-commit
+    attribute. Plain JSON + dict copy sidesteps the whole class of bug.
     """
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     completed = list(progress.get("completed_phases", []))
     if marker not in completed:
         completed.append(marker)
@@ -881,7 +923,7 @@ def _unmark_phase(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
     """Remove a phase-completion marker. Used by state reconciliation when
     we observe the device hasn't actually completed the phase the marker
     claims. Idempotent — no-op if the marker wasn't set."""
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     completed = list(progress.get("completed_phases", []))
     if marker in completed:
         completed.remove(marker)
@@ -928,7 +970,7 @@ def reconcile_markers_with_device_state(
         probed = False
         # Local import to keep the top-of-file import list focused.
         from app.upgrade.services import precheck as precheck_svc  # noqa: PLC0415
-        precheck_svc.probe_device(db, device, client=_client_for(device))
+        precheck_svc.probe_device(db, device, client=_client_for(db, device))
         db.refresh(device)
         probed = True
     except Exception as exc:  # noqa: BLE001
@@ -1056,7 +1098,7 @@ def _wait_for_ha_subsystem_ready(
     last_state = None
     while time.monotonic() < deadline:
         try:
-            client = _client_for(device)
+            client = _client_for(db, device)
             info = client.get_system_info()
             state = (info.ha_state or "").lower().strip()
             if state and state != "initial":
@@ -1088,7 +1130,7 @@ def _ha_op_with_retry(
     last_exc: Exception | None = None
     for attempt in range(1, HA_OP_RETRIES + 1):
         try:
-            client = _client_for(device)  # fresh socket each attempt
+            client = _client_for(db, device)  # fresh socket each attempt
             op_fn(client)
             if attempt > 1:
                 _record(db, task, f"{op_name} succeeded on attempt {attempt}")
@@ -1139,7 +1181,7 @@ def _verify_resume_took_effect(
         last_seen = "unknown"
         while time.monotonic() < deadline:
             try:
-                info = _client_for(device).get_system_info()
+                info = _client_for(db, device).get_system_info()
                 state = (info.ha_state or "").lower().strip()
                 last_seen = state or "unknown"
                 if state and state != "suspended":
@@ -1235,7 +1277,7 @@ def _wait_for_passive(
 
     # Stash the diagnostic context on task.progress so the failure handler
     # (and the UI) can render a much more useful error than just "timed out."
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     progress["wait_for_passive_diagnostics"] = {
         "last_state": last_state or "unknown",
         "states_seen": states_seen,
@@ -1280,7 +1322,7 @@ def _format_passive_timeout_message(
         peer = db.get(Device, device.ha_peer_id)
         if peer is not None:
             try:
-                peer_client = _client_for(peer)
+                peer_client = _client_for(db, peer)
                 peer_info = peer_client.get_system_info()
                 peer.ha_state = peer_info.ha_state
                 peer.current_version = peer_info.sw_version or peer.current_version
@@ -1358,7 +1400,7 @@ def _set_job_progress(db: Session, task: DeviceUpgradeTask, key: str, percent) -
         new_pct = int(percent)
     except (TypeError, ValueError):
         return
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     if progress.get(key) == new_pct:
         return
     progress[key] = new_pct
@@ -1487,13 +1529,42 @@ def _wait_for_override(
 def _set_phase(db: Session, task: DeviceUpgradeTask, phase: TaskPhase) -> None:
     task.phase = phase
     task.tick_count = (task.tick_count or 0) + 1
+    # Clear any sub-step label when the MAJOR phase changes — a stale
+    # "rebooting" must not bleed into POSTCHECK. The substep is a
+    # within-phase refinement; the phase change is the reset point.
+    progress = dict(task.progress or {})
+    if progress.get("phase_substep") is not None:
+        progress["phase_substep"] = None
+        task.progress = progress
     db.commit()
     db.refresh(task)
 
 
+def _set_substep(db: Session, task: DeviceUpgradeTask, substep: str | None) -> None:
+    """Set the within-phase sub-step label shown in the UI as
+    "UPGRADE SECONDARY · rebooting".
+
+    The big phases (UPGRADE_*, FAILOVER) span several minutes of distinct
+    internal work — install, reboot, mgmt-plane wait, HA resume,
+    wait-for-passive — that all share one phase enum value. Without a
+    sub-step the badge looks frozen for ~10 min during a reboot. This
+    writes `progress.phase_substep`; the frontend renders it next to the
+    phase badge and falls back to the raw phase when it's null.
+
+    No schema change — `phase_substep` rides in the existing progress
+    JSON. Idempotent on no-op (same value → skip the commit).
+    """
+    progress = dict(task.progress or {})
+    if progress.get("phase_substep") == substep:
+        return
+    progress["phase_substep"] = substep
+    task.progress = progress
+    db.commit()
+
+
 def _record(db: Session, task: DeviceUpgradeTask, message: str, *, phase: TaskPhase | None = None) -> None:
     """Append a timestamped line to task.progress.log and optionally set phase + error."""
-    progress = task.progress or {}
+    progress = dict(task.progress or {})
     log_lines = progress.get("log") or []
     log_lines.append(f"{_now_iso()} {message}")
     progress["log"] = log_lines
@@ -1513,10 +1584,18 @@ def _fail_job(db: Session, job_id: int, reason: str) -> None:
     job = db.get(UpgradeJob, job_id)
     if job is None:
         return
+    # First-write-wins on the reason: the first thing to fail a job is the
+    # root cause; later cascade failures (e.g. a second task tripping over
+    # the now-FAILED job) must not overwrite it. We set it even if the job
+    # is already terminal-without-a-reason, to cover a state flipped
+    # elsewhere. Without this the orchestrator-crash / timeout paths left
+    # the UI showing a bare "FAILED" with no explanation.
+    if reason and not job.failure_reason:
+        job.failure_reason = reason
     if job.state not in (JobState.COMPLETED, JobState.FAILED, JobState.ABORTED):
         job.state = JobState.FAILED
         job.finished_at = datetime.now(timezone.utc)
-        db.commit()
+    db.commit()
 
 
 def _job_terminal(db: Session, job: UpgradeJob) -> bool:

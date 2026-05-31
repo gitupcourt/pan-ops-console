@@ -109,6 +109,7 @@ def _job_to_read(job: UpgradeJob, task_count: int) -> JobRead:
             "created_at": job.created_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
+            "failure_reason": job.failure_reason,
         }
     )
 
@@ -133,6 +134,19 @@ def _task_to_read(task: DeviceUpgradeTask) -> TaskRead:
         if latest is not None:
             precheck_payload = _precheck_to_summary(latest)
 
+    # Snapshot IDs are stashed in progress by the orchestrator
+    # (_phase_snapshot / _phase_post_snapshot_and_diff). Lift them to
+    # top-level fields on TaskRead so the UI doesn't have to scrape
+    # progress to know what's clickable.
+    progress = task.progress or {}
+    failing_areas_raw = progress.get("snapshot_diff_failing_areas")
+    if isinstance(failing_areas_raw, str):
+        failing_areas = [a.strip() for a in failing_areas_raw.split(",") if a.strip()]
+    elif isinstance(failing_areas_raw, list):
+        failing_areas = [str(a) for a in failing_areas_raw]
+    else:
+        failing_areas = None
+
     return TaskRead.model_validate(
         {
             "id": task.id,
@@ -148,6 +162,11 @@ def _task_to_read(task: DeviceUpgradeTask) -> TaskRead:
             "updated_at": task.updated_at,
             "progress": task.progress,
             "precheck": precheck_payload,
+            "pre_snapshot_id": progress.get("pre_snapshot_id"),
+            "post_snapshot_id": progress.get("post_snapshot_id"),
+            "snapshot_diff_id": progress.get("snapshot_diff_id"),
+            "snapshot_diff_all_passed": progress.get("snapshot_diff_all_passed"),
+            "snapshot_diff_failing_areas": failing_areas,
         }
     )
 
@@ -199,6 +218,7 @@ def _job_to_detail(job: UpgradeJob) -> JobDetail:
             "created_at": job.created_at,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
+            "failure_reason": job.failure_reason,
             "workflow_stages": job.workflow_stages,
             "image_id": job.image_id,
             "device_pull_image": job.device_pull_image,

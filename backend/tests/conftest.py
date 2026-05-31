@@ -50,6 +50,17 @@ _FAKE_CATALOG = Path(os.environ["CATALOG_PATH"])
 _FAKE_CATALOG.write_text("version: 1\nmetrics: []\n", encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Clear the in-process auth rate-limiter between tests. It's a
+    module-global dict that otherwise accumulates login/callback hits
+    across the whole session and would spuriously 429 later tests."""
+    from app.core.auth import ratelimit
+    ratelimit.reset()
+    yield
+    ratelimit.reset()
+
+
 @pytest.fixture
 def client():
     """Fresh TestClient per test, with an empty schema produced by alembic.

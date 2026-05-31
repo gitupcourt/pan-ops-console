@@ -48,6 +48,14 @@ def _alembic_config() -> Config:
     ini_path = Path(__file__).resolve().parents[2] / "alembic.ini"
     cfg = Config(str(ini_path))
     cfg.set_main_option("script_location", str(ini_path.parent / "alembic"))
+    # We invoke Alembic in-process from the FastAPI lifespan. Tell env.py
+    # NOT to run fileConfig() — otherwise alembic.ini's logging config
+    # clobbers the app's already-initialized root logger (root→WARN,
+    # disable_existing_loggers), silently dropping every INFO log for the
+    # life of the process: request logs, OIDC callback claims, and the
+    # F-4 crypto/login audit trail. The standalone `alembic` CLI leaves
+    # this attribute unset, so it still configures its own logging.
+    cfg.attributes["configure_logging"] = False
     return cfg
 
 

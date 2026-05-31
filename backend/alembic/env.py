@@ -36,8 +36,21 @@ from app.upgrade import models as _upgrade_models  # noqa: E402,F401
 
 config = context.config
 
-# Alembic's own logging config (alembic.ini)
-if config.config_file_name is not None:
+# Alembic's own logging config (alembic.ini).
+#
+# CRITICAL: only do this for the standalone `alembic` CLI (CI smoke tests,
+# dev shell). When migrations run IN-PROCESS from the FastAPI lifespan
+# (app.core.migrations.run_migrations), `fileConfig()` would reconfigure
+# the HOST process's root logger to alembic.ini's settings — root level
+# WARN, `disable_existing_loggers=True` — which silently kills every app
+# INFO log for the life of the pod: request logs, the OIDC callback claims
+# line, AND the F-4 crypto/login audit trail. The app already configured
+# logging via basicConfig before it ever calls Alembic, so we must NOT
+# clobber it. app.core.migrations signals this by setting
+# `config.attributes["configure_logging"] = False`.
+if config.config_file_name is not None and config.attributes.get(
+    "configure_logging", True
+):
     fileConfig(config.config_file_name)
 
 # Inject DATABASE_URL from app.config — same value FastAPI uses.

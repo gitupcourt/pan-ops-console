@@ -41,7 +41,7 @@ def sync_panorama(
     """
     if not pano.encrypted_api_key:
         raise ValueError(f"Panorama {pano.name} has no API key stored")
-    api_key = decrypt_key(pano.encrypted_api_key)
+    api_key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
     client = PanoramaClient(pano.hostname, api_key, verify_tls=pano.verify_tls)
     try:
         managed = client.list_managed_devices()

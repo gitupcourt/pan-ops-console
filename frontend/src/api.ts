@@ -55,6 +55,7 @@ export type OIDCProvider = {
   client_id: string;
   scopes: string;
   enabled: boolean;
+  trusted_identity: boolean;
   has_client_secret: boolean;
   created_at: string;
   updated_at: string;
@@ -68,6 +69,7 @@ export type OIDCProviderCreate = {
   client_secret: string;
   scopes?: string;
   enabled?: boolean;
+  trusted_identity?: boolean;
 };
 
 export type OIDCProviderUpdate = {
@@ -77,6 +79,7 @@ export type OIDCProviderUpdate = {
   client_secret?: string | null;
   scopes?: string | null;
   enabled?: boolean | null;
+  trusted_identity?: boolean | null;
 };
 
 export type AuthFromUserpass = { mode: "userpass"; username: string; password: string };
@@ -239,6 +242,9 @@ export type UpgradeJob = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  // Why the job failed (orchestrator crash / timeout / first task
+  // failure). Null unless state === "failed".
+  failure_reason: string | null;
 };
 
 export type PrecheckCheckResult = {
@@ -281,6 +287,48 @@ export type UpgradeTask = {
   progress: Record<string, unknown> | null;
   // Latest PrecheckRun for the device, or null if not yet run.
   precheck: PrecheckSummary | null;
+  // Snapshot + diff IDs. Surfaced top-level so the JobDetail UI can
+  // render View/Compare buttons without scraping `progress`.
+  pre_snapshot_id: number | null;
+  post_snapshot_id: number | null;
+  snapshot_diff_id: number | null;
+  snapshot_diff_all_passed: boolean | null;
+  snapshot_diff_failing_areas: string[] | null;
+};
+
+export type SnapshotKind = "pre_upgrade" | "post_upgrade" | "ad_hoc";
+
+export type Snapshot = {
+  id: number;
+  device_id: number;
+  device_name: string;
+  task_id: number | null;
+  kind: SnapshotKind;
+  taken_at: string;
+  pan_os_version: string | null;
+  error: string | null;
+  // Per-area blob — shape varies by area (routes, license, ip_sec_tunnels…).
+  data: Record<string, unknown>;
+};
+
+export type SnapshotDiffAreaReport = {
+  passed: boolean;
+  added: unknown[];
+  missing: unknown[];
+  changed: Record<string, unknown>;
+};
+
+export type SnapshotDiff = {
+  id: number;
+  left_snapshot_id: number;
+  right_snapshot_id: number;
+  task_id: number | null;
+  computed_at: string;
+  all_passed: boolean;
+  failing_areas: string | null;
+  report: Record<string, SnapshotDiffAreaReport>;
+  left_version: string | null;
+  right_version: string | null;
 };
 
 // Detail type kept as an alias for API compatibility; same payload.
@@ -402,6 +450,8 @@ export type HeatmapCell = {
 export type CapacityTableRow = {
   device_id: number;
   device_name: string;
+  serial: string | null;
+  ip_address: string | null;
   model: string | null;
   software_version: string | null;
   device_group: string | null;
@@ -641,6 +691,12 @@ export const api = {
     j<UpgradeJobDetail>(`/upgrade/jobs/${id}/abort`, { method: "POST" }),
   deleteUpgradeJob: (id: number) =>
     j<void>(`/upgrade/jobs/${id}`, { method: "DELETE" }),
+
+  // Upgrade: snapshots + diffs (read-only viewer endpoints; the
+  // orchestrator captures, this just exposes for the JobDetail UI).
+  getSnapshot: (id: number) => j<Snapshot>(`/upgrade/snapshots/${id}`),
+  getSnapshotDiff: (id: number) =>
+    j<SnapshotDiff>(`/upgrade/snapshot-diffs/${id}`),
 
   // Upgrade: precheck sets (phase 13b)
   listPrecheckSets: () => j<PrecheckSetRead[]>("/upgrade/precheck-sets"),

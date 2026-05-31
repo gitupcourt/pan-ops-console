@@ -81,10 +81,10 @@ frontend/src/
 
 ### Backend
 
-Python 3.11 + FastAPI + SQLAlchemy + APScheduler + pan-os-python.
+Python 3.11 + FastAPI + SQLAlchemy + Celery + pan-os-python.
 
 - **HTTP API** under `/devices`, `/panoramas`, `/metrics` — CRUD for the inventory, time-series reads, manual poll trigger
-- **APScheduler background job** fires on `POLL_INTERVAL_SECONDS` (default 300). Walks every enabled device, runs every metric in the catalog, writes samples to SQLite
+- **Celery beat polling** on two cadences: live telemetry (CPU, memory, sessions, throughput) on the fast `POLL_SYSTEM_INTERVAL_SECONDS` beat (defaults to `POLL_INTERVAL_SECONDS`, 300s), and config-class object/policy counts on the slow `POLL_CONFIG_INTERVAL_SECONDS` beat (default 3600s, since they only change on commit). Each beat walks every enabled device, polls its subset of the catalog, and writes samples. Splitting cadences keeps heavy config reads off the fast loop so one Panorama can proxy many more devices within its API budget
 - **Storage layer** behind a `SampleStore` interface. Default SQLAlchemy implementation writes SQLite. Future Postgres/TimescaleDB implementation is a drop-in
 - **Encryption** — Fernet-symmetric. Firewall API keys (and Panorama keys) are encrypted at rest. The key lives in the `FERNET_KEY` env var
 

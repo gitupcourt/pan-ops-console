@@ -496,6 +496,27 @@ def oidc_callback(
                 f"no active account matches this identity{hint}. "
                 "Ask an admin to invite you (by email)."
             )
+        # AppSec — only ever bind a NOT-YET-LINKED invitee. We reach here
+        # only when the (provider, sub) lookup above MISSED, so if the row
+        # matched by email/UPN is ALREADY linked to a (provider, sub), this
+        # is a DIFFERENT identity presenting an existing user's address —
+        # a reused UPN on a new IdP object, or a takeover attempt. Never
+        # re-point an existing link; refuse and flag. Without this guard a
+        # new sub + a matching address would silently inherit the account
+        # (incl. admin) — the exact hijack the (provider, sub) key exists
+        # to prevent.
+        if linked.oidc_provider is not None or linked.oidc_sub is not None:
+            logging.getLogger("audit.auth").warning(
+                "OIDC link REFUSED: provider=%s sub=%s matched already-linked "
+                "user id=%s (existing provider=%s) — not re-pointing; possible "
+                "UPN reuse or takeover attempt",
+                provider_name, sub, linked.id, linked.oidc_provider,
+            )
+            return _oidc_error_redirect(
+                "this identity could not be linked to an account. If you "
+                "believe you should have access, ask an admin."
+            )
+
         # First successful link — bind the durable identity so future
         # logins match on (provider, sub) and never depend on email again.
         user = linked

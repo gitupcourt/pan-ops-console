@@ -513,3 +513,81 @@ def test_trusted_provider_does_not_link_inactive_user(client, monkeypatch, db):
     r = client.get("/auth/oidc/fake/callback?code=a&state=s", follow_redirects=False)
     assert "oidc_error" in r.headers["location"]
     assert client.get("/auth/me").status_code == 401
+
+
+def test_oidc_verified_email_does_not_relink_already_linked_account(client, monkeypatch, db):
+    """AppSec: a verified email matching an ALREADY-LINKED account must NOT
+    re-point its (provider, sub). A new sub presenting an existing user's
+    verified address is a different identity (UPN reuse on a new IdP object,
+    or a takeover attempt) — refuse, never overwrite the durable link.
+
+    The steady-state test covers `same sub + changed email`; this covers
+    the complementary `different sub + same address`."""
+    from app.core.auth.models.user import User
+
+    _seed_provider(client)
+    _seed_invited_user(client, "frank", "frank@example.com")
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+
+    # First login binds (fake, frank-sub-orig) to frank.
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "frank-sub-orig", "email": "frank@example.com", "email_verified": True,
+    })
+    assert client.get(
+        "/auth/oidc/fake/callback?code=a&state=s1", follow_redirects=False
+    ).headers["location"] == "/"
+    client.post("/auth/logout")
+
+    # Second login: DIFFERENT sub, same verified email → must be refused.
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "frank-sub-ATTACKER", "email": "frank@example.com", "email_verified": True,
+    })
+    r = client.get("/auth/oidc/fake/callback?code=b&state=s2", follow_redirects=False)
+    assert r.status_code == 302
+    assert "oidc_error" in r.headers["location"]
+    assert client.get("/auth/me").status_code == 401  # no session issued
+
+    # Durable link unchanged — still bound to the original sub.
+    db.expire_all()
+    frank = db.query(User).filter(User.username == "frank").first()
+    assert frank.oidc_sub == "frank-sub-orig"
+
+
+def test_oidc_trusted_provider_does_not_relink_already_linked_account(client, monkeypatch, db):
+    """Same guard on the TRUSTED path (the one enabled in prod for Entra):
+    a reused UPN presenting a new sub must not inherit an already-linked
+    account. Without the guard this is silent privilege inheritance when an
+    offboarded user's UPN is reassigned to a new hire."""
+    from app.core.auth.models.user import User
+
+    _seed_provider(client, trusted_identity=True)
+    _seed_invited_user(client, "ivan", "ivan@corp.example")
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+
+    # First Entra login (no email_verified, UPN only) binds the original sub.
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "entra-ivan-orig", "email": "", "preferred_username": "ivan@corp.example",
+    })
+    assert client.get(
+        "/auth/oidc/fake/callback?code=a&state=s1", follow_redirects=False
+    ).headers["location"] == "/"
+    client.post("/auth/logout")
+
+    # New IdP object reuses the UPN → NEW sub. Must be refused, not inherited.
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "entra-NEWHIRE", "email": "", "preferred_username": "ivan@corp.example",
+    })
+    r = client.get("/auth/oidc/fake/callback?code=b&state=s2", follow_redirects=False)
+    assert r.status_code == 302
+    assert "oidc_error" in r.headers["location"]
+    assert client.get("/auth/me").status_code == 401
+
+    db.expire_all()
+    ivan = db.query(User).filter(User.username == "ivan").first()
+    assert ivan.oidc_sub == "entra-ivan-orig"  # original link untouched

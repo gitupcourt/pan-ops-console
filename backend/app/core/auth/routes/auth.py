@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import Response as RawResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session as DBSession
 
 from app.config import get_settings
@@ -429,6 +430,11 @@ def oidc_callback(
         provider_name, sub, email, email_verified, preferred, claims.get("name"),
     )
 
+    # Resolve the provider config to read its trust flag — set by an admin
+    # only for IdPs they control (see OIDCProvider.trusted_identity).
+    provider_cfg = oidc.get_provider(db, provider_name)
+    trusted = bool(provider_cfg and provider_cfg.trusted_identity)
+
     # AppSec F-1(b): identity is keyed on the durable (provider, sub),
     # NOT on mutable email / UPN. We match that FIRST; it's set the first
     # time a user links, so a reused UPN or changed email can never
@@ -441,23 +447,44 @@ def oidc_callback(
 
     if user is None:
         # AppSec F-7: OIDC is strictly invite-only — it NEVER bootstraps
-        # an admin. The first admin is created locally via
-        # /auth/signup-first; a provider can only be configured by an
-        # existing admin, so "first OIDC sign-in becomes admin" was both
-        # unreachable in normal flow and a latent footgun. Removed.
-        #
-        # Invite-only INITIAL link: the only attribute we'll auto-link on
-        # is a VERIFIED email matching a pre-invited row — never an
-        # unverified email and never a bare username/UPN (both are
-        # attacker-controllable on an untrusted IdP). Once linked, the
-        # (provider, sub) branch above handles all future logins.
-        user = None
+        # an admin and NEVER creates accounts. A matching pre-existing
+        # local row is always required.
+        linked = None
+
+        # (1) VERIFIED email — always permitted (F-1 default path).
         if verified_email:
-            user = db.query(User).filter(User.email == verified_email).first()
-        if user is None or not user.is_active:
-            # Distinguish the two failure modes so the operator can act.
+            linked = db.query(User).filter(User.email == verified_email).first()
+
+        # (2) TRUSTED provider — link on the IdP's asserted identity even
+        # without email_verified. Opt-in per provider (default off), for
+        # IdPs the operator controls — e.g. Microsoft Entra, which never
+        # emits email_verified (and often no email claim; the address
+        # arrives as preferred_username/upn). We match the asserted
+        # email / UPN / preferred_username against a local row's email,
+        # case-insensitive. Still invite-only: the local row must exist.
+        # For an UNTRUSTED IdP this branch never runs, so F-1 holds — a
+        # principal asserting a victim's UPN can't link.
+        if (linked is None or not linked.is_active) and trusted:
+            candidates = {
+                c.strip().lower()
+                for c in (email, preferred, claims.get("upn"))
+                if isinstance(c, str) and c.strip()
+            }
+            for cand in candidates:
+                row = db.query(User).filter(func.lower(User.email) == cand).first()
+                if row is not None and row.is_active:
+                    linked = row
+                    logging.getLogger("audit.auth").warning(
+                        "OIDC trusted-link: provider=%s sub=%s matched local "
+                        "user id=%s on asserted identity %r (no email_verified)",
+                        provider_name, sub, row.id, cand,
+                    )
+                    break
+
+        if linked is None or not linked.is_active:
+            # Distinguish the failure modes so the operator can act.
             # Only ever echo the user's OWN claims back to them.
-            if email and not email_verified:
+            if email and not email_verified and not trusted:
                 return _oidc_error_redirect(
                     "your IdP did not assert email_verified for "
                     f"{email}, so we won't link an account on it. "
@@ -470,11 +497,16 @@ def oidc_callback(
                 "Ask an admin to invite you (by email)."
             )
         # First successful link — bind the durable identity so future
-        # logins don't depend on email at all.
+        # logins match on (provider, sub) and never depend on email again.
+        user = linked
         user.oidc_provider = provider_name
         user.oidc_sub = sub
         db.commit()
         db.refresh(user)
+        logging.getLogger("audit.auth").info(
+            "OIDC identity linked: provider=%s sub=%s user_id=%s",
+            provider_name, sub, user.id,
+        )
     elif not user.is_active:
         return _oidc_error_redirect("your account is disabled. Ask an admin.")
 

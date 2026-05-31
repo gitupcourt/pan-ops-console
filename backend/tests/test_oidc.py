@@ -393,3 +393,123 @@ def test_oidc_never_bootstraps_admin(client, monkeypatch, db):
     db.expire_all()
     assert db.query(User).count() == 0
     assert client.get("/auth/me").status_code == 401
+
+
+# ---------- Trusted-provider linking (Entra compatibility) ----------
+#
+# Microsoft Entra never sends `email_verified` (and often no `email` claim
+# at all — the address arrives as preferred_username/upn). The F-1
+# verified-email gate therefore locks out every Entra user. A per-provider
+# `trusted_identity` opt-in (default off) restores onboarding for an IdP the
+# operator controls, by matching the asserted email/UPN against a pre-invited
+# row — without weakening F-1 for untrusted IdPs.
+
+
+def test_provider_trusted_identity_roundtrips_through_api(client):
+    """The flag persists and is returned by the admin API (default False)."""
+    pid = _seed_provider(client)
+    got = next(p for p in client.get("/providers/oidc").json() if p["id"] == pid)
+    assert got["trusted_identity"] is False
+    client.patch(f"/providers/oidc/{pid}", json={"trusted_identity": True})
+    got = next(p for p in client.get("/providers/oidc").json() if p["id"] == pid)
+    assert got["trusted_identity"] is True
+
+
+def test_trusted_provider_links_entra_style_without_email_verified(client, monkeypatch, db):
+    """Provider marked trusted links a pre-invited user by preferred_username
+    (UPN) even though the IdP sends no email and no email_verified — the
+    real-world Entra shape. Binds (provider, sub) for future logins."""
+    from app.core.auth.models.user import User
+
+    _seed_provider(client, trusted_identity=True)
+    _seed_invited_user(client, "frank", "frank@corp.example")
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "entra-frank-oid",
+        "email": "",                              # Entra often omits email
+        # no email_verified key at all
+        "preferred_username": "Frank@Corp.Example",  # UPN; casing differs
+        "name": "Frank",
+    })
+
+    r = client.get("/auth/oidc/fake/callback?code=a&state=s", follow_redirects=False)
+    assert r.headers["location"] == "/", r.headers.get("location")
+    assert client.get("/auth/me").json()["username"] == "frank"
+    db.expire_all()
+    frank = db.query(User).filter(User.username == "frank").first()
+    assert frank.oidc_provider == "fake"
+    assert frank.oidc_sub == "entra-frank-oid"
+
+
+def test_untrusted_provider_does_not_link_on_upn(client, monkeypatch):
+    """F-1 preserved: without the trusted flag, a UPN/preferred_username is
+    NOT a valid link key, so Entra-style claims are rejected."""
+    _seed_provider(client)  # trusted_identity defaults False
+    _seed_invited_user(client, "grace", "grace@corp.example")
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "grace-attempt",
+        "email": "",
+        "preferred_username": "grace@corp.example",
+    })
+
+    r = client.get("/auth/oidc/fake/callback?code=a&state=s", follow_redirects=False)
+    assert "oidc_error" in r.headers["location"]
+    assert client.get("/auth/me").status_code == 401
+
+
+def test_trusted_provider_is_still_invite_only(client, monkeypatch, db):
+    """Trusted provider never CREATES accounts — a UPN with no matching
+    local row is still rejected with the invite message."""
+    from app.core.auth.models.user import User
+
+    _seed_provider(client, trusted_identity=True)
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "nobody-sub",
+        "email": "",
+        "preferred_username": "nobody@corp.example",
+    })
+
+    r = client.get("/auth/oidc/fake/callback?code=a&state=s", follow_redirects=False)
+    assert "oidc_error" in r.headers["location"]
+    assert "invite" in r.headers["location"].lower()
+    assert client.get("/auth/me").status_code == 401
+    # No account was created.
+    db.expire_all()
+    assert db.query(User).filter(User.username == "admin").count() == 1
+    assert db.query(User).count() == 1  # just the bootstrap admin
+
+
+def test_trusted_provider_does_not_link_inactive_user(client, monkeypatch, db):
+    """A disabled local account must not be linked even on a trusted provider."""
+    from app.core.auth.models.user import User
+
+    _seed_provider(client, trusted_identity=True)
+    _seed_invited_user(client, "heidi", "heidi@corp.example")
+    # Disable heidi directly (committed → visible to the app's request session).
+    heidi = db.query(User).filter(User.username == "heidi").first()
+    heidi.is_active = False
+    db.commit()
+    client.post("/auth/logout")
+
+    from app.core.auth.services import oidc
+    monkeypatch.setattr(oidc, "discover", lambda _p: {})
+    monkeypatch.setattr(oidc, "complete_login", lambda db_, state, code: {
+        "sub": "heidi-sub",
+        "email": "",
+        "preferred_username": "heidi@corp.example",
+    })
+
+    r = client.get("/auth/oidc/fake/callback?code=a&state=s", follow_redirects=False)
+    assert "oidc_error" in r.headers["location"]
+    assert client.get("/auth/me").status_code == 401

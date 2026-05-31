@@ -31,6 +31,7 @@ def _to_read(p: OIDCProvider) -> OIDCProviderRead:
             "client_id": p.client_id,
             "scopes": p.scopes,
             "enabled": p.enabled,
+            "trusted_identity": p.trusted_identity,
             "has_client_secret": p.encrypted_client_secret is not None,
             "created_at": p.created_at,
             "updated_at": p.updated_at,
@@ -57,6 +58,7 @@ def create_provider(
         encrypted_client_secret=encrypt_client_secret(payload.client_secret),
         scopes=payload.scopes,
         enabled=payload.enabled,
+        trusted_identity=payload.trusted_identity,
     )
     db.add(p)
     try:
@@ -95,6 +97,8 @@ def update_provider(
         p.scopes = payload.scopes
     if payload.enabled is not None:
         p.enabled = payload.enabled
+    if payload.trusted_identity is not None:
+        p.trusted_identity = payload.trusted_identity
 
     db.commit()
     db.refresh(p)

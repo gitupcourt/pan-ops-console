@@ -32,8 +32,11 @@ paths = [
 
 # NOTE on test-fixture Fernet keys:
 # Earlier commits hardcoded test Fernet keys in ci.yml + backend/tests/*.
-# Those are being removed in PR #91 (ephemeral generation). They are NOT
-# allowlisted here by value — the security.yml `secrets` job scans only the
-# PR's *new* commit range, so a key already living on main is never re-flagged
-# by a later PR. If you run a full-history gitleaks sweep manually you'll see
-# them in pre-#91 history; that's expected and tracked, not a new leak.
+# Removal is tracked in #121 (the earlier attempt, PR #91, was closed — it
+# randomized the env key and the test key independently, which broke the
+# test encrypt/decrypt round-trip; the correct fix seeds via the app's own
+# encrypt() helper). They are NOT allowlisted here by value — the
+# security.yml `secrets` job scans only the PR's *new* commit range, so a key
+# already living on main is never re-flagged by a later PR. A full-history
+# gitleaks sweep will still show them in history; that's expected and tracked,
+# not a new leak.

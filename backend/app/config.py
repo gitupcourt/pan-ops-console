@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +16,35 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "sqlite:///data/capacity.db"
     FERNET_KEY: str = Field(..., min_length=32)
+
+    # --- Capacity polling cadences (#89) -------------------------------
+    # The catalog has two classes of metric with very different volatility:
+    #   * system/traffic — live telemetry (CPU, memory, sessions,
+    #     throughput). Changes continuously; we want it fresh.
+    #   * config — object/policy counts (address objects, security rules,
+    #     NAT, VPN peers, …). Only moves when an operator commits config,
+    #     so re-reading it every few minutes burns Panorama API calls for
+    #     near-identical data.
+    # Polling them on separate beats lets one Panorama proxy far more
+    # devices within its API envelope: the bulk of the catalog (the
+    # config-class metrics) drops from every-few-minutes to hourly, while
+    # live telemetry stays fast. Scaling polling to live inside a single
+    # Panorama's budget is the explicit goal — NOT "add another Panorama."
+    #
+    # POLL_INTERVAL_SECONDS is retained as the back-compat knob for the
+    # FAST (system/traffic) cadence: existing installs that tuned it keep
+    # their live-telemetry interval unchanged. POLL_SYSTEM_INTERVAL_SECONDS
+    # overrides it when set explicitly; left unset it inherits this value
+    # (resolved in _resolve_poll_intervals below).
     POLL_INTERVAL_SECONDS: int = 300
+    # Explicit override for the fast (system/traffic) cadence. None →
+    # inherit POLL_INTERVAL_SECONDS so legacy single-knob configs Just Work.
+    POLL_SYSTEM_INTERVAL_SECONDS: int | None = None
+    # Slow cadence for config-class metrics. Default 1h — object counts
+    # change on commit, not on a timer; an operator who pushes a big policy
+    # change still sees it reflected within the hour, and the alert engine
+    # cares about live telemetry (fast beat), not object counts.
+    POLL_CONFIG_INTERVAL_SECONDS: int = 3600
 
     # How often the scheduled Panorama sync runs (refresh `Device.connected`,
     # `last_seen_at`, HA state, etc. across every registered Panorama).
@@ -62,6 +90,19 @@ class Settings(BaseSettings):
     # The lookup happens at startup in app.services.oidc.load_providers().
     # `extra="ignore"` (set above) lets these pass through without being
     # named here on the Settings class.
+
+    @model_validator(mode="after")
+    def _resolve_poll_intervals(self) -> "Settings":
+        """Let POLL_SYSTEM_INTERVAL_SECONDS fall back to the legacy
+        POLL_INTERVAL_SECONDS knob when not set explicitly.
+
+        Keeps single-knob installs behaving exactly as before: whatever
+        they set POLL_INTERVAL_SECONDS to becomes the live-telemetry
+        cadence. Setting POLL_SYSTEM_INTERVAL_SECONDS explicitly wins.
+        """
+        if self.POLL_SYSTEM_INTERVAL_SECONDS is None:
+            self.POLL_SYSTEM_INTERVAL_SECONDS = self.POLL_INTERVAL_SECONDS
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

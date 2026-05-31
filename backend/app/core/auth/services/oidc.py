@@ -53,6 +53,11 @@ class OIDCProviderConfig:
     client_id: str
     client_secret: str
     scopes: list[str]
+    # Opt-in: trust this provider's asserted identity (email / UPN /
+    # preferred_username) for initial account linking even without an
+    # `email_verified` claim. Default False = F-1 verified-email-only.
+    # See OIDCProvider.trusted_identity for the full rationale.
+    trusted_identity: bool = False
 
 
 # Pending OAuth states. Keyed by random state token; value = {
@@ -84,7 +89,7 @@ def list_enabled_providers(db: DBSession) -> list[OIDCProviderConfig]:
     rows = db.query(OIDCProvider).filter(OIDCProvider.enabled == True).all()  # noqa: E712
     for row in rows:
         try:
-            secret = decrypt_key(row.encrypted_client_secret)
+            secret = decrypt_key(row.encrypted_client_secret, purpose=f"oidc:{row.slug}")
         except Exception as exc:
             log.warning("OIDC provider %s: client secret decrypt failed (%s); skipping",
                         row.slug, type(exc).__name__)
@@ -99,6 +104,7 @@ def list_enabled_providers(db: DBSession) -> list[OIDCProviderConfig]:
             client_id=row.client_id,
             client_secret=secret,
             scopes=scopes,
+            trusted_identity=bool(row.trusted_identity),
         )
     return list(out.values())
 
@@ -161,6 +167,7 @@ def _load_env_providers() -> dict[str, OIDCProviderConfig]:
         scopes = [s for s in scopes_raw.split() if s]
         if "openid" not in scopes:
             scopes.insert(0, "openid")
+        trusted = _g("TRUSTED").lower() in ("1", "true", "yes", "on")
         slug = name.lower()
         found[slug] = OIDCProviderConfig(
             slug=slug,
@@ -169,6 +176,7 @@ def _load_env_providers() -> dict[str, OIDCProviderConfig]:
             client_id=client_id,
             client_secret=client_secret,
             scopes=scopes,
+            trusted_identity=trusted,
         )
     return found
 

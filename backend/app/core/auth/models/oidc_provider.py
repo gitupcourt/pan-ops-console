@@ -13,7 +13,7 @@ take precedence on conflict.
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, LargeBinary, String, func
+from sqlalchemy import Boolean, DateTime, LargeBinary, String, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -50,6 +50,21 @@ class OIDCProvider(Base):
     # and login/callback endpoints return 404. Lets you turn an IdP off
     # without deleting it (and losing its config).
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # When True, this provider's asserted identity (email / UPN /
+    # preferred_username) is trusted for INITIAL account linking even when
+    # the IdP does not send `email_verified` — e.g. Microsoft Entra, which
+    # never emits that claim, so no Entra user can otherwise onboard.
+    #
+    # Default False preserves the F-1 hardening (verified-email-only
+    # linking) for untrusted / multi-tenant IdPs, where a principal can
+    # assert a victim's email/UPN → account takeover. Enable ONLY for an
+    # IdP you control (your own tenant). Still strictly invite-only: a
+    # matching pre-existing local account must exist; this relaxes the
+    # email_verified requirement, NOT the "must be pre-invited" rule.
+    trusted_identity: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, server_default=false()
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

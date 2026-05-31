@@ -37,7 +37,7 @@ def encrypt_secret(secret: str) -> bytes:
 
 
 def decrypt_secret(blob: bytes) -> str:
-    return decrypt_key(blob)
+    return decrypt_key(blob, purpose="totp")
 
 
 def provisioning_uri(secret: str, username: str) -> str:

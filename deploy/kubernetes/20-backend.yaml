@@ -24,7 +24,12 @@ spec:
           env:
             - { name: DATABASE_URL, value: "sqlite:////app/data/capacity.db" }
             - { name: CATALOG_PATH, value: "/app/catalog/metrics.yaml" }
+            # Capacity polling cadences. Live telemetry on the fast knob,
+            # config-class object counts on the slow one (they only change
+            # on commit). POLL_SYSTEM_INTERVAL_SECONDS defaults to
+            # POLL_INTERVAL_SECONDS when unset.
             - { name: POLL_INTERVAL_SECONDS, value: "300" }
+            - { name: POLL_CONFIG_INTERVAL_SECONDS, value: "3600" }
             # CORS — set to the public origin of your frontend. Comma-separated
             # if you serve from multiple hostnames.
             - { name: CORS_ORIGINS, value: "https://capacity.example.com" }

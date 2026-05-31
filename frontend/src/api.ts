@@ -55,6 +55,7 @@ export type OIDCProvider = {
   client_id: string;
   scopes: string;
   enabled: boolean;
+  trusted_identity: boolean;
   has_client_secret: boolean;
   created_at: string;
   updated_at: string;
@@ -68,6 +69,7 @@ export type OIDCProviderCreate = {
   client_secret: string;
   scopes?: string;
   enabled?: boolean;
+  trusted_identity?: boolean;
 };
 
 export type OIDCProviderUpdate = {
@@ -77,6 +79,7 @@ export type OIDCProviderUpdate = {
   client_secret?: string | null;
   scopes?: string | null;
   enabled?: boolean | null;
+  trusted_identity?: boolean | null;
 };
 
 export type AuthFromUserpass = { mode: "userpass"; username: string; password: string };
@@ -239,6 +242,9 @@ export type UpgradeJob = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  // Why the job failed (orchestrator crash / timeout / first task
+  // failure). Null unless state === "failed".
+  failure_reason: string | null;
 };
 
 export type PrecheckCheckResult = {
@@ -444,6 +450,8 @@ export type HeatmapCell = {
 export type CapacityTableRow = {
   device_id: number;
   device_name: string;
+  serial: string | null;
+  ip_address: string | null;
   model: string | null;
   software_version: string | null;
   device_group: string | null;

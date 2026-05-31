@@ -109,6 +109,13 @@ class UpgradeJob(Base):
         py_enum_column(JobState, name="job_state"), default=JobState.PENDING, nullable=False
     )
 
+    # Why the job went FAILED. Set by `_fail_job` (first-write-wins so a
+    # cascade of downstream failures doesn't bury the root cause). The
+    # per-task `error` covers in-phase failures; this also captures
+    # orchestrator-level crashes / timeouts where no task is marked
+    # FAILED, which otherwise leave the UI showing a bare "FAILED".
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )

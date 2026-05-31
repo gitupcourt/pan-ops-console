@@ -1,10 +1,51 @@
 """Schemas for the auth surface: bootstrap, login, users, TOTP, OIDC providers."""
 
+import ipaddress
 from datetime import datetime
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.schema_utils import ensure_utc
+
+
+def _validate_issuer_url(issuer: str) -> str:
+    """Validate an OIDC issuer URL (AppSec F-2).
+
+    The issuer is admin-supplied and the server fetches
+    `{issuer}/.well-known/openid-configuration` (and follows the
+    endpoints in that doc) — so a hostile/typo'd value is a
+    cleartext-credential or SSRF footgun. Enforce two cheap, high-value
+    constraints at config time:
+
+      - scheme MUST be https (no cleartext token/JWKS traffic);
+      - host must not be empty, an IP literal in a private / loopback /
+        link-local / reserved range (the easy SSRF-to-internal-metadata
+        target). Hostnames that *resolve* to private space aren't
+        blocked here — full DNS-rebind-safe pinning is out of scope for
+        an admin-gated MED; this stops the obvious cases.
+    """
+    issuer = issuer.strip()
+    parsed = urlparse(issuer)
+    if parsed.scheme != "https":
+        raise ValueError("issuer must be an https:// URL")
+    if not parsed.hostname:
+        raise ValueError("issuer must include a host")
+    try:
+        ip = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        ip = None  # it's a hostname, not a literal — allowed
+    if ip is not None and (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        raise ValueError(
+            "issuer host must not be a private / loopback / link-local address"
+        )
+    return issuer
 
 
 class BootstrapStatus(BaseModel):
@@ -114,6 +155,15 @@ class OIDCProviderCreate(BaseModel):
     client_secret: str = Field(min_length=1)
     scopes: str = "openid email profile"
     enabled: bool = True
+    # Opt-in: trust this IdP's asserted identity for linking without
+    # email_verified (e.g. Entra). Default off — only enable for an IdP
+    # you control. See OIDCProvider.trusted_identity.
+    trusted_identity: bool = False
+
+    @field_validator("issuer")
+    @classmethod
+    def _check_issuer(cls, v: str) -> str:
+        return _validate_issuer_url(v)
 
 
 class OIDCProviderUpdate(BaseModel):
@@ -125,6 +175,12 @@ class OIDCProviderUpdate(BaseModel):
     client_secret: str | None = None
     scopes: str | None = None
     enabled: bool | None = None
+    trusted_identity: bool | None = None
+
+    @field_validator("issuer")
+    @classmethod
+    def _check_issuer(cls, v: str | None) -> str | None:
+        return _validate_issuer_url(v) if v is not None else v
 
 
 class OIDCProviderRead(BaseModel):
@@ -138,6 +194,7 @@ class OIDCProviderRead(BaseModel):
     client_id: str
     scopes: str
     enabled: bool
+    trusted_identity: bool
     has_client_secret: bool
     created_at: datetime
     updated_at: datetime

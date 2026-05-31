@@ -200,7 +200,7 @@ jobs:
             dir:/src \
             -o spdx-json=/src/sbom/pan-ops-console.spdx.json \
             -o cyclonedx-json=/src/sbom/pan-ops-console.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom/

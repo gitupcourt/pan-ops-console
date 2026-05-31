@@ -1,0 +1,207 @@
+name: security
+
+# AppSec CI security gates. Separate from ci.yml (which owns tests + build +
+# ship) so security scanning evolves independently of the build pipeline and
+# so the required-status-check list can be reasoned about per-concern.
+#
+# Rollout posture (Phase 2 of the AppSec roadmap — gitupcourt/homelab#118):
+#   - SECRETS (gitleaks) is BLOCKING from day one. Secret findings have no
+#     acceptable-baseline; the roadmap is explicit ("block on secret findings,
+#     no exceptions"). This is the one job that should be added to branch
+#     protection's required checks.
+#   - DEPENDENCY + VULN scans (pip-audit, npm audit, trivy) ship INFORMATIONAL
+#     in this first PR: they run, surface findings in the job summary, but
+#     cannot fail the workflow (commands are `|| true`-guarded). Rationale:
+#     turning them blocking on day one would make CI red on pre-existing
+#     transitive CVEs nobody has triaged yet, blocking the dev session's
+#     unrelated work and eroding trust in the gates. The RATCHET plan: after
+#     one baseline-triage pass (file a .trivyignore / pip-audit ignore list
+#     for knowingly-accepted findings with dated rationale), a follow-up PR
+#     removes the `|| true` guards and adds these to required checks.
+#   - SBOM (syft) is an artifact, never a gate.
+#
+# Scanner images are pulled at `:latest` deliberately — for vuln scanners you
+# want the freshest advisory DB on every run. gitleaks/trivy/syft are all
+# well-behaved here. (The scanned *target* — our code — is pinned by the
+# checkout SHA, so runs are still reproducible against a given commit.)
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Monday 08:00 UTC — catches newly-disclosed CVEs in dependencies that
+    # haven't changed (a dep can become vulnerable with zero code activity).
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded runs on the same ref to save minutes, but never cancel
+  # a push-to-main run (we want the record).
+  group: security-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ===================================================================
+  # SECRETS — gitleaks. BLOCKING. Add this job to branch-protection
+  # required checks.
+  #
+  # Scan scope is deliberately commit-range-bound, not full-history:
+  #   - on a PR: scan only base..head (the PR's own commits)
+  #   - on push to main: scan only the newly-pushed range
+  # This means historical secrets already on main (e.g. the test-fixture
+  # Fernet keys being removed in #91) never re-block a PR — only secrets
+  # a change actually *introduces* fail the gate. Full-history sweeps are
+  # an out-of-band AppSec responsibility (driver + manual gitleaks), not
+  # a per-PR gate.
+  #
+  # gitleaks runs from its official container at :latest. No GITLEAKS_LICENSE
+  # needed (that requirement is for organization accounts on private repos;
+  # this is a user-account public repo).
+  # ===================================================================
+  secrets:
+    name: gitleaks (secret scan)
+    runs-on: ubuntu-latest
+    # Only meaningful on diffs — skip on schedule/dispatch (full-tree secret
+    # sweeps are handled out-of-band by AppSec).
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the --log-opts range resolves
+
+      - name: gitleaks (commit-range scoped)
+        env:
+          # Pass event fields via env (not direct ${{ }} interpolation into the
+          # script body) so a maliciously-crafted ref/SHA can't break out of the
+          # shell — standard GitHub Actions script-injection hygiene.
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Single-arg helper — the log-opts string is passed quoted, so no
+          # word-splitting (shellcheck-clean).
+          scan() {
+            docker run --rm -v "${PWD}:/repo" zricethezav/gitleaks:latest \
+              git /repo --config /repo/.gitleaks.toml --redact --no-banner --verbose \
+              --log-opts="$1"
+          }
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            echo "Scanning PR commit range: ${PR_BASE}..${PR_HEAD}"
+            scan "${PR_BASE}..${PR_HEAD}"
+          elif echo "${PUSH_BEFORE}" | grep -qE '^0+$'; then
+            echo "No before-SHA (first push) — scanning HEAD commit only"
+            scan "-1 ${PUSH_HEAD}"
+          else
+            echo "Scanning pushed range: ${PUSH_BEFORE}..${PUSH_HEAD}"
+            scan "${PUSH_BEFORE}..${PUSH_HEAD}"
+          fi
+
+  # ===================================================================
+  # DEPENDENCY AUDIT — Python backend (pip-audit). INFORMATIONAL (v1).
+  # ===================================================================
+  deps-python:
+    name: pip-audit (backend) [informational]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: pip-audit against backend/requirements.txt
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          echo "## pip-audit — backend/requirements.txt" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # `|| true`: informational in v1. Resolves the pinned requirements
+          # against the PyPI/OSV advisory DBs without installing them.
+          pip-audit -r backend/requirements.txt --desc 2>&1 | tee /tmp/pip-audit.txt || true
+          cat /tmp/pip-audit.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ===================================================================
+  # DEPENDENCY AUDIT — Node frontend (npm audit). INFORMATIONAL (v1).
+  # ===================================================================
+  deps-node:
+    name: npm audit (frontend) [informational]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - name: npm audit against frontend/package-lock.json
+        working-directory: frontend
+        run: |
+          echo "## npm audit — frontend (high+critical)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # --package-lock-only: audit straight from the lockfile, no install.
+          # `|| true`: informational in v1.
+          npm audit --package-lock-only --audit-level=high 2>&1 | tee /tmp/npm-audit.txt || true
+          cat /tmp/npm-audit.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ===================================================================
+  # VULN + MISCONFIG — Trivy filesystem scan. INFORMATIONAL (v1).
+  #
+  # Filesystem mode (not image mode) so this doesn't depend on a docker
+  # build. Scans dependency manifests for known CVEs and IaC/Dockerfile
+  # for misconfigurations. `secret` scanner is intentionally left to
+  # gitleaks (above) to avoid duplicate findings.
+  #
+  # Image-layer scanning (trivy image against the built backend/frontend
+  # images) is a planned follow-up that hooks into ci.yml's build jobs —
+  # tracked for the next Phase 2 increment.
+  # ===================================================================
+  vuln-config:
+    name: trivy (deps + misconfig) [informational]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy filesystem scan (HIGH/CRITICAL)
+        run: |
+          set -euo pipefail
+          echo "## Trivy fs scan — HIGH/CRITICAL (vuln + misconfig)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          docker run --rm -v "${PWD}:/src" aquasec/trivy:latest \
+            fs /src \
+            --scanners vuln,misconfig \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            --no-progress \
+            --format table 2>&1 | tee /tmp/trivy.txt || true
+          # Keep the step summary bounded.
+          tail -c 16000 /tmp/trivy.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ===================================================================
+  # SBOM — syft. Artifact only, never a gate. SPDX + CycloneDX so
+  # downstream consumers (and a future cosign attestation) have both.
+  # ===================================================================
+  sbom:
+    name: SBOM (syft)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM (SPDX + CycloneDX)
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          docker run --rm -v "${PWD}:/src" anchore/syft:latest \
+            dir:/src \
+            -o spdx-json=/src/sbom/pan-ops-console.spdx.json \
+            -o cyclonedx-json=/src/sbom/pan-ops-console.cdx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+          retention-days: 90

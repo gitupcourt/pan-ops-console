@@ -110,10 +110,23 @@ def poll_device(
     # (e.g. session current and session max both come from `<show><session><info>`)
     # don't re-query the device.
     cache: dict[str, object] = {}
+    # Track per-command failures so we can tell "device unreachable" (every
+    # command failed) apart from "reachable, but this metric isn't present"
+    # (some commands succeeded; an extractor just returned None). Caching the
+    # failure also avoids re-issuing — and re-timing-out on — a command that
+    # already failed this cycle.
+    failed: dict[str, Exception] = {}
 
     def _run(cmd: str):
-        if cmd not in cache:
+        if cmd in cache:
+            return cache[cmd]
+        if cmd in failed:
+            raise failed[cmd]
+        try:
             cache[cmd] = client.op_xml(cmd)
+        except Exception as exc:
+            failed[cmd] = exc
+            raise
         return cache[cmd]
 
     def _sum_sources(srcs: Sources) -> float | None:
@@ -173,6 +186,18 @@ def poll_device(
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("metric %s failed on %s: %s", spec.name, device.name, exc)
+
+    # If we issued commands but EVERY one failed (none succeeded), the device
+    # is unreachable — surface it as an error instead of returning an empty
+    # "0-sample success". Without this, a down direct-polled device looks
+    # freshly + successfully polled (last_poll_at fresh, no error) and reads as
+    # "online" indefinitely. The caller records last_poll_error from this, and
+    # the per-device failure-rewind retries it on the normal cadence.
+    if failed and not cache:
+        raise RuntimeError(
+            f"device unreachable: all {len(failed)} poll command(s) failed "
+            f"(e.g. {next(iter(failed.values()))})"
+        )
 
     return out
 

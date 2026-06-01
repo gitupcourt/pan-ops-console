@@ -280,12 +280,14 @@ class PanDeviceClient:
         timeout_s: float = DEFAULT_OP_TIMEOUT_S,
     ) -> "PanDeviceClient":
         """Talk straight to the device's mgmt IP/hostname using its API key."""
-        proxy = FirewallProxy(hostname=host, api_key=api_key)
+        # Pass timeout to the CONSTRUCTOR, not after. pan-os-python builds and
+        # caches the xapi at construction with its default 1200s timeout, and
+        # the urlopen socket timeout (connect + read) is read from that xapi.
+        # Setting `.timeout` afterward is a no-op — the cached xapi keeps 1200s,
+        # so an unreachable mgmt IP rides the ~127s OS TCP-connect timeout per
+        # op() before failing (≈405s for a 3-command capacity poll).
+        proxy = FirewallProxy(hostname=host, api_key=api_key, timeout=timeout_s)
         proxy.verify_ssl = verify_tls
-        # Bounds the socket (connect + read). Critical for direct devices: an
-        # unreachable mgmt IP otherwise hangs each op() on the OS TCP-connect
-        # default (~127s) before failing.
-        proxy.timeout = timeout_s
         return cls(proxy)
 
     @classmethod
@@ -304,17 +306,21 @@ class PanDeviceClient:
         its op() calls flow through Panorama, then wrap that Firewall in a
         FirewallProxy so pan-os-upgrade-assurance can use it.
         """
-        pano = PanosPanorama(panorama_host, api_key=panorama_api_key)
+        # Timeout must be set at construction — the xapi caches it; setting
+        # `.timeout` afterward is a no-op (see direct()). Panorama's own xapi is
+        # what a proxied op() rides, so the constructor timeout on `pano` is the
+        # one that bites when Panorama itself is unreachable.
+        pano = PanosPanorama(panorama_host, api_key=panorama_api_key, timeout=timeout_s)
         pano.verify_ssl = verify_tls
-        # The proxied op() rides Panorama's connection, so the timeout that
-        # actually bites is the one on `pano`. (Also set it on the proxy so
-        # introspection / other callers see a consistent value.)
-        pano.timeout = timeout_s
 
         fw = PanosFirewall(serial=target_serial)
         pano.add(fw)
         proxy = FirewallProxy(firewall=fw)
-        proxy.timeout = timeout_s
+        # FirewallProxy(firewall=...) builds its OWN xapi at the 1200s default;
+        # the timeout is read per-request, so force the bound value onto that
+        # live xapi too — covers the proxy path regardless of which xapi op()
+        # ends up using.
+        proxy.xapi.timeout = timeout_s
         return cls(proxy)
 
     # ---------- low-level op (capacity polling uses this) ----------

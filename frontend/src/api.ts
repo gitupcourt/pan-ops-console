@@ -581,6 +581,37 @@ export type AlertListFilters = {
   limit?: number;
 };
 
+// ---------- Polling config + pressure (#89 PR-4) ----------
+
+export type PollingConfig = {
+  system_interval_seconds: number;
+  config_interval_seconds: number;
+  max_concurrency_per_panorama: number;
+  device_retry_backoff_seconds: number;
+  dispatch_tick_seconds: number; // info-only (beat startup setting)
+  updated_at: string;
+};
+
+export type PollingConfigUpdate = {
+  system_interval_seconds?: number;
+  config_interval_seconds?: number;
+  max_concurrency_per_panorama?: number;
+  device_retry_backoff_seconds?: number;
+};
+
+export type PanoramaPressure = {
+  pano_key: string;
+  label: string;
+  in_flight: number | null;
+  cap: number;
+  devices: number;
+  devices_in_error: number;
+};
+
+export type PollingPressure = {
+  per_panorama: PanoramaPressure[];
+};
+
 // ---------- API ----------
 
 export const api = {
@@ -821,4 +852,13 @@ export const api = {
     }),
   deleteAlertRule: (ruleId: number) =>
     j<void>(`/alerts/rules/${ruleId}`, { method: "DELETE" }),
+
+  // Polling config + pressure (#89 PR-4)
+  getPollingConfig: () => j<PollingConfig>("/settings/polling"),
+  updatePollingConfig: (body: PollingConfigUpdate) =>
+    j<PollingConfig>("/settings/polling", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  getPollingPressure: () => j<PollingPressure>("/settings/polling/pressure"),
 };

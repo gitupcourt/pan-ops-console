@@ -3,7 +3,7 @@ import { Fragment, useMemo } from "react";
 import { NavLink, useSearchParams } from "react-router-dom";
 
 import { api, JobState, UpgradeJob } from "../api";
-import { Button, Card, CardHeader, Empty } from "../core/ui/ui";
+import { Button, Card, CardHeader, Empty, TableScroll } from "../core/ui/ui";
 import { JobForm } from "./JobForm";
 
 /**
@@ -139,6 +139,7 @@ function JobList({
   }
 
   return (
+    <TableScroll>
     <table className="w-full text-sm">
       <thead className="text-xs uppercase text-zinc-500 border-b border-zinc-800">
         <tr>
@@ -182,6 +183,7 @@ function JobList({
         ))}
       </tbody>
     </table>
+    </TableScroll>
   );
 }
 

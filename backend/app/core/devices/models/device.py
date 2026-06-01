@@ -138,9 +138,15 @@ class Device(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    # Capacity-side timestamps
+    # Capacity-side timestamps.
+    # last_poll_at = most recent poll of ANY metric class (drives the
+    # Inventory "Last poll" column). The two class-specific timestamps below
+    # drive the staggered dispatcher's per-class due-selection (#89): system
+    # telemetry on the fast cadence, config-class counts on the slow one.
     last_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_poll_error: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    last_system_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_config_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Upgrader-side timestamps
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

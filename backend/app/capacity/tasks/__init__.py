@@ -1,56 +1,69 @@
-"""Capacity-module Celery tasks.
+"""Capacity-module Celery tasks — staggered, per-device polling (#89).
 
-Three tasks share one core (`_run_poll`):
+Scheduled polling is driven by a **due-time dispatcher**, not a sweep:
 
-  * ``capacity.poll_all`` — every catalog metric. Not on the beat schedule
-    (see #89); kept for the manual "poll now" route (`/metrics/poll`) and
-    ad-hoc full sweeps.
-  * ``capacity.poll_config_metrics`` — slow beat. Config-class metrics
-    (object/policy counts) that only move when an operator commits config.
-  * ``capacity.poll_system_metrics`` — fast beat. Everything else: live
-    telemetry (CPU, memory, sessions, throughput).
+  * ``capacity.dispatch_due`` (beat, every ``POLL_DISPATCH_TICK_SECONDS``):
+    finds devices whose class interval has elapsed, groups them by their
+    managing Panorama, and — bounded by a per-Panorama in-flight semaphore,
+    fair-shared round-robin across Panoramas — enqueues one
+    ``poll_device_task`` per device, optimistically claiming it so it isn't
+    re-selected. This spreads the fleet across each interval instead of one
+    thundering herd, and bounds each Panorama's API load independently
+    (aggregate throughput scales with the *number* of Panoramas).
+  * ``capacity.poll_device_task`` (on the ``polling`` queue): polls ONE
+    device for the due metric classes, writes samples, evaluates alerts,
+    updates the per-class timestamps, releases its Panorama slot, and on
+    failure rewinds the timestamp so it retries soon (not a full interval).
+  * ``capacity.poll_all`` (manual "poll now" only — not scheduled): the
+    original serial full sweep, kept for the `/metrics/poll` route.
 
-Why the split (#89): the catalog is mostly config-class metrics, and those
-barely change between commits. Re-reading them every few minutes spends
-Panorama API budget on near-identical data. Polling config-class hourly
-and live telemetry fast lets a single Panorama proxy far more devices
-within its API envelope — the explicit scaling goal is to live inside one
-Panorama's budget, not to ask operators to stand up more Panoramas.
+Two metric classes: **config** (object/policy counts — slow cadence) and
+**system** (everything else — live telemetry, fast cadence). Per-device
+poll latency is dominated by serial Panorama-proxied round-trips, which is
+why we stagger rather than sweep.
 
 Imports happen inside the functions so the Celery worker can import this
-module without immediately pulling in SQLAlchemy / the catalog YAML at
-module-load time — keeps `app.workers.celery_app`'s `include` list cheap.
+module without pulling in SQLAlchemy / the catalog at module-load time.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import datetime, timedelta, timezone
 
+from app.config import get_settings
 from app.workers.celery_app import celery
 
 log = logging.getLogger(__name__)
 
-# Metric categories whose values change only when an operator commits
-# config. These ride the SLOW beat. The split is framed as a complement
-# (system task = "not config") rather than an explicit system/traffic
-# allowlist, so a metric tagged with a brand-new category in the future
-# defaults to the FAST beat and is never silently left unpolled.
+# Categories whose values change only on commit → the SLOW (config) class.
+# Everything else is the FAST (system) class — defined as the complement so a
+# future catalog category rides the fast cadence by default, never unpolled.
 _CONFIG_CATEGORIES = frozenset({"config"})
 
+# The two poll classes and their Device timestamp columns.
+POLL_CLASSES = ("system", "config")
+_TS_ATTR = {"system": "last_system_poll_at", "config": "last_config_poll_at"}
+
+
+def _class_interval_seconds(cls: str, s) -> int:
+    if cls == "config":
+        return int(s.POLL_CONFIG_INTERVAL_SECONDS)
+    # system: explicit override, else the legacy single knob.
+    return int(s.POLL_SYSTEM_INTERVAL_SECONDS or s.POLL_INTERVAL_SECONDS)
+
+
+def _metric_in_class(metric, cls: str) -> bool:
+    in_config = metric.category in _CONFIG_CATEGORIES
+    return in_config if cls == "config" else not in_config
+
+
+# ----------------------------------------------------------------------------
+# Manual full sweep (kept for the /metrics/poll route; NOT on beat).
+# ----------------------------------------------------------------------------
 
 def _run_poll(task, label: str, predicate) -> dict:
-    """Load the catalog, keep the metrics matching `predicate`, and poll
-    every enabled device for just those metrics.
-
-    `predicate` is a `MetricSpec -> bool`. The poller core
-    (`poller.poll_all`) already takes an arbitrary metric list, so the
-    split is purely "which subset of the catalog do we hand it" — no
-    behavior change per metric, just cadence.
-
-    Imports happen inside the function so the Celery worker can import
-    this module without pulling in SQLAlchemy / the catalog YAML at
-    module-load time.
-    """
     from app.capacity.services.catalog import load_catalog
     from app.capacity.services.poller import poll_all as _poll_all
     from app.capacity.services.storage import SQLAlchemySampleStore
@@ -58,62 +71,173 @@ def _run_poll(task, label: str, predicate) -> dict:
 
     all_metrics = load_catalog()
     metrics = [m for m in all_metrics if predicate(m)]
-    log.info(
-        "capacity.poll[%s]: %d of %d catalog metrics",
-        label, len(metrics), len(all_metrics),
-    )
-
+    log.info("capacity.poll[%s]: %d of %d catalog metrics", label, len(metrics), len(all_metrics))
     store = SQLAlchemySampleStore(SessionLocal)
     try:
         with SessionLocal() as db:
             _poll_all(db, metrics, store)
     except Exception:
         log.exception("capacity poll task failed (label=%s)", label)
-        # Re-raise so Celery records the task as FAILURE in the result
-        # backend. Beat will fire again on the next tick regardless.
         raise
-    return {
-        "status": "ok",
-        "task_id": task.request.id,
-        "label": label,
-        "metric_count": len(metrics),
-    }
+    return {"status": "ok", "task_id": task.request.id, "label": label, "metric_count": len(metrics)}
 
 
 @celery.task(name="capacity.poll_all", bind=True)
 def poll_all(self) -> dict:
-    """Poll every catalog metric for every enabled device.
+    """Poll every catalog metric for every enabled device (manual "poll now").
 
-    Manual "poll now" entry point (`/metrics/poll`) and ad-hoc full
-    sweeps. NOT on the beat schedule since #89 split scheduled polling
-    into config (slow) + system (fast) cadences — keeping a single beat
-    entry here too would double-poll the live-telemetry metrics.
-
-    Returns a small summary dict for the result backend. Real
-    observability (per-device success/failure counts) lives in the
-    sample rows themselves.
+    NOT scheduled — `capacity.dispatch_due` drives scheduled polling. Kept for
+    the `/metrics/poll` route and ad-hoc full sweeps.
     """
     return _run_poll(self, "all", lambda m: True)
 
 
-@celery.task(name="capacity.poll_config_metrics", bind=True)
-def poll_config_metrics(self) -> dict:
-    """Slow beat: config-class metrics (object/policy counts).
+# ----------------------------------------------------------------------------
+# Per-device poll task (runs on the `polling` queue).
+# ----------------------------------------------------------------------------
 
-    These change only when an operator commits, so an hourly default
-    keeps the data effectively fresh while cutting the bulk of per-cycle
-    Panorama API calls — the headroom that lets one Panorama proxy many
-    more devices (#89).
+@celery.task(name="capacity.poll_device_task", bind=True)
+def poll_device_task(self, device_id: int, classes: list[str], pano_key: str, token: str) -> dict:
+    """Poll ONE device for the given metric classes; release its Panorama slot.
+
+    On success: write samples, evaluate alerts, stamp the per-class
+    timestamps + last_poll_at. On failure: rewind the class timestamps so the
+    dispatcher retries in ~POLL_DEVICE_RETRY_BACKOFF_SECONDS instead of waiting
+    a full (up to 12 h) interval. The Panorama in-flight slot is always
+    released in `finally` (self-healed by the semaphore's stale-prune if not).
     """
-    return _run_poll(self, "config", lambda m: m.category in _CONFIG_CATEGORIES)
+    from app.alerts.services.evaluator import evaluate_device_samples
+    from app.capacity.services.catalog import load_catalog
+    from app.capacity.services.poller import poll_device
+    from app.capacity.services.storage import SQLAlchemySampleStore
+    from app.core import concurrency
+    from app.core.devices.models.device import Device
+    from app.db import SessionLocal
+
+    s = get_settings()
+    try:
+        with SessionLocal() as db:
+            device = db.get(Device, device_id)
+            if device is None or not device.polling_enabled:
+                return {"status": "gone", "device_id": device_id}
+
+            metrics = [m for m in load_catalog() if any(_metric_in_class(m, c) for c in classes)]
+            now = datetime.now(timezone.utc)
+            try:
+                points = poll_device(db, device, metrics)
+                SQLAlchemySampleStore(SessionLocal).write_samples(points)
+                evaluate_device_samples(db, device.id, points)
+                for cls in classes:
+                    setattr(device, _TS_ATTR[cls], now)
+                device.last_poll_at = now
+                device.last_poll_error = None
+                db.commit()
+                log.info("poll_device_task %s [%s]: %d samples", device_id, ",".join(classes), len(points))
+                return {"status": "ok", "device_id": device_id, "samples": len(points)}
+            except Exception as exc:  # noqa: BLE001
+                log.exception("poll_device_task failed for device %s", device_id)
+                for cls in classes:
+                    rewind = max(0, _class_interval_seconds(cls, s) - s.POLL_DEVICE_RETRY_BACKOFF_SECONDS)
+                    setattr(device, _TS_ATTR[cls], now - timedelta(seconds=rewind))
+                device.last_poll_at = now
+                device.last_poll_error = str(exc)[:2000]
+                db.commit()
+                return {"status": "error", "device_id": device_id}
+    finally:
+        concurrency.release_slot(pano_key, token)
 
 
-@celery.task(name="capacity.poll_system_metrics", bind=True)
-def poll_system_metrics(self) -> dict:
-    """Fast beat: live telemetry (CPU, memory, sessions, throughput).
+# ----------------------------------------------------------------------------
+# Dispatcher (beat).
+# ----------------------------------------------------------------------------
 
-    Defined as the complement of the config-class set so any future
-    catalog category rides the fast cadence by default and is never
-    silently dropped from scheduled polling.
-    """
-    return _run_poll(self, "system", lambda m: m.category not in _CONFIG_CATEGORIES)
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _as_utc(ts: datetime | None) -> datetime | None:
+    """Coerce a DB timestamp to tz-aware UTC. SQLite returns naive datetimes
+    from DateTime(timezone=True) columns; comparing those against an aware
+    `now` would raise. Postgres returns aware and is unaffected."""
+    if ts is not None and ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
+@celery.task(name="capacity.dispatch_due", bind=True)
+def dispatch_due(self) -> dict:
+    """Enqueue per-device poll tasks for devices whose class interval elapsed,
+    bounded per Panorama and fair-shared across Panoramas. Single-flight via a
+    Redis dispatch lock so overlapping beat ticks don't double-enqueue."""
+    from app.core import concurrency
+    from app.core.devices.models.device import Device
+    from app.core.devices.models.enums import DeviceSource
+    from app.db import SessionLocal
+
+    s = get_settings()
+    intervals = {c: _class_interval_seconds(c, s) for c in POLL_CLASSES}
+    cap = int(s.POLL_MAX_CONCURRENCY_PER_PANORAMA)
+    enqueued = 0
+
+    with concurrency.dispatch_lock() as got:
+        if not got:
+            return {"status": "skipped-locked"}
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            devices = db.query(Device).filter(Device.polling_enabled == True).all()  # noqa: E712
+
+            groups: dict[str, list] = {}
+            for d in devices:
+                due = [
+                    c for c in POLL_CLASSES
+                    if (ts := _as_utc(getattr(d, _TS_ATTR[c]))) is None
+                    or (now - ts).total_seconds() >= intervals[c]
+                ]
+                if not due:
+                    continue
+                # Known-offline Panorama device: claim (so it isn't re-checked
+                # every tick) and skip — no slot, no proxied round-trip. The
+                # next Panorama sync flips `connected` and polling resumes.
+                if d.source == DeviceSource.PANORAMA and not d.connected:
+                    for c in due:
+                        setattr(d, _TS_ATTR[c], now)
+                    d.last_poll_at = now
+                    d.last_poll_error = (
+                        "Skipped: Panorama reports device as disconnected. "
+                        "Polling resumes automatically when it reconnects."
+                    )
+                    continue
+                groups.setdefault(concurrency.pano_key_for(d), []).append((d, due))
+
+            # Oldest-due first within each Panorama group (NULL = never polled).
+            for lst in groups.values():
+                lst.sort(key=lambda t: min(_as_utc(getattr(t[0], _TS_ATTR[c])) or _EPOCH for c in t[1]))
+
+            # Fair-share round-robin: one enqueue per group per pass, so a big
+            # Panorama can't starve a small one. A group drops out of the pass
+            # when it hits its per-Panorama cap or runs out of due devices.
+            idx = {k: 0 for k in groups}
+            active = [k for k in groups if groups[k]]
+            while active:
+                progressed = False
+                for key in list(active):
+                    lst, i = groups[key], idx[key]
+                    if i >= len(lst):
+                        active.remove(key)
+                        continue
+                    device, due = lst[i]
+                    token = uuid.uuid4().hex
+                    if concurrency.try_acquire_slot(key, token, cap):
+                        for c in due:
+                            setattr(device, _TS_ATTR[c], now)  # optimistic claim
+                        poll_device_task.apply_async(args=[device.id, list(due), key, token])
+                        idx[key] += 1
+                        enqueued += 1
+                        progressed = True
+                    else:
+                        active.remove(key)  # at cap this tick; try again next tick
+                if not progressed:
+                    break
+
+            db.commit()
+
+    return {"status": "ok", "enqueued": enqueued}

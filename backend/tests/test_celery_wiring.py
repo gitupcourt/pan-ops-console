@@ -24,11 +24,9 @@ def test_celery_app_loads():
 def test_capacity_poll_tasks_registered():
     """The capacity poller's Celery tasks must be discoverable by name.
 
-    Beat looks tasks up by string name; if a task is unregistered or
-    renamed, beat silently does nothing. #89 split scheduled polling into
-    `capacity.poll_config_metrics` (slow) + `capacity.poll_system_metrics`
-    (fast); `capacity.poll_all` stays registered for the manual
-    "poll now" route.
+    #89 PR-3 replaced the two "sweep" beats with a staggered dispatcher:
+    `capacity.dispatch_due` (beat) enqueues `capacity.poll_device_task` per
+    due device. `capacity.poll_all` stays for the manual "poll now" route.
     """
     # Importing the tasks module is what registers the @celery.task
     # decorator. The worker `include` list does this implicitly at boot;
@@ -39,20 +37,16 @@ def test_capacity_poll_tasks_registered():
     available = [name for name in celery.tasks if not name.startswith("celery.")]
     for name in (
         "capacity.poll_all",
-        "capacity.poll_config_metrics",
-        "capacity.poll_system_metrics",
+        "capacity.dispatch_due",
+        "capacity.poll_device_task",
     ):
         assert name in celery.tasks, f"{name} not registered. Available: {available}"
 
 
-def test_capacity_beat_schedule_split_cadences():
-    """#89 split capacity polling into two beats: a fast one for live
-    telemetry and a slow one for config-class metrics.
-
-    Guards both entries point at the right task and read the right
-    interval setting. `capacity.poll_all` must NOT be on the schedule —
-    scheduling it alongside the system beat would double-poll the fast
-    metrics every fast cycle.
+def test_capacity_dispatch_beat_entry():
+    """#89 PR-3: scheduled polling is a single dispatcher tick. The old
+    `capacity-poll-system` / `capacity-poll-config` sweep beats are gone;
+    per-device `poll_device_task` and the manual `poll_all` are NOT scheduled.
     """
     from app.config import get_settings
     from app.workers.celery_app import celery
@@ -60,20 +54,29 @@ def test_capacity_beat_schedule_split_cadences():
     settings = get_settings()
     schedule = celery.conf.beat_schedule
 
-    assert "capacity-poll-system" in schedule, list(schedule)
-    sys_entry = schedule["capacity-poll-system"]
-    assert sys_entry["task"] == "capacity.poll_system_metrics"
-    assert sys_entry["schedule"] == float(settings.POLL_SYSTEM_INTERVAL_SECONDS)
+    assert "capacity-dispatch-due" in schedule, list(schedule)
+    entry = schedule["capacity-dispatch-due"]
+    assert entry["task"] == "capacity.dispatch_due"
+    assert entry["schedule"] == float(settings.POLL_DISPATCH_TICK_SECONDS)
 
-    assert "capacity-poll-config" in schedule, list(schedule)
-    cfg_entry = schedule["capacity-poll-config"]
-    assert cfg_entry["task"] == "capacity.poll_config_metrics"
-    assert cfg_entry["schedule"] == float(settings.POLL_CONFIG_INTERVAL_SECONDS)
+    # Old sweep beats removed.
+    assert "capacity-poll-system" not in schedule
+    assert "capacity-poll-config" not in schedule
+    # Manual / per-device tasks are not scheduled.
+    scheduled_tasks = {e.get("task") for e in schedule.values()}
+    assert "capacity.poll_all" not in scheduled_tasks
+    assert "capacity.poll_device_task" not in scheduled_tasks
 
-    # The full-sweep task is intentionally manual-only.
-    assert not any(
-        e.get("task") == "capacity.poll_all" for e in schedule.values()
-    ), "capacity.poll_all must not be scheduled (would double-poll fast metrics)"
+
+def test_polling_tasks_routed_to_polling_queue():
+    """The dispatcher + per-device poll task ride the dedicated `polling`
+    queue (consumed by the pan-ops-console-poller worker) so a long poll
+    cycle can't block upgrade jobs on the default queue."""
+    from app.workers.celery_app import celery
+
+    routes = celery.conf.task_routes or {}
+    assert routes.get("capacity.dispatch_due", {}).get("queue") == "polling"
+    assert routes.get("capacity.poll_device_task", {}).get("queue") == "polling"
 
 
 def test_panorama_sync_all_task_registered():

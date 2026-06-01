@@ -89,34 +89,34 @@ celery.conf.update(
     # need results to stick around long enough for the UI to read them
     # post-completion. 1 day is comfortable.
     result_expires=86400,
-    # Beat schedule — populated at phase 2e cutover. The in-process
-    # APScheduler that lived in app.main.lifespan was retired in the
-    # same commit.
-    #
-    # Capacity polling runs on TWO cadences (#89): config-class metrics
-    # (object/policy counts that only change on commit) on a slow beat,
-    # and live telemetry (CPU/memory/sessions/throughput) on a fast one.
-    # Splitting them keeps the heavy, rarely-changing config reads off the
-    # fast loop so a single Panorama can proxy many more devices within
-    # its API budget. capacity.poll_all stays defined for the manual
-    # "poll now" route but is deliberately NOT scheduled (would double the
-    # fast-metric reads).
+    # Queue routing (#89 PR-3). Polling runs on a dedicated `polling` queue
+    # consumed by its own worker (pan-ops-console-poller) so a long poll
+    # cycle can never block an upgrade job. Everything else (upgrade
+    # orchestration, Panorama sync, manual poll_all) stays on the default
+    # queue. NOTE: a worker must consume `polling` for these to run — during
+    # rollout the existing worker runs `-Q celery,polling` until the
+    # dedicated poller Deployment lands (see homelab coordination).
+    task_routes={
+        "capacity.dispatch_due": {"queue": "polling"},
+        "capacity.poll_device_task": {"queue": "polling"},
+    },
+    # Beat schedule. Capacity polling (#89 PR-3) is driven by a single
+    # lightweight dispatcher tick — `capacity.dispatch_due` finds devices
+    # whose per-class interval has elapsed and enqueues bounded, per-Panorama
+    # batches of `capacity.poll_device_task`. This replaced the old
+    # "sweep everything every interval" beats (which overlapped and hammered
+    # one Panorama). `capacity.poll_all` stays defined for the manual
+    # "poll now" route but is deliberately NOT scheduled.
     beat_schedule={
-        "capacity-poll-system": {
-            "task": "capacity.poll_system_metrics",
-            "schedule": float(_settings.POLL_SYSTEM_INTERVAL_SECONDS),
-        },
-        "capacity-poll-config": {
-            "task": "capacity.poll_config_metrics",
-            "schedule": float(_settings.POLL_CONFIG_INTERVAL_SECONDS),
+        "capacity-dispatch-due": {
+            "task": "capacity.dispatch_due",
+            "schedule": float(_settings.POLL_DISPATCH_TICK_SECONDS),
         },
         # Scheduled refresh of Panorama-imported device state. Without
         # this, Device.connected / last_seen_at only update on operator
         # action (manual sync, device import) and the UI's disconnected
         # badge becomes meaningless within minutes. The sync_all task is
-        # idempotent and one-API-call-per-Panorama, so even a 30s
-        # interval would be safe on cost — default 300s gives the same
-        # cadence as capacity polling.
+        # idempotent and one-API-call-per-Panorama.
         "panorama-sync-all": {
             "task": "panorama.sync_all",
             "schedule": float(_settings.PANORAMA_SYNC_INTERVAL_SECONDS),

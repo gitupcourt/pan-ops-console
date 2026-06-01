@@ -73,6 +73,18 @@ class Settings(BaseSettings):
     # disconnected/online pill freshness scales with this.
     PANORAMA_SYNC_INTERVAL_SECONDS: int = 300
 
+    # Per-call timeout (seconds) for the PAN XML-API client. Bounds how long a
+    # single op() waits on the socket — connect AND read. Without it, pan-os-
+    # python leaves the timeout unset and a DIRECT device that's unreachable
+    # rides the OS TCP-connect default (~127s) per command; with 3 distinct
+    # capacity commands that's ~6.75 min of a poller slot pinned on one dead
+    # device (observed on a down PA-220). 30s fails a dead device fast while
+    # staying well clear of any healthy op() response time (status queries
+    # return in <10s even on busy devices; long upgrade waits use their own
+    # separate timeouts, not op()). Tune down to fail dead devices faster, or
+    # up if a slow WAN to a branch device trips false timeouts.
+    PAN_CLIENT_TIMEOUT_SECONDS: int = 30
+
     CATALOG_PATH: str = "/app/catalog/metrics.yaml"
     CORS_ORIGINS: str = "http://localhost:5173"
 

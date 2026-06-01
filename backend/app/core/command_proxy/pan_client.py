@@ -254,6 +254,14 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
     return f"{context} failed: {msg}"
 
 
+# Default per-call timeout (seconds) when a caller doesn't pass one. The
+# builder threads the operator-configurable Settings.PAN_CLIENT_TIMEOUT_SECONDS
+# through; this constant only governs direct callers (tests, ad-hoc helpers).
+# See config.py for the rationale — it bounds a dead DIRECT device's connect
+# instead of riding the ~127s OS TCP-connect default.
+DEFAULT_OP_TIMEOUT_S = 30
+
+
 class PanDeviceClient:
     """Operations against a single firewall — direct or Panorama-proxied."""
 
@@ -263,10 +271,21 @@ class PanDeviceClient:
     # ---------- factories ----------
 
     @classmethod
-    def direct(cls, host: str, api_key: str, *, verify_tls: bool = True) -> "PanDeviceClient":
+    def direct(
+        cls,
+        host: str,
+        api_key: str,
+        *,
+        verify_tls: bool = True,
+        timeout_s: float = DEFAULT_OP_TIMEOUT_S,
+    ) -> "PanDeviceClient":
         """Talk straight to the device's mgmt IP/hostname using its API key."""
         proxy = FirewallProxy(hostname=host, api_key=api_key)
         proxy.verify_ssl = verify_tls
+        # Bounds the socket (connect + read). Critical for direct devices: an
+        # unreachable mgmt IP otherwise hangs each op() on the OS TCP-connect
+        # default (~127s) before failing.
+        proxy.timeout = timeout_s
         return cls(proxy)
 
     @classmethod
@@ -277,6 +296,7 @@ class PanDeviceClient:
         target_serial: str,
         *,
         verify_tls: bool = True,
+        timeout_s: float = DEFAULT_OP_TIMEOUT_S,
     ) -> "PanDeviceClient":
         """Talk to the device by routing op() calls through Panorama (target=<serial>).
 
@@ -286,10 +306,15 @@ class PanDeviceClient:
         """
         pano = PanosPanorama(panorama_host, api_key=panorama_api_key)
         pano.verify_ssl = verify_tls
+        # The proxied op() rides Panorama's connection, so the timeout that
+        # actually bites is the one on `pano`. (Also set it on the proxy so
+        # introspection / other callers see a consistent value.)
+        pano.timeout = timeout_s
 
         fw = PanosFirewall(serial=target_serial)
         pano.add(fw)
         proxy = FirewallProxy(firewall=fw)
+        proxy.timeout = timeout_s
         return cls(proxy)
 
     # ---------- low-level op (capacity polling uses this) ----------

@@ -87,3 +87,24 @@ export function CardHeader({
 export function Empty({ children }: { children: ReactNode }) {
   return <div className="px-4 py-6 text-center text-xs text-zinc-500">{children}</div>;
 }
+
+/**
+ * Horizontal-scroll safety net for wide data tables.
+ *
+ * Dense tables get THREE layers of overflow defense, in priority order:
+ *   1. Responsive column-hiding (`hidden md:/lg:/xl:table-cell`) drops
+ *      low-priority columns as the viewport narrows.
+ *   2. Truncation (`max-w-[..] truncate`) caps individual long cells.
+ *   3. THIS — a scroll container so that when the still-visible columns
+ *      exceed the available width (everything shown on a wide screen, an
+ *      unusually long device name, etc.) the content scrolls into reach
+ *      instead of being clipped off-frame with no scrollbar.
+ *
+ * Always wrap a wide `<table>` in this rather than letting it overflow its
+ * card. Row-action menus inside such tables must use `position: fixed`
+ * (anchored via getBoundingClientRect) so they're not clipped by this
+ * container — an absolutely-positioned popover would be.
+ */
+export function TableScroll({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={clsx("overflow-x-auto", className)}>{children}</div>;
+}

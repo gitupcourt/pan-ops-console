@@ -41,7 +41,7 @@ export default function App() {
     <BrowserRouter>
       <div className="min-h-full">
         <header className="border-b border-zinc-800 bg-zinc-950/60 backdrop-blur sticky top-0 z-10">
-          <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-6">
+          <div className="max-w-screen-2xl mx-auto px-6 py-3 flex items-center gap-6">
             <h1 className="text-base font-semibold text-zinc-100">
               PAN NGFW Ops Console
             </h1>
@@ -67,7 +67,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="max-w-7xl mx-auto px-6 py-6">
+        <main className="max-w-screen-2xl mx-auto px-6 py-6">
           <Routes>
             <Route path="/" element={<HomeDashboard />} />
             {/* Capacity Analyzer drill chain: heat-map → table → trend.

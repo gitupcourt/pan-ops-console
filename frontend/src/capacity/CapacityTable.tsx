@@ -7,7 +7,7 @@ import {
 } from "react-router-dom";
 
 import { api, CapacityTableRow, MetricCategory } from "../api";
-import { Button, Card, CardHeader, Input, Select } from "../core/ui/ui";
+import { Button, Card, CardHeader, Input, Select, TableScroll } from "../core/ui/ui";
 import { CapacityViewToggle } from "./CapacityViewToggle";
 
 // Sortable columns. "alert" and "predicted" aren't sortable yet
@@ -351,6 +351,7 @@ function CategoryTable({
   onMetricClick: (deviceId: number, metric: string) => void;
 }) {
   return (
+    <TableScroll>
     <table className="w-full text-sm">
       <thead className="text-[11px] uppercase text-zinc-500 border-b border-zinc-800">
         <tr>
@@ -408,6 +409,7 @@ function CategoryTable({
         ))}
       </tbody>
     </table>
+    </TableScroll>
   );
 }
 

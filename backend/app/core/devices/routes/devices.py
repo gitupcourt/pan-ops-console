@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.core.command_proxy.pan_client import PanDeviceClient
 from app.core.credentials import decrypt_key, encrypt_key, mint_key
 from app.core.devices.models.device import Device
@@ -167,13 +168,17 @@ def get_capacity(device_id: int, db: Session = Depends(get_db)):
         client = PanDeviceClient.via_panorama(
             device.panorama.hostname, api_key, device.serial,
             verify_tls=device.panorama.verify_tls,
+            timeout_s=get_settings().PAN_CLIENT_TIMEOUT_SECONDS,
         )
     else:
         if not device.encrypted_api_key:
             raise HTTPException(status_code=400, detail="device has no API key")
         api_key = decrypt_key(device.encrypted_api_key, purpose=f"device:{device.id}")
         target = device.ip_address or device.hostname
-        client = PanDeviceClient.direct(target, api_key, verify_tls=device.verify_tls)
+        client = PanDeviceClient.direct(
+            target, api_key, verify_tls=device.verify_tls,
+            timeout_s=get_settings().PAN_CLIENT_TIMEOUT_SECONDS,
+        )
 
     try:
         resp = client.op_xml(
@@ -230,13 +235,17 @@ def test_device(device_id: int, db: Session = Depends(get_db)):
         client = PanDeviceClient.via_panorama(
             device.panorama.hostname, api_key, device.serial,
             verify_tls=device.panorama.verify_tls,
+            timeout_s=get_settings().PAN_CLIENT_TIMEOUT_SECONDS,
         )
     else:
         if not device.encrypted_api_key:
             raise HTTPException(status_code=400, detail="device has no API key")
         api_key = decrypt_key(device.encrypted_api_key, purpose=f"device:{device.id}")
         target = device.ip_address or device.hostname
-        client = PanDeviceClient.direct(target, api_key, verify_tls=device.verify_tls)
+        client = PanDeviceClient.direct(
+            target, api_key, verify_tls=device.verify_tls,
+            timeout_s=get_settings().PAN_CLIENT_TIMEOUT_SECONDS,
+        )
 
     try:
         info = client.get_system_info()

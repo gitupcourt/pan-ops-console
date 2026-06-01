@@ -65,6 +65,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.core.command_proxy.pan_client import PanDeviceClient, TargetDisconnectedError
 from app.core.credentials import decrypt_key
 from app.core.devices.models.device import Device
@@ -106,6 +107,7 @@ def _build_proxy_client(device: Device) -> PanDeviceClient:
         panorama_api_key=api_key,
         target_serial=device.serial,
         verify_tls=pano.verify_tls,
+        timeout_s=get_settings().PAN_CLIENT_TIMEOUT_SECONDS,
     )
 
 
@@ -117,7 +119,10 @@ def _build_direct_client(device: Device) -> PanDeviceClient:
     api_key = decrypt_key(device.encrypted_api_key, purpose=f"device:{device.id}")
     target = device.ip_address or device.hostname
     return PanDeviceClient.direct(
-        host=target, api_key=api_key, verify_tls=device.verify_tls
+        host=target,
+        api_key=api_key,
+        verify_tls=device.verify_tls,
+        timeout_s=get_settings().PAN_CLIENT_TIMEOUT_SECONDS,
     )
 
 

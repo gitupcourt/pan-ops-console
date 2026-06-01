@@ -68,15 +68,18 @@ def test_capacity_dispatch_beat_entry():
     assert "capacity.poll_device_task" not in scheduled_tasks
 
 
-def test_polling_tasks_routed_to_polling_queue():
-    """The dispatcher + per-device poll task ride the dedicated `polling`
-    queue (consumed by the pan-ops-console-poller worker) so a long poll
-    cycle can't block upgrade jobs on the default queue."""
+def test_upgrade_tasks_routed_to_dedicated_queue():
+    """#89 PR-3 / pan-ops-console#137: upgrade orchestration rides a dedicated
+    `upgrade` queue (its own larger worker) so a long capacity poll can't delay
+    an upgrade. Capacity polling + sync stay on the default `celery` queue (the
+    catch-all), so they're NOT routed away."""
     from app.workers.celery_app import celery
 
     routes = celery.conf.task_routes or {}
-    assert routes.get("capacity.dispatch_due", {}).get("queue") == "polling"
-    assert routes.get("capacity.poll_device_task", {}).get("queue") == "polling"
+    assert routes.get("upgrade.*", {}).get("queue") == "upgrade"
+    # Capacity polling is deliberately left on the default queue.
+    assert "capacity.dispatch_due" not in routes
+    assert "capacity.poll_device_task" not in routes
 
 
 def test_panorama_sync_all_task_registered():

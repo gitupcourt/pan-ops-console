@@ -89,16 +89,18 @@ celery.conf.update(
     # need results to stick around long enough for the UI to read them
     # post-completion. 1 day is comfortable.
     result_expires=86400,
-    # Queue routing (#89 PR-3). Polling runs on a dedicated `polling` queue
-    # consumed by its own worker (pan-ops-console-poller) so a long poll
-    # cycle can never block an upgrade job. Everything else (upgrade
-    # orchestration, Panorama sync, manual poll_all) stays on the default
-    # queue. NOTE: a worker must consume `polling` for these to run — during
-    # rollout the existing worker runs `-Q celery,polling` until the
-    # dedicated poller Deployment lands (see homelab coordination).
+    # Queue routing (#89 PR-3; platform deploy contract pan-ops-console#137).
+    # Upgrade orchestration (`upgrade.drive_pair`) is the long-running,
+    # memory-hungry work (snapshot + XML diff), so it gets its OWN queue +
+    # dedicated, larger worker — that way a 12-min capacity poll can never
+    # delay an upgrade, and the upgrade worker can be sized with more RAM.
+    # Everything else (capacity dispatch + per-device polls, panorama sync,
+    # manual poll_all) stays on the DEFAULT `celery` queue, kept as the
+    # catch-all so no task can ever strand without a consumer. The existing
+    # worker retunes to capacity-only (`-Q celery`); platform owns the new
+    # upgrade worker (`-Q upgrade`) and lands it lockstep with this image.
     task_routes={
-        "capacity.dispatch_due": {"queue": "polling"},
-        "capacity.poll_device_task": {"queue": "polling"},
+        "upgrade.*": {"queue": "upgrade"},
     },
     # Beat schedule. Capacity polling (#89 PR-3) is driven by a single
     # lightweight dispatcher tick — `capacity.dispatch_due` finds devices

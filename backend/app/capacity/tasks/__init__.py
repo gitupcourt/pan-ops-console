@@ -32,7 +32,6 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from app.config import get_settings
 from app.workers.celery_app import celery
 
 log = logging.getLogger(__name__)
@@ -47,11 +46,10 @@ POLL_CLASSES = ("system", "config")
 _TS_ATTR = {"system": "last_system_poll_at", "config": "last_config_poll_at"}
 
 
-def _class_interval_seconds(cls: str, s) -> int:
-    if cls == "config":
-        return int(s.POLL_CONFIG_INTERVAL_SECONDS)
-    # system: explicit override, else the legacy single knob.
-    return int(s.POLL_SYSTEM_INTERVAL_SECONDS or s.POLL_INTERVAL_SECONDS)
+def _class_interval(cls: str, cfg) -> int:
+    """Interval (seconds) for a poll class, from the runtime PollingConfig
+    (operator-editable in Settings → Polling; #89 PR-4)."""
+    return cfg.config_interval_seconds if cls == "config" else cfg.system_interval_seconds
 
 
 def _metric_in_class(metric, cls: str) -> bool:
@@ -109,18 +107,19 @@ def poll_device_task(self, device_id: int, classes: list[str], pano_key: str, to
     from app.alerts.services.evaluator import evaluate_device_samples
     from app.capacity.services.catalog import load_catalog
     from app.capacity.services.poller import poll_device
+    from app.capacity.services.polling_config import get_polling_config
     from app.capacity.services.storage import SQLAlchemySampleStore
     from app.core import concurrency
     from app.core.devices.models.device import Device
     from app.db import SessionLocal
 
-    s = get_settings()
     try:
         with SessionLocal() as db:
             device = db.get(Device, device_id)
             if device is None or not device.polling_enabled:
                 return {"status": "gone", "device_id": device_id}
 
+            cfg = get_polling_config(db)
             metrics = [m for m in load_catalog() if any(_metric_in_class(m, c) for c in classes)]
             now = datetime.now(timezone.utc)
             try:
@@ -137,7 +136,7 @@ def poll_device_task(self, device_id: int, classes: list[str], pano_key: str, to
             except Exception as exc:  # noqa: BLE001
                 log.exception("poll_device_task failed for device %s", device_id)
                 for cls in classes:
-                    rewind = max(0, _class_interval_seconds(cls, s) - s.POLL_DEVICE_RETRY_BACKOFF_SECONDS)
+                    rewind = max(0, _class_interval(cls, cfg) - cfg.device_retry_backoff_seconds)
                     setattr(device, _TS_ATTR[cls], now - timedelta(seconds=rewind))
                 device.last_poll_at = now
                 device.last_poll_error = str(exc)[:2000]
@@ -168,21 +167,21 @@ def dispatch_due(self) -> dict:
     """Enqueue per-device poll tasks for devices whose class interval elapsed,
     bounded per Panorama and fair-shared across Panoramas. Single-flight via a
     Redis dispatch lock so overlapping beat ticks don't double-enqueue."""
+    from app.capacity.services.polling_config import get_polling_config
     from app.core import concurrency
     from app.core.devices.models.device import Device
     from app.core.devices.models.enums import DeviceSource
     from app.db import SessionLocal
 
-    s = get_settings()
-    intervals = {c: _class_interval_seconds(c, s) for c in POLL_CLASSES}
-    cap = int(s.POLL_MAX_CONCURRENCY_PER_PANORAMA)
     enqueued = 0
-
     with concurrency.dispatch_lock() as got:
         if not got:
             return {"status": "skipped-locked"}
         now = datetime.now(timezone.utc)
         with SessionLocal() as db:
+            cfg = get_polling_config(db)
+            intervals = {c: _class_interval(c, cfg) for c in POLL_CLASSES}
+            cap = int(cfg.max_concurrency_per_panorama)
             devices = db.query(Device).filter(Device.polling_enabled == True).all()  # noqa: E712
 
             groups: dict[str, list] = {}

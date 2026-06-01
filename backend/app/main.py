@@ -11,6 +11,7 @@ from fastapi import Depends
 from app.alerts.routes import router as alerts_router
 from app.capacity.routes import aggregates as capacity_aggregates
 from app.capacity.routes import metrics
+from app.capacity.routes import polling as capacity_polling
 from app.config import get_settings
 from app.core.auth.deps import current_user
 from app.core.auth.routes import auth, providers, users
@@ -81,6 +82,9 @@ app.include_router(upgrade_router, dependencies=_auth_required)
 # (phase 9), table (phase 10), and trend (phase 11) views with read-only
 # aggregates over the existing samples + devices tables. No schema added.
 app.include_router(capacity_aggregates.router, dependencies=_auth_required)
+# Runtime polling config + per-Panorama pressure telemetry (#89 PR-4).
+# Per-route current_admin gating; the route paths are /settings/polling*.
+app.include_router(capacity_polling.router, dependencies=_auth_required)
 # Alerts module — phase 8 scaffold (empty list). Phase 12 fills in the
 # real rule engine + acknowledgement actions. Mounting the route now
 # means the phase-7 Home Dashboard's Active-alerts frame can fetch

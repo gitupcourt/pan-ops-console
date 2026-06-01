@@ -19,6 +19,8 @@ def test_celery_app_loads():
     assert celery.conf.task_track_started is True
     # 1-day result expiry — load-bearing for long-running tasks in phase 4.
     assert celery.conf.result_expires == 86400
+    # Silences the Celery 6.0 broker-retry deprecation warning on worker boot.
+    assert celery.conf.broker_connection_retry_on_startup is True
 
 
 def test_capacity_poll_tasks_registered():

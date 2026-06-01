@@ -130,14 +130,26 @@ export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
     // offline
     return (
       <div className="rounded border border-rose-700 bg-rose-900/30 text-rose-200 px-3 py-2 text-xs">
-        <div className="font-semibold">Device is disconnected</div>
+        <div className="font-semibold">
+          Device is {device.source === "panorama" ? "disconnected" : "unreachable"}
+        </div>
         <div className="mt-0.5 text-[11px]">
-          Panorama reports this device as not connected — polling is paused
-          until Panorama sees the device come back online.
+          {device.source === "panorama" ? (
+            <>
+              Panorama reports this device as not connected — polling is paused
+              until Panorama sees the device come back online.
+            </>
+          ) : (
+            <>
+              The poller can't reach this device — its recent polls are failing.
+              Check the device's reachability and API credentials.
+            </>
+          )}
           {lastSeen && (
             <>
               {" "}
-              Last sync refresh <span className="font-mono">{relTime(lastSeen)}</span>.
+              {device.source === "panorama" ? "Last sync refresh" : "Last poll attempt"}{" "}
+              <span className="font-mono">{relTime(lastSeen)}</span>.
             </>
           )}
         </div>
@@ -185,11 +197,12 @@ function computeState(d: Props["device"]): State {
     }
     return "ok";
   }
-  // direct: derive "online" from a fresh, error-free last_poll_at.
-  if (!d.last_poll_at) return "hidden";
-  if (d.last_poll_error) return "hidden"; // existing per-row error pill takes over
+  // direct: derive liveness from the poller's own success/failure trail —
+  // `connected` is meaningless here (only Panorama sync maintains it).
+  if (!d.last_poll_at) return "hidden"; // never polled → genuinely unknown
+  if (d.last_poll_error) return "offline"; // last poll failed (e.g. unreachable)
   const ageMs = Date.now() - new Date(d.last_poll_at).getTime();
-  return ageMs <= DIRECT_ONLINE_MS ? "ok" : "hidden";
+  return ageMs <= DIRECT_ONLINE_MS ? "ok" : "offline"; // no fresh poll → treat as down
 }
 
 function titleFor(state: State, source: string, lastSeen: string | null): string {
@@ -207,5 +220,8 @@ function titleFor(state: State, source: string, lastSeen: string | null): string
     return `Panorama reports device as disconnected (last refresh ${relTime(lastSeen)})`;
   }
   // direct
-  return `Poller reached this device successfully (last poll ${relTime(lastSeen)})`;
+  if (state === "ok") {
+    return `Poller reached this device successfully (last poll ${relTime(lastSeen)})`;
+  }
+  return `Poller can't reach this device — recent polls are failing (last attempt ${relTime(lastSeen)})`;
 }

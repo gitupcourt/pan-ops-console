@@ -10,7 +10,7 @@ import {
   Panorama,
   PanoramaInput,
 } from "../../api";
-import { Button, Card, CardHeader, Empty, Field, Input, Select } from "../ui/ui";
+import { Button, Card, CardHeader, Empty, Field, Input, Select, TableScroll } from "../ui/ui";
 import { DeviceConnectionStatus } from "./DeviceConnectionStatus";
 
 export default function Inventory() {
@@ -789,6 +789,7 @@ function DevicesSection() {
       {devs.length === 0 ? (
         <Empty>No devices yet. Add one directly, or sync a Panorama to import its managed devices.</Empty>
       ) : (
+        <TableScroll>
         <table className="w-full text-sm table-auto">
           <thead className="text-xs uppercase text-zinc-500 border-b border-zinc-800">
             <tr>
@@ -1029,6 +1030,7 @@ function DevicesSection() {
             })}
           </tbody>
         </table>
+        </TableScroll>
       )}
     </Card>
   );

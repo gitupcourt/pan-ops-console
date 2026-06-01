@@ -449,17 +449,34 @@ type RowAction = {
  *
  * The menu is `position: fixed`, anchored to the trigger via its
  * bounding rect, so it is NOT clipped by the table's `overflow-x-auto`
- * scroll container (an absolutely-positioned menu would be). A
- * transparent full-screen backdrop handles click-outside; Esc closes.
+ * scroll container (an absolutely-positioned menu would be). It flips to
+ * open UPWARD when the trigger sits near the viewport bottom — a fixed menu
+ * opening downward off-screen can't be scrolled into reach, so it would just
+ * get clipped (the bug this guards against). A `max-height` + internal scroll
+ * is the final fallback for a very short window. A transparent full-screen
+ * backdrop handles click-outside; Esc closes.
  */
 function RowActionsMenu({ actions, label }: { actions: RowAction[]; label: string }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
+  const [pos, setPos] = useState<{ top?: number; bottom?: number; right: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
 
   const openMenu = () => {
     const r = btnRef.current?.getBoundingClientRect();
-    if (r) setPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+    if (r) {
+      const right = window.innerWidth - r.right;
+      // Open upward when there isn't room below (e.g. a row near the viewport
+      // bottom). Estimate menu height from the action count (~34px/item +
+      // container padding); if below-space is tight and there's more room
+      // above, anchor the menu's BOTTOM edge above the trigger instead.
+      const estHeight = actions.length * 34 + 12;
+      const spaceBelow = window.innerHeight - r.bottom;
+      if (spaceBelow < estHeight + 8 && r.top > spaceBelow) {
+        setPos({ bottom: window.innerHeight - r.top + 4, right });
+      } else {
+        setPos({ top: r.bottom + 4, right });
+      }
+    }
     setOpen(true);
   };
 
@@ -488,8 +505,8 @@ function RowActionsMenu({ actions, label }: { actions: RowAction[]; label: strin
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div
             role="menu"
-            className="fixed z-50 min-w-40 rounded border border-zinc-700 bg-zinc-950 shadow-xl py-1 text-sm"
-            style={{ top: pos.top, right: pos.right }}
+            className="fixed z-50 min-w-40 max-h-[70vh] overflow-y-auto rounded border border-zinc-700 bg-zinc-950 shadow-xl py-1 text-sm"
+            style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}
           >
             {actions.map((a) => (
               <button

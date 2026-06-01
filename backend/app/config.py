@@ -40,11 +40,29 @@ class Settings(BaseSettings):
     # Explicit override for the fast (system/traffic) cadence. None →
     # inherit POLL_INTERVAL_SECONDS so legacy single-knob configs Just Work.
     POLL_SYSTEM_INTERVAL_SECONDS: int | None = None
-    # Slow cadence for config-class metrics. Default 1h — object counts
-    # change on commit, not on a timer; an operator who pushes a big policy
-    # change still sees it reflected within the hour, and the alert engine
-    # cares about live telemetry (fast beat), not object counts.
-    POLL_CONFIG_INTERVAL_SECONDS: int = 3600
+    # Slow cadence for config-class metrics. Default 12h (twice a day) —
+    # object/policy counts change on commit, not on a timer, so re-reading
+    # them constantly burns Panorama API budget for near-identical data.
+    # The alert engine cares about live telemetry (fast beat), not object
+    # counts. Operator-configurable at runtime in PR-4.
+    POLL_CONFIG_INTERVAL_SECONDS: int = 43200
+
+    # --- Staggered dispatcher (#89 PR-3) -------------------------------
+    # Polling is driven by a per-device "due-time" dispatcher rather than a
+    # single sweep: a lightweight beat fires `capacity.dispatch_due` every
+    # POLL_DISPATCH_TICK_SECONDS, which enqueues per-device poll tasks for
+    # only the devices whose class interval has elapsed, bounded per
+    # Panorama. This spreads the fleet across each interval instead of one
+    # thundering herd, and bounds each Panorama's API load independently.
+    POLL_DISPATCH_TICK_SECONDS: int = 30
+    # Max concurrent in-flight polls through any ONE Panorama (proxied) or
+    # the "direct" group. Protects a single Panorama's API; aggregate fleet
+    # throughput scales with the NUMBER of Panoramas. Total poll parallelism
+    # is bounded by the dedicated poller worker's --concurrency.
+    POLL_MAX_CONCURRENCY_PER_PANORAMA: int = 4
+    # On a failed device poll, rewind the class timestamp so it retries in
+    # ~this many seconds instead of waiting a full (up to 12h) interval.
+    POLL_DEVICE_RETRY_BACKOFF_SECONDS: int = 60
 
     # How often the scheduled Panorama sync runs (refresh `Device.connected`,
     # `last_seen_at`, HA state, etc. across every registered Panorama).

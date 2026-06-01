@@ -80,6 +80,10 @@ celery.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    # Retain the pre-Celery-6.0 behavior (retry the broker connection on
+    # worker startup) and silence the CPendingDeprecationWarning that prints
+    # on every worker/beat boot otherwise.
+    broker_connection_retry_on_startup=True,
     # task_track_started=True is what makes task.state == 'STARTED'
     # observable from the API side. The UI uses it to distinguish
     # "queued" from "actively running" — load-bearing for the

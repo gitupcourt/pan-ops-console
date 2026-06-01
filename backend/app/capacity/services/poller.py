@@ -144,7 +144,13 @@ def poll_device(
         try:
             current = _sum_sources(spec.current)
             if current is None:
-                log.warning("metric %s: current extractor returned None on %s", spec.name, device.name)
+                # Expected + common: the metric simply isn't present on this
+                # device this cycle — e.g. a feature like SSL decryption isn't
+                # configured, so its counter is absent. DEBUG, not WARNING: at
+                # the normal INFO level this is pure per-device-per-cycle noise.
+                # A genuinely broken extractor still shows up as a gap in the
+                # Capacity charts; enable DEBUG to diagnose one.
+                log.debug("metric %s: no current value on %s; skipping this cycle", spec.name, device.name)
                 continue
 
             max_value: float | None = None

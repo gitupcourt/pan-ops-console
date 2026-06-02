@@ -1690,28 +1690,6 @@ def _crash_hint(exc: BaseException) -> str:
     return ""
 
 
-def _panorama_sw_version(device: Device) -> str | None:
-    """Best-effort: the managing Panorama's PAN-OS version (`show system info`),
-    or None if the device isn't Panorama-managed or the query fails. Advisory
-    use only (the version-skew warning) — never blocks an upgrade."""
-    pano = getattr(device, "panorama", None)
-    if not (device.proxy_via_panorama and pano and pano.encrypted_api_key):
-        return None
-    try:
-        from app.config import get_settings  # noqa: PLC0415
-        from app.core.credentials import decrypt_key  # noqa: PLC0415
-        from panos.panorama import Panorama as _Panorama  # noqa: PLC0415
-
-        key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
-        p = _Panorama(pano.hostname, api_key=key, timeout=get_settings().PAN_CLIENT_TIMEOUT_SECONDS)
-        p.verify_ssl = pano.verify_tls
-        resp = p.op("<show><system><info></info></system></show>", cmd_xml=False)
-        return resp.findtext(".//sw-version") or None
-    except Exception as exc:  # noqa: BLE001
-        log.info("Panorama version lookup skipped for %s: %s", device.name, exc)
-        return None
-
-
 def _warn_if_target_exceeds_panorama(
     db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
 ) -> None:
@@ -1721,7 +1699,9 @@ def _warn_if_target_exceeds_panorama(
     (how we reach proxied devices) can fail until Panorama is upgraded. This is
     the "someone forgot to upgrade Panorama first" guard — non-blocking; we
     record a clear warning and let the operator proceed."""
-    pano_ver = _panorama_sw_version(device)
+    from app.core.command_proxy.builder import panorama_sw_version  # noqa: PLC0415
+
+    pano_ver = panorama_sw_version(device)
     if not pano_ver:
         return
     if version_tuple(job.target_version) > version_tuple(pano_ver):

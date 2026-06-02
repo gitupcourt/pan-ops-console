@@ -196,3 +196,31 @@ def build_client_with_fallback(
 
     # Not proxied (or preconditions not met) — go direct.
     return _build_direct_client(device), "direct"
+
+
+def panorama_sw_version(device: Device) -> str | None:
+    """Best-effort PAN-OS version of the device's managing Panorama
+    (`show system info` → sw-version), or None if the device isn't
+    Panorama-managed or the query fails.
+
+    Advisory use only — the version-skew warning (PAN-OS requires Panorama to
+    run >= its firewalls, so a target that outranks Panorama is unsupported and
+    breaks post-upgrade ops via Panorama). Never blocks anything; swallows all
+    errors and returns None.
+    """
+    pano = getattr(device, "panorama", None)
+    if not (device.proxy_via_panorama and pano and pano.encrypted_api_key):
+        return None
+    try:
+        from panos.panorama import Panorama as _Panorama  # noqa: PLC0415
+
+        key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
+        p = _Panorama(
+            pano.hostname, api_key=key, timeout=get_settings().PAN_CLIENT_TIMEOUT_SECONDS
+        )
+        p.verify_ssl = pano.verify_tls
+        resp = p.op("<show><system><info></info></system></show>", cmd_xml=False)
+        return resp.findtext(".//sw-version") or None
+    except Exception as exc:  # noqa: BLE001
+        log.info("Panorama version lookup skipped for %s: %s", device.name, exc)
+        return None

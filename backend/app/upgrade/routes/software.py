@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.command_proxy.builder import build_client_with_fallback
+from app.core.command_proxy.builder import build_client_with_fallback, panorama_sw_version
 from app.core.devices.models.device import Device
 from app.db import get_db
 
@@ -49,6 +49,11 @@ class AvailableSoftwareOut(BaseModel):
     device_id: int
     device_name: str
     current_version: str | None
+    # The managing Panorama's PAN-OS version (None if direct-attached or the
+    # lookup failed). The picker compares the selected target against this to
+    # warn when the target would put the firewall AHEAD of Panorama
+    # (unsupported by PAN-OS; breaks post-upgrade operations via Panorama).
+    panorama_version: str | None = None
     available: list[SoftwareEntry]
     # Populated when the check-now / info call to the device fails
     # (network down, Panorama unreachable, credentials missing, etc).
@@ -107,6 +112,7 @@ def get_available_software_bulk(
     )
     found_by_id = {d.id: d for d in devices}
     results: dict[int, AvailableSoftwareOut] = {}
+    pano_cache: dict[int, str | None] = {}  # panorama_id -> version, this request
     for did in payload.device_ids:
         device = found_by_id.get(did)
         if device is None:
@@ -120,20 +126,27 @@ def get_available_software_bulk(
                 error="device not found",
             )
             continue
-        results[did] = _fetch_for_device(db, device)
+        results[did] = _fetch_for_device(db, device, pano_cache=pano_cache)
     return AvailableSoftwareBulkOut(results=results)
 
 
-def _fetch_for_device(db: Session, device: Device) -> AvailableSoftwareOut:
+def _fetch_for_device(
+    db: Session, device: Device, pano_cache: dict[int, str | None] | None = None
+) -> AvailableSoftwareOut:
     """Build the response payload for one device. Catches all
     network/auth failures and returns them in the `error` field so the
     frontend can render a per-device-row error indicator instead of
     failing the whole bulk call.
+
+    `pano_cache` (bulk path) memoizes the managing Panorama's version by
+    panorama_id so an HA pair / fleet sharing one Panorama isn't re-queried
+    once per device.
     """
     base = AvailableSoftwareOut(
         device_id=device.id,
         device_name=device.name,
         current_version=device.sw_version,
+        panorama_version=None,
         available=[],
         error=None,
     )
@@ -142,7 +155,20 @@ def _fetch_for_device(db: Session, device: Device) -> AvailableSoftwareOut:
         entries = client.list_software()
     except Exception as exc:  # noqa: BLE001 — surface to UI
         return base.model_copy(update={"error": str(exc)[:500]})
-    base = base.model_copy(
-        update={"available": [SoftwareEntry(**e) for e in entries]}
+
+    # Managing Panorama's version (best-effort, advisory — feeds the version-
+    # skew warning in the picker). Cached per Panorama within a bulk request.
+    pid = device.panorama_id
+    if pano_cache is not None and pid is not None and pid in pano_cache:
+        pano_ver = pano_cache[pid]
+    else:
+        pano_ver = panorama_sw_version(device)
+        if pano_cache is not None and pid is not None:
+            pano_cache[pid] = pano_ver
+
+    return base.model_copy(
+        update={
+            "available": [SoftwareEntry(**e) for e in entries],
+            "panorama_version": pano_ver,
+        }
     )
-    return base

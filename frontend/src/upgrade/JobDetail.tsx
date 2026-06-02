@@ -1346,6 +1346,82 @@ function DiffReport({ diff }: { diff: SnapshotDiff }) {
   );
 }
 
+// ---- snapshot-diff rendering helpers ----
+//
+// panos-upgrade-assurance emits a recursive comparison tree. Every node is
+// {missing:{passed,missing_keys[]}, added:{passed,added_keys[]},
+//  changed:{passed,changed_raw{}}, passed}, and `changed_raw` maps a key to
+// either a {left_snap,right_snap} leaf (a value that differed) or another
+// node (a nested dict). We flatten the `changed` tree into one row per leaf
+// so the operator sees "entry › field: before → after" instead of having to
+// read nested JSON. Validated against real arp_table/routes/nics/ip_sec_tunnels
+// diffs (nics entries are direct leaves; the others nest one level).
+
+type DiffChangeRow = {
+  path: string[];
+  before?: unknown;
+  after?: unknown;
+  kind: "changed" | "added" | "removed";
+};
+
+function isDiffLeaf(
+  v: unknown,
+): v is { left_snap?: unknown; right_snap?: unknown } {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    ("left_snap" in v || "right_snap" in v)
+  );
+}
+
+function collectDiffChanges(
+  node: unknown,
+  prefix: string[],
+  out: DiffChangeRow[],
+): void {
+  if (isDiffLeaf(node)) {
+    out.push({
+      path: prefix,
+      before: node.left_snap,
+      after: node.right_snap,
+      kind: "changed",
+    });
+    return;
+  }
+  if (typeof node !== "object" || node === null) {
+    // Unexpected scalar where a node was expected — surface as the new value.
+    out.push({ path: prefix, after: node, kind: "changed" });
+    return;
+  }
+  const n = node as Record<string, any>;
+  const changedRaw = n.changed?.changed_raw;
+  if (changedRaw && typeof changedRaw === "object") {
+    for (const [k, v] of Object.entries(changedRaw)) {
+      collectDiffChanges(v, [...prefix, k], out);
+    }
+  }
+  const addedKeys = n.added?.added_keys;
+  if (Array.isArray(addedKeys)) {
+    for (const k of addedKeys) out.push({ path: [...prefix, String(k)], kind: "added" });
+  }
+  const missingKeys = n.missing?.missing_keys;
+  if (Array.isArray(missingKeys)) {
+    for (const k of missingKeys) out.push({ path: [...prefix, String(k)], kind: "removed" });
+  }
+}
+
+function fmtDiffValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+    return String(v);
+  }
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
 function DiffAreaAccordion({
   area,
   report,
@@ -1355,18 +1431,24 @@ function DiffAreaAccordion({
   report: SnapshotDiffAreaReport;
   startOpen: boolean;
 }) {
-  const addedCount = Array.isArray(report.added) ? report.added.length : 0;
-  const missingCount = Array.isArray(report.missing) ? report.missing.length : 0;
-  const changedCount =
-    report.changed && typeof report.changed === "object"
-      ? Object.keys(report.changed).length
-      : 0;
+  const [showRaw, setShowRaw] = useState(false);
+
+  // Flatten the changed tree to leaf rows; list added/removed entry keys.
+  const changedRaw = report.changed?.changed_raw ?? {};
+  const changedEntryCount = Object.keys(changedRaw).length;
+  const changeRows: DiffChangeRow[] = [];
+  for (const [entryId, entryNode] of Object.entries(changedRaw)) {
+    collectDiffChanges(entryNode, [entryId], changeRows);
+  }
+  const addedEntries = report.added?.added_keys ?? [];
+  const removedEntries = report.missing?.missing_keys ?? [];
+
   const summary = report.passed
     ? "no change"
     : [
-        addedCount && `${addedCount} added`,
-        missingCount && `${missingCount} removed`,
-        changedCount && `${changedCount} modified`,
+        changedEntryCount && `${changedEntryCount} changed`,
+        addedEntries.length && `${addedEntries.length} added`,
+        removedEntries.length && `${removedEntries.length} removed`,
       ]
         .filter(Boolean)
         .join(", ") || "see details";
@@ -1385,42 +1467,97 @@ function DiffAreaAccordion({
       }
       initiallyOpen={startOpen}
     >
-      <div className="space-y-2">
-        {addedCount > 0 && (
+      <div className="space-y-3">
+        {changeRows.length > 0 && (
           <div>
-            <div className="text-[10px] uppercase text-emerald-400/80 mb-1">
-              + Added ({addedCount})
+            <div className="text-[10px] uppercase tracking-wider text-amber-400/80 mb-1">
+              Changed ({changedEntryCount})
             </div>
-            <pre className="text-[11px] text-emerald-200 whitespace-pre-wrap break-all font-mono">
-              {jsonPretty(report.added)}
-            </pre>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-[11px]">
+                <thead>
+                  <tr className="text-left text-zinc-500">
+                    <th className="font-medium pr-4 pb-1">Item</th>
+                    <th className="font-medium pr-4 pb-1">Before</th>
+                    <th className="font-medium pb-1">After</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {changeRows.map((r, i) => (
+                    <tr key={i} className="border-t border-zinc-800/60">
+                      <td className="pr-4 py-1 align-top text-zinc-300 break-all">
+                        {r.path.join(" › ")}
+                        {r.kind === "added" && (
+                          <span className="ml-1 text-emerald-400/70">(added)</span>
+                        )}
+                        {r.kind === "removed" && (
+                          <span className="ml-1 text-rose-400/70">(removed)</span>
+                        )}
+                      </td>
+                      <td className="pr-4 py-1 align-top text-zinc-400 break-all">
+                        {r.kind === "added" ? "—" : fmtDiffValue(r.before)}
+                      </td>
+                      <td className="py-1 align-top text-amber-200 break-all">
+                        {r.kind === "removed" ? "—" : fmtDiffValue(r.after)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
-        {missingCount > 0 && (
+
+        {addedEntries.length > 0 && (
           <div>
-            <div className="text-[10px] uppercase text-rose-400/80 mb-1">
-              − Removed ({missingCount})
+            <div className="text-[10px] uppercase tracking-wider text-emerald-400/80 mb-1">
+              Added ({addedEntries.length})
             </div>
-            <pre className="text-[11px] text-rose-200 whitespace-pre-wrap break-all font-mono">
-              {jsonPretty(report.missing)}
-            </pre>
+            <ul className="space-y-0.5 font-mono text-[11px] text-emerald-200">
+              {addedEntries.map((k, i) => (
+                <li key={i} className="break-all">
+                  + {String(k)}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
-        {changedCount > 0 && (
+
+        {removedEntries.length > 0 && (
           <div>
-            <div className="text-[10px] uppercase text-amber-400/80 mb-1">
-              ~ Modified ({changedCount})
+            <div className="text-[10px] uppercase tracking-wider text-rose-400/80 mb-1">
+              Removed ({removedEntries.length})
             </div>
-            <pre className="text-[11px] text-amber-200 whitespace-pre-wrap break-all font-mono">
-              {jsonPretty(report.changed)}
-            </pre>
+            <ul className="space-y-0.5 font-mono text-[11px] text-rose-200">
+              {removedEntries.map((k, i) => (
+                <li key={i} className="break-all">
+                  − {String(k)}
+                </li>
+              ))}
+            </ul>
           </div>
         )}
+
         {report.passed && (
           <div className="text-[11px] text-emerald-300 italic">
             All items match between the two snapshots.
           </div>
         )}
+
+        {/* Power-user escape hatch: the raw comparison tree. */}
+        <div>
+          <button
+            onClick={() => setShowRaw((v) => !v)}
+            className="text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-300"
+          >
+            {showRaw ? "▾ Hide raw" : "▸ Show raw"}
+          </button>
+          {showRaw && (
+            <pre className="mt-1 text-[11px] text-zinc-400 whitespace-pre-wrap break-all font-mono">
+              {jsonPretty(report)}
+            </pre>
+          )}
+        </div>
       </div>
     </AreaAccordion>
   );

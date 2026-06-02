@@ -86,6 +86,16 @@ HA_OP_RETRY_SLEEP_S = 30
 RESUME_VERIFY_REISSUES = 3
 RESUME_VERIFY_WAIT_S = 30
 
+# After reboot + HA-resume, the device's own mgmt plane is back (wait_for_ready
+# cleared) but the managing Panorama can take extra time to re-establish its
+# connection to the device. The postcheck runs through the upgrade route
+# (Panorama-proxied by default), so firing it during that reconnect window
+# yields a "Panorama unreachable" runner error and a postcheck that validated
+# nothing. Poll the route until a light op answers before running the check.
+# 5 min covers the typical re-registration lag without stalling the job.
+POSTCHECK_ROUTE_TIMEOUT_S = 5 * 60
+POSTCHECK_ROUTE_POLL_S = 20
+
 
 def _resolve_checks_for_job(db: Session, job: UpgradeJob) -> list[str] | None:
     """Return the readiness-check name list to run for this job.
@@ -808,6 +818,32 @@ def _phase_postcheck(
         _record(db, task, "Post-check already completed in a prior run; skipping")
         return True
 
+    # Post-reboot reconnect window. The device's own mgmt plane is back
+    # (wait_for_ready cleared) and HA has resumed, but the managing Panorama
+    # can lag in re-establishing its connection — and the postcheck runs
+    # through the upgrade route (Panorama-proxied by default). Firing it
+    # during that window gives a "Panorama unreachable" runner error and a
+    # postcheck that validated nothing (job #4: postcheck errored, yet the
+    # post_snapshot moments later succeeded — the route had recovered in
+    # between). Wait for the route to actually answer before running.
+    _set_substep(db, task, "awaiting_reachability")
+    _record(
+        db, task,
+        "Waiting for the device to be reachable via its upgrade route before "
+        "post-check (the managing Panorama may still be re-registering it after "
+        f"the reboot; up to {POSTCHECK_ROUTE_TIMEOUT_S}s)",
+    )
+    if _wait_for_upgrade_route_ready(db, device):
+        _record(db, task, "Device reachable via its upgrade route; running post-check")
+    else:
+        _record(
+            db, task,
+            "Device still not reachable via its upgrade route after waiting; "
+            "running post-check anyway — if it reports unreachable, confirm "
+            "Panorama shows the device connected, then Re-run the check.",
+        )
+    _set_substep(db, task, None)
+
     # Same rerun-loop pattern as _phase_precheck — operator can fix a
     # post-upgrade issue and re-run the check rather than override or
     # abort.
@@ -835,10 +871,20 @@ def _phase_postcheck(
             break
 
         failing = _failing_check_names(run.results)
-        msg = (
-            f"Post-check FAILED: {', '.join(failing) if failing else 'see post-check run for details'}."
-            f" Job parked — click Override + proceed, Re-run check, or Abort job."
-        )
+        # Distinguish "ran and some checks failed" from "couldn't run at all"
+        # (runner errored before evaluating anything: 0 results + an error,
+        # e.g. the device was unreachable through Panorama). Same parking
+        # behavior, but the timeline message should say which it was.
+        if not run.results and run.error:
+            msg = (
+                f"Post-check could not run: {run.error}"
+                " — Job parked; click Override + proceed, Re-run check, or Abort job."
+            )
+        else:
+            msg = (
+                f"Post-check FAILED: {', '.join(failing) if failing else 'see post-check run for details'}."
+                f" Job parked — click Override + proceed, Re-run check, or Abort job."
+            )
         progress["failing_postchecks"] = failing
         task.progress = progress
         db.commit()
@@ -948,6 +994,48 @@ def _client_for(db: Session, device: Device) -> PanDeviceClient:
 
     client, _route = build_client_with_fallback(db, device)
     return client
+
+
+def _upgrade_route_reachable(db: Session, device: Device) -> bool:
+    """One-shot: is the device answering on its upgrade route right now?
+
+    Builds the proxy-by-default client and runs a light, auth-proving op.
+    `build_client_with_fallback` already probes on the proxy path (and
+    raises if neither proxy nor direct works), but the direct path is
+    returned WITHOUT a probe — so the explicit get_system_info() is what
+    proves reachability there. Swallows everything and returns a bool;
+    callers poll on it.
+    """
+    try:
+        client = _client_for(db, device)
+        client.get_system_info()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.info("Upgrade route to %s not yet reachable: %s", device.name, exc)
+        return False
+
+
+def _wait_for_upgrade_route_ready(
+    db: Session,
+    device: Device,
+    *,
+    timeout_s: int = POSTCHECK_ROUTE_TIMEOUT_S,
+    poll_interval_s: int = POSTCHECK_ROUTE_POLL_S,
+) -> bool:
+    """Poll `_upgrade_route_reachable` until True or `timeout_s` elapses.
+
+    Always makes at least one attempt (so a zero/negative timeout still
+    probes once). Returns True as soon as the route answers; False on
+    timeout — the caller proceeds anyway and lets the postcheck record the
+    unreachable error as before, so this only ever helps, never blocks.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        if _upgrade_route_reachable(db, device):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval_s)
 
 
 def _is_already_at_target(device: Device, target_version: str) -> bool:

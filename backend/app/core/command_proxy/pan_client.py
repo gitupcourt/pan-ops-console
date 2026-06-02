@@ -262,6 +262,59 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
 DEFAULT_OP_TIMEOUT_S = 30
 
 
+def feature_train(version: str | None) -> tuple[int, int] | None:
+    """Parse a PAN-OS version into its feature train (the first TWO numbers).
+
+    ``'11.2.11' -> (11, 2)``; ``'12.1.4-h2' -> (12, 1)``; ``'10.2.0' -> (10, 2)``.
+    Returns None if unparseable. A PAN-OS *major* upgrade crosses this X.Y
+    boundary (11.1->11.2, 11.2->12.1) — not just the leading number — and that
+    is the only case that needs the target train's base image pre-staged.
+    """
+    if not version:
+        return None
+    head = version.strip().split("-", 1)[0]  # drop hotfix suffix (e.g. -h2)
+    parts = head.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+
+
+def base_image_from_list(target_version: str, software: list[dict]) -> str | None:
+    """The BASE image version for ``target_version``'s feature train, read from
+    a software list (entries as returned by :meth:`PanDeviceClient.list_software`).
+
+    PAN-OS marks exactly one entry per train with ``release_type == "Base"`` —
+    and it is NOT always X.Y.0 (12.1's base image is 12.1.2). We trust that
+    marker rather than guessing the ".0". Falls back to the lowest non-hotfix
+    maintenance release of the train for older PAN-OS that doesn't populate
+    release-type. Returns None if the train isn't present in the list.
+    """
+    train = feature_train(target_version)
+    if train is None:
+        return None
+    in_train = [e for e in software if feature_train(e.get("version")) == train]
+    if not in_train:
+        return None
+    for e in in_train:
+        if (e.get("release_type") or "").strip().lower() == "base":
+            return e.get("version")
+
+    # Fallback for PAN-OS that doesn't populate release-type: the lowest-numbered
+    # non-hotfix release in the train (the closest analogue to "the base").
+    def _ver_key(e: dict) -> tuple:
+        head = (e.get("version") or "").split("-", 1)[0]
+        try:
+            return tuple(int(x) for x in head.split("."))
+        except ValueError:
+            return (9999,)
+
+    non_hotfix = [e for e in in_train if "-" not in (e.get("version") or "")]
+    return min(non_hotfix or in_train, key=_ver_key).get("version")
+
+
 class PanDeviceClient:
     """Operations against a single firewall — direct or Panorama-proxied."""
 
@@ -516,7 +569,10 @@ class PanDeviceClient:
         """`request system software info` — return all known versions.
 
         Each entry: {version, downloaded(bool), current(bool), latest(bool),
-                     uploaded(bool), filename, released_on, size_kb}
+                     uploaded(bool), filename, released_on, size_kb,
+                     release_type}. ``release_type == "Base"`` flags the single
+                     base image per feature train (consumed by
+                     ``base_image_from_list``); it is NOT always X.Y.0.
         """
         try:
             self._proxy.op("<request><system><software><check></check></software></system></request>", cmd_xml=False)
@@ -540,6 +596,7 @@ class PanDeviceClient:
                 "filename": _text(entry, "filename"),
                 "released_on": _text(entry, "released-on"),
                 "size_kb": _text(entry, "size-kb") or _text(entry, "size"),
+                "release_type": (_text(entry, "release-type") or "").strip(),
             })
         return out
 

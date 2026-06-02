@@ -311,11 +311,16 @@ export type Snapshot = {
   data: Record<string, unknown>;
 };
 
+// One node of a panos-upgrade-assurance comparison report. The structure is
+// recursive: `changed.changed_raw` maps a key to either a {left_snap,
+// right_snap} leaf (a value that differed) or another node of this same shape
+// (a nested dict that differed). `added_keys`/`missing_keys` list the
+// identities that appeared / disappeared between the two snapshots.
 export type SnapshotDiffAreaReport = {
   passed: boolean;
-  added: unknown[];
-  missing: unknown[];
-  changed: Record<string, unknown>;
+  added?: { passed?: boolean; added_keys?: string[] };
+  missing?: { passed?: boolean; missing_keys?: string[] };
+  changed?: { passed?: boolean; changed_raw?: Record<string, unknown> };
 };
 
 export type SnapshotDiff = {

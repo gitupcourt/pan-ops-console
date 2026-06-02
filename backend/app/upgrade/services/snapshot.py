@@ -51,6 +51,19 @@ DEFAULT_AREAS: list[str] = [
     "session_stats",
 ]
 
+# Areas we capture for raw visibility (View pre / View post) but deliberately
+# do NOT include in the pre/post comparison.
+#
+# `session_stats` compared without an explicit per-counter threshold spec
+# returns a null per-area report from panos-upgrade-assurance's
+# compare_snapshots() — there's nothing to threshold against. Worse, session
+# counters legitimately reset to ~0 across the upgrade reboot, so even a
+# threshold comparison would always "fail" and mean nothing. Persisting that
+# null was pure noise in the diff and (until the diff viewer was hardened)
+# the payload that crashed the Compare-diff panel. So: keep capturing the
+# counters (cheap, useful to eyeball raw), just skip them in the diff.
+COMPARE_EXCLUDE_AREAS: frozenset[str] = frozenset({"session_stats"})
+
 
 def capture(
     db: Session,
@@ -124,7 +137,9 @@ def compare(
     # areas keeps the comparison scoped to what we actually have, and is
     # also robust to a left/right pair captured with different area sets
     # (e.g. an ad-hoc snapshot with a custom list).
-    areas_to_compare = sorted(set(left.data.keys()) & set(right.data.keys()))
+    areas_to_compare = sorted(
+        (set(left.data.keys()) & set(right.data.keys())) - COMPARE_EXCLUDE_AREAS
+    )
     if not areas_to_compare:
         log.info(
             "Skipping snapshot diff (left=%s right=%s): no overlapping areas",

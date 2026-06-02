@@ -107,17 +107,39 @@ def test_compare_passes_only_overlapping_areas(client, db, monkeypatch):
     # Never None — that's the whole bug.
     assert _FakeCompare.last_reports is not None
     # Exactly the intersection, sorted, and crucially WITHOUT
-    # global_jumbo_frame or ip_sec_tunnels (each present on one side only).
+    # global_jumbo_frame or ip_sec_tunnels (each present on one side only)
+    # and WITHOUT session_stats (in COMPARE_EXCLUDE_AREAS — see the
+    # dedicated test below).
     assert _FakeCompare.last_reports == [
         "arp_table",
         "content_version",
         "license",
         "nics",
         "routes",
-        "session_stats",
     ]
     assert "_error" not in diff.report
     assert diff.all_passed is True
+
+
+def test_compare_excludes_uncomparable_areas(client, db, monkeypatch):
+    """`session_stats` is captured for raw visibility but must never be
+    handed to the library's compare: a bare compare (no threshold spec)
+    returns a null per-area report, which is meaningless across the upgrade
+    reboot (counters reset) AND was the null payload that crashed the
+    Compare-diff viewer. Present in both snapshots, still excluded."""
+    monkeypatch.setattr(snapshot_svc, "SnapshotCompare", _FakeCompare)
+
+    dev = _seed_device(db)
+    data = {"nics": {}, "routes": {}, "session_stats": {}}
+    pre = _snap(db, dev, SnapshotKind.PRE_UPGRADE, data)
+    post = _snap(db, dev, SnapshotKind.POST_UPGRADE, data, version="12.1.4-h6")
+
+    diff = snapshot_svc.compare(db, pre, post)
+
+    assert diff is not None
+    assert _FakeCompare.last_reports == ["nics", "routes"]
+    # session_stats never reaches the library and never lands in the report.
+    assert "session_stats" not in diff.report
 
 
 def test_compare_skips_when_no_overlapping_areas(client, db, monkeypatch):

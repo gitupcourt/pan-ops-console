@@ -12,6 +12,7 @@ import {
   UpgradeJobDetail,
   UpgradeTask,
 } from "../api";
+import { ErrorBoundary } from "../core/ui/ErrorBoundary";
 import { Button, Card, CardHeader } from "../core/ui/ui";
 import { JobStateBadge } from "./UpgradeJobs";
 
@@ -1178,15 +1179,17 @@ function SnapshotSidePanel({
         </div>
       )}
       {snap && (
-        <div className="space-y-2">
-          {Object.entries(snap.data).map(([area, payload]) => (
-            <AreaAccordion key={area} title={area} initiallyOpen={false}>
-              <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap break-all font-mono">
-                {jsonPretty(payload)}
-              </pre>
-            </AreaAccordion>
-          ))}
-        </div>
+        <ErrorBoundary title="Couldn't render this snapshot — close the panel to continue.">
+          <div className="space-y-2">
+            {Object.entries(snap.data ?? {}).map(([area, payload]) => (
+              <AreaAccordion key={area} title={area} initiallyOpen={false}>
+                <pre className="text-[11px] text-zinc-300 whitespace-pre-wrap break-all font-mono">
+                  {jsonPretty(payload)}
+                </pre>
+              </AreaAccordion>
+            ))}
+          </div>
+        </ErrorBoundary>
       )}
     </SidePanelShell>
   );
@@ -1225,7 +1228,11 @@ function SnapshotDiffSidePanel({
           Failed to load diff: {(q.error as Error).message}
         </div>
       )}
-      {diff && <DiffReport diff={diff} />}
+      {diff && (
+        <ErrorBoundary title="Couldn't render this diff — close the panel to continue.">
+          <DiffReport diff={diff} />
+        </ErrorBoundary>
+      )}
     </SidePanelShell>
   );
 }
@@ -1233,9 +1240,46 @@ function SnapshotDiffSidePanel({
 function DiffReport({ diff }: { diff: SnapshotDiff }) {
   // Headline summary then per-area accordion. Failing areas open by
   // default — operator's eyes go there first.
-  const areas = Object.entries(diff.report);
-  const failing = areas.filter(([, a]) => !a.passed);
-  const passing = areas.filter(([, a]) => a.passed);
+  const report = diff.report ?? {};
+
+  // The backend persists a compare-level failure as {"_error": "..."} when
+  // the panos-upgrade-assurance compare raised before producing any
+  // per-area report. Surface it as a banner rather than a fake "area".
+  const compareError =
+    typeof (report as Record<string, unknown>)._error === "string"
+      ? ((report as Record<string, unknown>)._error as string)
+      : null;
+
+  // Defensive partition. An area body can legitimately be null — e.g.
+  // session_stats compared without a threshold spec returns null from the
+  // library — and `null.passed` would otherwise throw. Pre-ErrorBoundary
+  // that blanked the entire console ("Compare diff → black screen"); we now
+  // skip non-object bodies and note them instead of crashing.
+  const entries = Object.entries(report).filter(([k]) => k !== "_error");
+  const renderable = entries.filter(
+    ([, a]) => a != null && typeof a === "object",
+  ) as [string, SnapshotDiffAreaReport][];
+  const notComparable = entries
+    .filter(([, a]) => a == null || typeof a !== "object")
+    .map(([k]) => k);
+
+  const failing = renderable.filter(([, a]) => !a.passed);
+  const passing = renderable.filter(([, a]) => a.passed);
+
+  if (compareError) {
+    return (
+      <div className="space-y-3 text-xs">
+        <div className="px-3 py-2 rounded border bg-rose-950/40 border-rose-900/40 text-rose-200">
+          <strong>The snapshot comparison could not be completed.</strong> The
+          pre and post snapshots exist, but the compare step errored before
+          producing a report.
+          <pre className="mt-2 whitespace-pre-wrap break-all font-mono text-[11px] text-rose-300/90">
+            {compareError}
+          </pre>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-3 text-xs">
@@ -1247,11 +1291,11 @@ function DiffReport({ diff }: { diff: SnapshotDiff }) {
         }`}
       >
         {diff.all_passed ? (
-          <strong>All {areas.length} areas match.</strong>
+          <strong>All {renderable.length} areas match.</strong>
         ) : (
           <>
             <strong>
-              {failing.length} of {areas.length} areas changed.
+              {failing.length} of {renderable.length} areas changed.
             </strong>{" "}
             Review each below and decide whether the change is expected for
             this upgrade (license bumps and content-DB updates usually are;
@@ -1260,6 +1304,17 @@ function DiffReport({ diff }: { diff: SnapshotDiff }) {
           </>
         )}
       </div>
+
+      {notComparable.length > 0 && (
+        <div className="px-3 py-1.5 rounded border border-zinc-800 bg-zinc-900/40 text-[11px] text-zinc-400">
+          Not compared:{" "}
+          <span className="font-mono text-zinc-300">
+            {notComparable.join(", ")}
+          </span>{" "}
+          — these areas don't produce a meaningful pre/post diff (e.g. session
+          counters, which reset across a reboot).
+        </div>
+      )}
 
       {failing.length > 0 && (
         <div className="space-y-2">

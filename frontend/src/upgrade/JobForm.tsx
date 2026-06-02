@@ -12,7 +12,7 @@ import {
   Device,
   UpgradeJobCreate,
 } from "../api";
-import { Button, Field, Input, Select } from "../core/ui/ui";
+import { AnimatedEllipsis, Button, Field, Input, Select } from "../core/ui/ui";
 
 /**
  * Create-an-upgrade-job form.
@@ -164,26 +164,33 @@ export function JobForm({
   // DG/TS by toggling filters between checks.
   const visibleDevices = useMemo(
     () =>
-      devices.filter((d) => {
-        if (filterModel && d.model !== filterModel) return false;
-        if (filterDeviceGroup && d.device_group !== filterDeviceGroup) return false;
-        if (filterTemplateStack && d.template_stack !== filterTemplateStack)
-          return false;
-        return true;
-      }),
+      devices
+        .filter((d) => {
+          if (filterModel && d.model !== filterModel) return false;
+          if (filterDeviceGroup && d.device_group !== filterDeviceGroup) return false;
+          if (filterTemplateStack && d.template_stack !== filterTemplateStack)
+            return false;
+          return true;
+        })
+        // Group HA pairs adjacently (same approach as Inventory): sort by a
+        // pair key — min(id, ha_peer_id) — so both halves of a pair sit
+        // together, then by id for a stable order.
+        .sort((a, b) => {
+          const ak = a.ha_peer_id == null ? a.id : Math.min(a.id, a.ha_peer_id);
+          const bk = b.ha_peer_id == null ? b.id : Math.min(b.id, b.ha_peer_id);
+          return ak - bk || a.id - b.id;
+        }),
     [devices, filterModel, filterDeviceGroup, filterTemplateStack],
   );
 
   const anyFilterActive =
     !!filterModel || !!filterDeviceGroup || !!filterTemplateStack;
 
-  // Note: device.ha_peer_id is not exposed on DeviceRead yet, so we
-  // can't visually group HA pairs in this picker. The orchestrator
-  // derives pair grouping from ha_peer_id at job-create time anyway
-  // (see `_ha_pair_key_for` in routes/jobs.py), so paired devices
-  // upgrade together regardless of how the operator picks them here.
-  // Future polish: expose ha_peer_id on DeviceRead, render pairs as
-  // collapsible groups.
+  // HA pairs are grouped adjacently in the picker (sorted by pair key above)
+  // and visually stitched in the rows below, mirroring the Inventory page.
+  // The orchestrator still derives pair grouping from ha_peer_id at job-create
+  // time (see `_ha_pair_key_for` in routes/jobs.py), so paired devices upgrade
+  // together regardless of how the operator selects them here.
 
   const canSubmit =
     name.trim().length > 0 &&
@@ -298,7 +305,11 @@ export function JobForm({
               {visibleDevices.map((d) => (
                 <tr
                   key={d.id}
-                  className="border-b border-zinc-800/40 hover:bg-zinc-900/30"
+                  className={`hover:bg-zinc-900/30 ${
+                    d.ha_peer_id != null
+                      ? "border-b border-l-2 border-b-zinc-800/40 border-l-blue-500/40"
+                      : "border-b border-zinc-800/40"
+                  }`}
                 >
                   <td className="px-3 py-1.5 w-8">
                     <input
@@ -312,7 +323,14 @@ export function JobForm({
                       }}
                     />
                   </td>
-                  <td className="px-3 py-1.5 text-zinc-100">{d.name}</td>
+                  <td className="px-3 py-1.5 text-zinc-100">
+                    {d.name}
+                    {d.ha_peer_id != null && (
+                      <span className="ml-2 inline-block align-middle rounded border border-blue-800/50 bg-blue-950/50 px-1 py-0.5 text-[9px] uppercase tracking-wide text-blue-300">
+                        HA{d.ha_role ? ` · ${d.ha_role}` : ""}
+                      </span>
+                    )}
+                  </td>
                   <td className="px-3 py-1.5 text-zinc-500 text-xs">
                     {d.model ?? "—"}
                   </td>
@@ -719,11 +737,21 @@ function VersionPicker({
           Select at least one device above to see available versions.
         </p>
       ) : softwareQ.isLoading || softwareQ.isFetching ? (
-        <p className="text-xs text-zinc-500">
-          Asking {selectedDeviceCount} device
-          {selectedDeviceCount === 1 ? "" : "s"} for available versions… (slow
-          on first call — the firewall contacts updates.paloaltonetworks.com)
-        </p>
+        <div className="flex items-start gap-2 text-xs text-zinc-400">
+          <span
+            className="mt-0.5 inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-400"
+            aria-hidden="true"
+          />
+          <p>
+            Asking {selectedDeviceCount} device
+            {selectedDeviceCount === 1 ? "" : "s"} for available versions
+            <AnimatedEllipsis />
+            <span className="mt-0.5 block text-[11px] text-zinc-500">
+              First call is slow — each firewall reaches out to
+              updates.paloaltonetworks.com. Hang tight.
+            </span>
+          </p>
+        </div>
       ) : (
         <>
           <div className="flex items-center gap-3">

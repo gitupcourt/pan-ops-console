@@ -2,7 +2,7 @@
 // while the app is small.
 
 import clsx from "clsx";
-import { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from "react";
+import { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes, useEffect, useState } from "react";
 
 export function Button({
   className,
@@ -107,4 +107,23 @@ export function Empty({ children }: { children: ReactNode }) {
  */
 export function TableScroll({ children, className }: { children: ReactNode; className?: string }) {
   return <div className={clsx("overflow-x-auto", className)}>{children}</div>;
+}
+
+/**
+ * Animated "…" that cycles "" → "." → ".." → "..." (~every 400ms), so a slow
+ * operation reads as actively working rather than hung. Width is reserved for
+ * three dots so surrounding text doesn't reflow as it cycles.
+ */
+export function AnimatedEllipsis({ className }: { className?: string }) {
+  const [dots, setDots] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setDots((d) => (d + 1) % 4), 400);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span className={className} aria-hidden="true">
+      {".".repeat(dots)}
+      <span className="invisible">{".".repeat(3 - dots)}</span>
+    </span>
+  );
 }

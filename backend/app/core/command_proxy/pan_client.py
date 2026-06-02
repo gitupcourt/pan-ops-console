@@ -282,6 +282,27 @@ def feature_train(version: str | None) -> tuple[int, int] | None:
         return None
 
 
+def version_tuple(version: str | None) -> tuple[int, int, int, int]:
+    """Parse a PAN-OS version into a comparable tuple including the hotfix.
+
+    ``'12.1.4-h6' -> (12, 1, 4, 6)``; ``'12.1.2' -> (12, 1, 2, 0)``;
+    ``'11.2.11' -> (11, 2, 11, 0)``. Non-numeric parts become 0, so the result
+    is always a 4-tuple safe to order with ``<``/``>`` — e.g. to tell whether a
+    firewall target outranks the Panorama managing it. Empty/None -> all zeros.
+    """
+    if not version:
+        return (0, 0, 0, 0)
+    main, _, hot = version.strip().partition("-")
+    nums: list[int] = []
+    for part in main.split(".")[:3]:
+        digits = "".join(ch for ch in part if ch.isdigit())
+        nums.append(int(digits) if digits else 0)
+    while len(nums) < 3:
+        nums.append(0)
+    hot_digits = "".join(ch for ch in hot if ch.isdigit())
+    return (nums[0], nums[1], nums[2], int(hot_digits) if hot_digits else 0)
+
+
 def base_image_from_list(target_version: str, software: list[dict]) -> str | None:
     """The BASE image version for ``target_version``'s feature train, read from
     a software list (entries as returned by :meth:`PanDeviceClient.list_software`).

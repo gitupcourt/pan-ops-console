@@ -815,7 +815,13 @@ def retry_task(
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
-    _refuse_if_job_terminal(task, db)
+    job = db.get(UpgradeJob, task.job_id)
+    # Retry is the recovery path for a FAILED job (including a driver crash), so
+    # — unlike confirm/override — we ALLOW a FAILED job here and un-fail it
+    # below so the orchestrator doesn't short-circuit on terminal-job state.
+    # Still refuse on COMPLETED (nothing to do) / ABORTED (operator killed it).
+    if job is not None and job.state in (JobState.COMPLETED, JobState.ABORTED):
+        raise HTTPException(status_code=409, detail=f"job is {job.state.value}; cannot retry")
     if task.phase == TaskPhase.DONE:
         raise HTTPException(status_code=409, detail="task already DONE")
     if task.phase in _AWAITING_CONFIRM | _AWAITING_OVERRIDE:
@@ -829,6 +835,13 @@ def retry_task(
     failed_from = task.phase.value
     task.phase = TaskPhase.PENDING
     task.error = None
+    # Un-fail the job so drive_pair (which bails on terminal-job state) actually
+    # resumes. Clear the stale reason — a fresh failure sets a new one; the
+    # prior cause stays in the task timeline + worker logs.
+    if job is not None and job.state == JobState.FAILED:
+        job.state = JobState.RUNNING
+        job.failure_reason = None
+        job.finished_at = None
     _audit_log(
         task,
         f"Retry from {failed_from} by {user.username}",

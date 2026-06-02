@@ -782,13 +782,33 @@ function TaskActionButtons({
     onSuccess: invalidate,
   });
 
+  // A FAILED task is retryable even on a FAILED job: retry resumes from the
+  // last completed marker AND un-fails the job server-side (the recovery path
+  // after a driver crash or phase failure). COMPLETED / ABORTED stay terminal.
+  if (
+    task.phase === "failed" &&
+    jobState !== "completed" &&
+    jobState !== "aborted"
+  ) {
+    return (
+      <Button onClick={() => retryM.mutate()} disabled={retryM.isPending}>
+        <BusyLabel
+          busy={retryM.isPending}
+          busyLabel="Retrying…"
+          idleLabel="Retry"
+        />
+      </Button>
+    );
+  }
+
   // If the job itself is terminal, the orchestrator won't act on any
   // click — `drive_pair` short-circuits on terminal-job state. Render
   // a placeholder so the operator doesn't get stuck pressing buttons
   // that silently no-op. We hit this on Job #1 when the worker pod
   // restarted while a task was parked at AWAITING_PRECHECK_OVERRIDE:
   // job went FAILED, task stayed parked, buttons looked actionable
-  // but every click was swallowed.
+  // but every click was swallowed. (Exception: a FAILED task on a FAILED
+  // job is handled just above — retry un-fails the job and resumes.)
   if (TERMINAL_JOB_STATES.includes(jobState)) {
     return (
       <span

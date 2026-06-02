@@ -29,6 +29,7 @@ from app.core.command_proxy.pan_client import (
     PanDeviceClient,
     base_image_from_list,
     feature_train,
+    version_tuple,
 )
 from app.core.devices.models.device import Device
 from app.core.devices.models.enums import HARole
@@ -166,9 +167,28 @@ def drive_pair(job_id: int, ha_pair_key: str) -> None:
 
         # When the last pair finishes successfully, flip the job to COMPLETED.
         _maybe_mark_job_done(db, job_id)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         log.exception("drive_pair crashed for job=%s key=%s", job_id, ha_pair_key)
-        _fail_job(db, job_id, "driver crashed; see worker logs")
+        hint = _crash_hint(exc)
+        # Make the crash RECOVERABLE: flip any still-in-flight task to FAILED
+        # (leaving DONE tasks alone) so it lands in a retryable state, the UI
+        # offers Retry, and resume picks up from the last completed marker. A
+        # bare driver crash used to freeze tasks mid-phase with no way forward.
+        # Best-effort — cleanup must never mask the original crash.
+        try:
+            for t in (
+                db.query(DeviceUpgradeTask)
+                .filter(
+                    DeviceUpgradeTask.job_id == job_id,
+                    DeviceUpgradeTask.ha_pair_key == ha_pair_key,
+                )
+                .all()
+            ):
+                if t.phase not in (TaskPhase.DONE, TaskPhase.FAILED):
+                    _record(db, t, f"Upgrade driver error: {exc}{hint}", phase=TaskPhase.FAILED)
+        except Exception:  # noqa: BLE001
+            log.exception("post-crash task cleanup failed for job=%s", job_id)
+        _fail_job(db, job_id, f"Driver error: {exc}{hint}"[:500])
     finally:
         db.close()
 
@@ -329,6 +349,11 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
     if _phase_already_done(task, "precheck"):
         _record(db, task, "Pre-check already completed in a prior run; skipping")
         return True
+
+    # Advisory, up front: flag if the target would put the firewall ahead of
+    # its Panorama (unsupported; breaks post-upgrade ops via Panorama). The
+    # "someone forgot to upgrade Panorama first" guard — warns, doesn't block.
+    _warn_if_target_exceeds_panorama(db, job, task, device)
 
     # Outer loop supports the operator's "Re-run check" action — if
     # they clicked it at the override gate (e.g. after pushing a
@@ -1647,6 +1672,68 @@ def _record(db: Session, task: DeviceUpgradeTask, message: str, *, phase: TaskPh
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _crash_hint(exc: BaseException) -> str:
+    """Short, actionable hint appended to driver-crash messages for the common
+    'can't reach the device through Panorama' failure — usually a just-rebooted
+    device Panorama hasn't re-registered yet, or a firewall now running a newer
+    PAN-OS than Panorama (Panorama must be >= its firewalls). Empty otherwise."""
+    msg = str(exc).lower()
+    if any(s in msg for s in ("panorama unreachable", "no direct route", "timed out", "not connected")):
+        return (
+            " — couldn't reach the device through Panorama. If it was just "
+            "upgraded, Panorama may still be re-registering it post-reboot, or "
+            "the firewall is now newer than Panorama (Panorama must be >= the "
+            "firewall). Confirm Panorama shows it connected, then Retry to resume."
+        )
+    return ""
+
+
+def _panorama_sw_version(device: Device) -> str | None:
+    """Best-effort: the managing Panorama's PAN-OS version (`show system info`),
+    or None if the device isn't Panorama-managed or the query fails. Advisory
+    use only (the version-skew warning) — never blocks an upgrade."""
+    pano = getattr(device, "panorama", None)
+    if not (device.proxy_via_panorama and pano and pano.encrypted_api_key):
+        return None
+    try:
+        from app.config import get_settings  # noqa: PLC0415
+        from app.core.credentials import decrypt_key  # noqa: PLC0415
+        from panos.panorama import Panorama as _Panorama  # noqa: PLC0415
+
+        key = decrypt_key(pano.encrypted_api_key, purpose=f"panorama:{pano.id}")
+        p = _Panorama(pano.hostname, api_key=key, timeout=get_settings().PAN_CLIENT_TIMEOUT_SECONDS)
+        p.verify_ssl = pano.verify_tls
+        resp = p.op("<show><system><info></info></system></show>", cmd_xml=False)
+        return resp.findtext(".//sw-version") or None
+    except Exception as exc:  # noqa: BLE001
+        log.info("Panorama version lookup skipped for %s: %s", device.name, exc)
+        return None
+
+
+def _warn_if_target_exceeds_panorama(
+    db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
+) -> None:
+    """Advisory check: warn if the upgrade target is NEWER than the managing
+    Panorama. PAN-OS requires Panorama to run >= its firewalls; a firewall ahead
+    of Panorama is unsupported, and post-upgrade operations through Panorama
+    (how we reach proxied devices) can fail until Panorama is upgraded. This is
+    the "someone forgot to upgrade Panorama first" guard — non-blocking; we
+    record a clear warning and let the operator proceed."""
+    pano_ver = _panorama_sw_version(device)
+    if not pano_ver:
+        return
+    if version_tuple(job.target_version) > version_tuple(pano_ver):
+        pano = device.panorama
+        _record(
+            db, task,
+            f"WARNING: target {job.target_version} is newer than the managing "
+            f"Panorama ({pano.name} on {pano_ver}). PAN-OS requires Panorama >= its "
+            f"firewalls — upgrading the firewall ahead of Panorama is unsupported, "
+            f"and post-upgrade checks through Panorama may fail until Panorama is "
+            f"upgraded. Consider upgrading Panorama first.",
+        )
 
 
 def _fail_job(db: Session, job_id: int, reason: str) -> None:

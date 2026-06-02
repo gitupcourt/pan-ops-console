@@ -25,7 +25,11 @@ from datetime import datetime, timezone
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
 
-from app.core.command_proxy.pan_client import PanDeviceClient
+from app.core.command_proxy.pan_client import (
+    PanDeviceClient,
+    base_image_from_list,
+    feature_train,
+)
 from app.core.devices.models.device import Device
 from app.core.devices.models.enums import HARole
 from app.db import SessionLocal
@@ -509,6 +513,53 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
         _fail_job(db, job.id, f"Image presence check failed for {device.name}")
         return False
 
+    # Major-version jump (crosses the X.Y feature train, e.g. 11.2 -> 12.1):
+    # PAN-OS won't install a maintenance release of the new train until that
+    # train's BASE image is downloaded first. The base is NOT always X.Y.0
+    # (12.1's base is 12.1.2), so read it from the firewall's software list
+    # (release-type == "Base") rather than guessing. Same-train maintenance
+    # bumps (11.2.4 -> 11.2.11) skip this entirely — no wasted request.
+    if _is_major_jump(device.current_version, job.target_version):
+        try:
+            software = client.list_software()
+        except Exception as exc:  # noqa: BLE001
+            software = []
+            _record(db, task, f"Could not read software list for base-image check: {exc}")
+        base = base_image_from_list(job.target_version, software)
+        if base and base != job.target_version:
+            base_present = any(
+                e.get("version") == base and (e.get("downloaded") or e.get("current"))
+                for e in software
+            )
+            if base_present:
+                _record(db, task, f"Base image {base} already present; no base download needed")
+            else:
+                _record(
+                    db, task,
+                    f"Major-version jump to {job.target_version}: downloading base image "
+                    f"{base} first (required before the maintenance release will install)",
+                )
+                try:
+                    base_job = client.request_software_download(base)
+                    if not base_job:
+                        raise RuntimeError("base download request returned no job id")
+                    if not _wait_for_download_job(client, base_job, task=task, db=db):
+                        raise RuntimeError("base download job did not finish OK")
+                    if not client.is_version_downloaded(base):
+                        raise RuntimeError("post-job software list does not show base downloaded")
+                    _record(db, task, f"Base image {base} downloaded")
+                except Exception as exc:  # noqa: BLE001
+                    _record(db, task, f"Base image download failed: {exc}", phase=TaskPhase.FAILED)
+                    _fail_job(db, job.id, f"Base image {base} download failed for {device.name}")
+                    return False
+        elif not base:
+            _record(
+                db, task,
+                f"Major-version jump, but couldn't determine the base image for "
+                f"{job.target_version} from the software list; proceeding (PAN-OS will "
+                f"require it if needed)",
+            )
+
     # Inline download; same approach as the stage service but we don't create
     # a separate DeviceStageRun here (the Job timeline carries the visibility).
     try:
@@ -883,6 +934,24 @@ def _is_already_at_target(device: Device, target_version: str) -> bool:
     """
     current = (device.current_version or "").strip()
     return current != "" and current == (target_version or "").strip()
+
+
+def _is_major_jump(current_version: str | None, target_version: str) -> bool:
+    """True when the target crosses the X.Y feature-train boundary vs. the
+    device's current version — the only case that needs the target train's base
+    image pre-downloaded (11.2.x -> 12.1.x: yes; 11.2.4 -> 11.2.11: no).
+
+    If the current version is unknown we return True and let the base-ensure
+    step run — it's a no-op when the base is already present, so erring toward
+    "check" is safe and cheap.
+    """
+    tgt = feature_train(target_version)
+    if tgt is None:
+        return False
+    cur = feature_train(current_version)
+    if cur is None:
+        return True
+    return cur != tgt
 
 
 # Per-task completion markers stored on task.progress.completed_phases.

@@ -364,6 +364,9 @@ export type AvailableSoftwareOut = {
   device_id: number;
   device_name: string;
   current_version: string | null;
+  // Managing Panorama's PAN-OS version (null if direct-attached / lookup
+  // failed). Used to warn when the picked target outranks Panorama.
+  panorama_version: string | null;
   available: SoftwareEntry[];
   error: string | null;
 };

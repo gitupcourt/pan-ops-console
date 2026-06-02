@@ -683,6 +683,26 @@ function VersionPicker({
     (r) => r.error,
   );
 
+  // Version-skew guard ("someone forgot to upgrade Panorama first"): which
+  // selected devices have a managing Panorama OLDER than the picked target.
+  // PAN-OS requires Panorama >= its firewalls, so a target ahead of Panorama
+  // is unsupported and can break post-upgrade checks via Panorama.
+  // compareVersionDesc(target, pano) < 0 ⟺ target is newer.
+  const panoramaSkew = useMemo(() => {
+    if (!targetVersion) return [] as { device: string; pano: string }[];
+    const results = softwareQ.data?.results ?? {};
+    const out: { device: string; pano: string }[] = [];
+    for (const r of Object.values(results)) {
+      if (
+        r.panorama_version &&
+        compareVersionDesc(targetVersion, r.panorama_version) < 0
+      ) {
+        out.push({ device: r.device_name, pano: r.panorama_version });
+      }
+    }
+    return out;
+  }, [softwareQ.data, targetVersion]);
+
   return (
     <div className="rounded border border-zinc-800 p-3 grid gap-3">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -824,6 +844,20 @@ function VersionPicker({
             </p>
           )}
         </>
+      )}
+      {panoramaSkew.length > 0 && (
+        <div className="rounded border border-amber-700 bg-amber-900/30 text-amber-200 px-3 py-2 text-[11px]">
+          <div className="font-semibold">⚠ Target is newer than Panorama</div>
+          <div className="mt-0.5">
+            {targetVersion} is newer than the managing Panorama for{" "}
+            {panoramaSkew
+              .map((s) => `${s.device} (Panorama ${s.pano})`)
+              .join(", ")}
+            . PAN-OS requires Panorama to run ≥ its firewalls — upgrading a
+            firewall ahead of Panorama is unsupported and can break post-upgrade
+            checks through Panorama. Consider upgrading Panorama first.
+          </div>
+        </div>
       )}
     </div>
   );

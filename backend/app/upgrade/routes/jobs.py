@@ -117,28 +117,26 @@ def _job_to_read(job: UpgradeJob, task_count: int) -> JobRead:
 def _task_to_read(task: DeviceUpgradeTask) -> TaskRead:
     from app.upgrade.models.precheck import PrecheckRun  # local — avoid cycle
 
-    # Find the latest PrecheckRun for this task's device. We pick by
-    # ran_at desc; with realistic job sizes (~5-20 tasks) this is one
-    # cheap indexed query per task per render. If JobDetail starts
-    # showing more than a few jobs at once we can batch this with a
-    # single grouped query.
+    progress = task.progress or {}
+
+    # Show the pre/post-check run THIS task actually produced — scoped via the
+    # run ids the orchestrator stashes on the task (postcheck preferred, then
+    # precheck). The old behavior picked the device's globally-latest run by
+    # device_id, which surfaced a PREVIOUS job's errored precheck on a brand-
+    # new PENDING task (e.g. yesterday's job #4 "Panorama unreachable" showing
+    # on today's job). A task that hasn't run its own check yet shows nothing.
     db = object_session(task)
     precheck_payload = None
-    if db is not None:
-        latest = (
-            db.query(PrecheckRun)
-            .filter(PrecheckRun.device_id == task.device_id)
-            .order_by(PrecheckRun.ran_at.desc())
-            .first()
-        )
-        if latest is not None:
-            precheck_payload = _precheck_to_summary(latest)
+    run_id = progress.get("postcheck_run_id") or progress.get("precheck_run_id")
+    if db is not None and run_id is not None:
+        run = db.get(PrecheckRun, run_id)
+        if run is not None:
+            precheck_payload = _precheck_to_summary(run)
 
     # Snapshot IDs are stashed in progress by the orchestrator
     # (_phase_snapshot / _phase_post_snapshot_and_diff). Lift them to
     # top-level fields on TaskRead so the UI doesn't have to scrape
     # progress to know what's clickable.
-    progress = task.progress or {}
     failing_areas_raw = progress.get("snapshot_diff_failing_areas")
     if isinstance(failing_areas_raw, str):
         failing_areas = [a.strip() for a in failing_areas_raw.split(",") if a.strip()]

@@ -370,8 +370,17 @@ function TaskRow({
           </button>
         </td>
         <td className="px-4 py-2 text-zinc-100">{t.device_name}</td>
-        <td className="px-4 py-2 text-zinc-500 text-xs font-mono">
-          {isPaired ? pairKey : "—"}
+        <td className="px-4 py-2 text-zinc-500 text-xs">
+          {isPaired ? (
+            <span
+              title={`Grouping key: ${pairKey}`}
+              className="rounded border border-blue-800/50 bg-blue-950/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-blue-300"
+            >
+              HA pair
+            </span>
+          ) : (
+            "—"
+          )}
         </td>
         <td className="px-4 py-2">
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -566,8 +575,8 @@ function CurrentPhaseExplainer({
   if (phase === "pending") {
     return (
       <div className="text-zinc-400">
-        Pending. The orchestrator hasn't started this task yet — typically
-        means an HA pair peer is being upgraded first.
+        Pending — not started yet. Upgrades run a few at a time; this task is
+        queued behind others. (For an HA pair, the peer member upgrades first.)
       </div>
     );
   }

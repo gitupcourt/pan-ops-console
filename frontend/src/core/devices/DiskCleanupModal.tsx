@@ -72,7 +72,11 @@ export function DiskCleanupModal({
   const planQ = useQuery({
     queryKey: ["disk-cleanup-plan", deviceId],
     queryFn: () => api.getDiskCleanupPlan(deviceId),
+    // Always re-read the device on open, and never keep the result cached
+    // after the modal closes — otherwise reopening after a cleanup shows the
+    // just-deleted images + stale disk usage until a full page refresh.
     staleTime: 0,
+    gcTime: 0,
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<DiskCleanupResult | null>(null);
@@ -135,6 +139,11 @@ export function DiskCleanupModal({
 
           {plan && !result && (
             <>
+              {planQ.isFetching && (
+                <div className="text-[11px] text-blue-300">
+                  Re-reading disk usage…
+                </div>
+              )}
               {plan.disk_space.length > 0 && (
                 <div>
                   <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
@@ -287,8 +296,21 @@ export function DiskCleanupModal({
                 </a>
                 .
               </div>
-              <div className="flex justify-end border-t border-zinc-800 pt-3">
-                <Button onClick={onClose}>Close</Button>
+              <div className="flex justify-end gap-2 border-t border-zinc-800 pt-3">
+                <Button
+                  onClick={() => {
+                    // Re-check this device and go back to the plan view —
+                    // no close/reopen or page refresh needed.
+                    setResult(null);
+                    setSelected(new Set());
+                    planQ.refetch();
+                  }}
+                >
+                  Scan again
+                </Button>
+                <Button variant="primary" onClick={onClose}>
+                  Close
+                </Button>
               </div>
             </div>
           )}

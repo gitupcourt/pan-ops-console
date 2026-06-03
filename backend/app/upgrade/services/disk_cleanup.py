@@ -6,12 +6,14 @@ conservative way to actually reclaim space.
 
 Two tiers:
 
-  1. ALWAYS-SAFE DEFAULT — delete downloaded software images OUTSIDE the
-     device's current feature train (e.g. a leftover ``10.2.0`` base while the
-     device runs ``11.1.4``). Base images are the largest files on a firewall,
-     so old-train images are the biggest, safest reclaim. The CURRENT train
-     (incl. its base, which a within-train rollback/upgrade may need) is never
-     touched, and PAN-OS refuses to delete the running version as a backstop.
+  1. ALWAYS-SAFE DEFAULT — delete downloaded software images OLDER than the
+     running version: old other-train images (e.g. a leftover ``10.2.0`` base
+     while running ``12.1.7``) AND old same-train maintenance releases (e.g.
+     ``12.1.3`` while running ``12.1.7``). Base images are the largest files on
+     a firewall, so these are the biggest, safest reclaim. Always kept: the
+     running version (PAN-OS refuses to delete it anyway), the current train's
+     base (a within-train install/rollback needs it), and anything NEWER than
+     running (likely pre-staged for an upcoming upgrade).
 
   2. OPT-IN "deep clean" (``deep_clean=True``) — also run ``debug software
      disk-usage cleanup deep threshold N``, which deletes rotated/backup log
@@ -37,7 +39,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.core.command_proxy.builder import build_client_with_fallback
-from app.core.command_proxy.pan_client import feature_train
+from app.core.command_proxy.pan_client import feature_train, version_tuple
 from app.core.devices.models.device import Device
 
 log = logging.getLogger(__name__)
@@ -87,33 +89,44 @@ def _current_version(software: list[dict], device: Device) -> str | None:
 
 
 def _deletable_images(software: list[dict], current_version: str | None) -> list[DeletableImage]:
-    """The safe deletion set: downloaded, non-running images whose feature
-    train differs from the device's current train.
+    """The safe deletion set: downloaded images OLDER than the running version,
+    keeping the running version and the CURRENT train's base.
 
-    If we can't parse the current train we return NOTHING — refusing to guess
-    is the safe failure mode (never risk deleting a current-train image a
-    rollback might need).
+    "Older than running" is the key safety rule. It reclaims:
+      - old other-train images (e.g. 11.x / 10.x while running 12.1.7), and
+      - old SAME-train maintenance releases (e.g. 12.1.3 while running 12.1.7) —
+        downloaded-but-not-installed leftovers from past upgrades.
+    It deliberately does NOT touch anything NEWER than running, since a newer
+    downloaded image is almost always one the operator pre-staged for an
+    upcoming upgrade — deleting it would undo that staging.
+
+    Always kept: the running version (PAN-OS refuses to delete it anyway) and
+    the current train's BASE image (a within-train install/rollback needs it).
+    If we can't parse the running version we return NOTHING — refusing to guess
+    is the safe failure mode.
     """
     cur_train = feature_train(current_version)
-    if cur_train is None:
+    if cur_train is None or not current_version:
         return []
+    cur_tuple = version_tuple(current_version)
     out: list[DeletableImage] = []
     for img in software:
         ver = img.get("version")
-        ft = feature_train(ver)
-        if (
-            img.get("downloaded")
-            and not img.get("current")
-            and ft is not None
-            and ft != cur_train
-        ):
-            out.append(
-                DeletableImage(
-                    version=ver,
-                    size_kb=img.get("size_kb"),
-                    release_type=(img.get("release_type") or "").strip(),
-                )
+        if not img.get("downloaded") or img.get("current"):
+            continue
+        # Keep the current train's base — needed for within-train work.
+        if feature_train(ver) == cur_train and (img.get("release_type") or "").strip() == "Base":
+            continue
+        # Only OLDER than the running version (never a pre-staged newer image).
+        if version_tuple(ver) >= cur_tuple:
+            continue
+        out.append(
+            DeletableImage(
+                version=ver,
+                size_kb=img.get("size_kb"),
+                release_type=(img.get("release_type") or "").strip(),
             )
+        )
     return out
 
 

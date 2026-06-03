@@ -33,12 +33,19 @@ def _device(db, name="fw1", current="11.1.4") -> Device:
     return d
 
 
-# Running 11.1.4. Downloaded on disk: 11.1.4 (current — KEEP), 11.1.2 (the
-# current train's base — KEEP), 10.2.0 + 11.0.3 (old trains — DELETE).
-# 12.1.2 is a newer base but NOT downloaded, so it isn't a candidate.
+# Running 11.1.4. Downloaded on disk:
+#   11.1.4  current                       -> KEEP (running)
+#   11.1.2  same train, Base, older       -> KEEP (current train's base)
+#   11.1.3  same train, older maintenance -> DELETE (the same-train win)
+#   11.1.7  same train, NEWER (pre-staged)-> KEEP (don't undo staging)
+#   10.2.0  Base, older other train       -> DELETE
+#   11.0.3  older other train             -> DELETE
+#   12.1.2  newer base, NOT downloaded     -> skip (not on disk)
 SOFTWARE = [
     {"version": "11.1.4", "downloaded": True, "current": True, "release_type": "", "size_kb": "500000"},
     {"version": "11.1.2", "downloaded": True, "current": False, "release_type": "Base", "size_kb": "700000"},
+    {"version": "11.1.3", "downloaded": True, "current": False, "release_type": "", "size_kb": "520000"},
+    {"version": "11.1.7", "downloaded": True, "current": False, "release_type": "", "size_kb": "540000"},
     {"version": "10.2.0", "downloaded": True, "current": False, "release_type": "Base", "size_kb": "650000"},
     {"version": "11.0.3", "downloaded": True, "current": False, "release_type": "", "size_kb": "300000"},
     {"version": "12.1.2", "downloaded": False, "current": False, "release_type": "Base", "size_kb": "800000"},
@@ -47,20 +54,30 @@ SOFTWARE = [
 
 # ---------- _deletable_images (pure) ----------
 
-def test_deletable_images_only_old_train_downloaded():
+def test_deletable_images_old_other_and_same_train():
+    # Old other-train images AND old same-train maintenance releases, but NOT
+    # the current train's base (11.1.2), the running version (11.1.4), or a
+    # newer pre-staged image (11.1.7), or an un-downloaded one (12.1.2).
     out = svc._deletable_images(SOFTWARE, "11.1.4")
-    assert sorted(i.version for i in out) == ["10.2.0", "11.0.3"]
+    assert sorted(i.version for i in out) == ["10.2.0", "11.0.3", "11.1.3"]
 
 
 def test_deletable_images_excludes_current_train_base():
-    # 11.1.2 is downloaded + not current, but it's the CURRENT train's base —
-    # must never be offered for deletion.
+    # 11.1.2 is downloaded + not current + older, but it's the CURRENT train's
+    # base — must never be offered for deletion.
     out = svc._deletable_images(SOFTWARE, "11.1.4")
     assert "11.1.2" not in {i.version for i in out}
 
 
+def test_deletable_images_keeps_newer_staged():
+    # 11.1.7 is a downloaded same-train image NEWER than the running 11.1.4 —
+    # almost certainly pre-staged for an upcoming upgrade. Never auto-delete it.
+    out = svc._deletable_images(SOFTWARE, "11.1.4")
+    assert "11.1.7" not in {i.version for i in out}
+
+
 def test_deletable_images_empty_when_current_unparseable():
-    # Can't determine the current train -> refuse to guess -> delete nothing.
+    # Can't determine the running version -> refuse to guess -> delete nothing.
     assert svc._deletable_images(SOFTWARE, None) == []
     assert svc._deletable_images(SOFTWARE, "garbage") == []
 

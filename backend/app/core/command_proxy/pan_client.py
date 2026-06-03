@@ -722,22 +722,24 @@ class PanDeviceClient:
         except PanDeviceError as exc:
             raise ConnectionError(f"software delete failed: {exc}") from exc
 
-    def disk_usage_cleanup(self) -> str:
-        """`debug software disk-usage cleanup` — reclaim stale install /
-        download artifacts PAN-OS knows how to clear on its own.
+    def deep_disk_cleanup(self, threshold: int = 80) -> str:
+        """`debug software disk-usage cleanup deep threshold N` — reclaim space
+        by deleting rotated/backup log files and temporary data until the
+        system partition drops below N% usage.
 
-        STANDARD form only. We deliberately do NOT run the ``deep`` /
-        ``aggressive-cleaning`` variants — those delete current log files and
-        cost troubleshooting history. Returns the device's textual result
-        (best-effort; empty string when the device returns nothing). Callers
-        treat a failure as non-fatal: some PAN-OS builds may not accept the
-        bare ``cleanup`` form, but the old-image deletion is the primary win.
+        The ``deep`` form DOES remove backup/rotated logs (current logs and
+        config are untouched) — callers MUST surface that to the operator. Both
+        ``deep`` and ``threshold`` are required; the bare ``cleanup`` form is
+        rejected by PAN-OS ("...cleanup is unexpected"). Issued with
+        ``cmd_xml=True`` so pan-os-python builds the op XML — hand-nesting the
+        deep/threshold elements is exactly how the software-delete op got
+        miswritten. Returns the device's textual result (best-effort).
         """
-        cmd = "<debug><software><disk-usage><cleanup></cleanup></disk-usage></software></debug>"
+        cmd = f"debug software disk-usage cleanup deep threshold {int(threshold)}"
         try:
-            resp = self._proxy.op(cmd, cmd_xml=False)
+            resp = self._proxy.op(cmd, cmd_xml=True)
         except PanDeviceError as exc:
-            raise ConnectionError(f"disk-usage cleanup failed: {exc}") from exc
+            raise ConnectionError(f"deep disk cleanup failed: {exc}") from exc
         res = resp.find(".//result")
         return (res.text or "").strip() if res is not None and res.text else ""
 

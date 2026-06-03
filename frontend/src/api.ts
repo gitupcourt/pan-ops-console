@@ -413,8 +413,8 @@ export type DiskCleanupResult = {
   device_name: string;
   deleted: string[];
   failed: { version: string; error: string }[];
-  standard_cleanup_ran: boolean;
-  standard_cleanup_output: string;
+  deep_cleanup_ran: boolean;
+  deep_cleanup_output: string;
   disk_space_before: DiskSpaceRow[];
   disk_space_after: DiskSpaceRow[];
 };
@@ -805,14 +805,14 @@ export const api = {
     }),
 
   // Disk-space cleanup. The plan is a pure-read dry run; runDiskCleanup is
-  // destructive (deletes old-train images + standard cleanup) and is
-  // re-validated server-side against the safe set.
+  // destructive (deletes old-train images, and — opt-in — runs a deep clean
+  // of rotated logs/temp) and is re-validated server-side against the safe set.
   getDiskCleanupPlan: (deviceId: number) =>
     j<DiskCleanupPlan>(`/upgrade/devices/${deviceId}/disk-cleanup/plan`),
-  runDiskCleanup: (deviceId: number, versions: string[]) =>
+  runDiskCleanup: (deviceId: number, versions: string[], deepClean = false) =>
     j<DiskCleanupResult>(`/upgrade/devices/${deviceId}/disk-cleanup`, {
       method: "POST",
-      body: JSON.stringify({ versions }),
+      body: JSON.stringify({ versions, deep_clean: deepClean }),
     }),
 
   // Upgrade: tasks (within a job)

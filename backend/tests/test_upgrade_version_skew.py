@@ -12,8 +12,10 @@ actionable "Panorama may be behind / still re-registering" message).
 
 from __future__ import annotations
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.command_proxy.pan_client import version_tuple
-from app.upgrade.services.upgrade import _crash_hint
+from app.upgrade.services.upgrade import _crash_hint, _driver_failure_message
 
 
 # ---------- version_tuple ----------
@@ -59,3 +61,23 @@ def test_crash_hint_for_bare_timeout():
 
 def test_crash_hint_empty_for_unrelated_error():
     assert _crash_hint(ValueError("totally unrelated")) == ""
+
+
+# ---------- _driver_failure_message ----------
+
+def test_driver_failure_message_time_limit():
+    # A time-limit trip gets the distinct "stopped to free the worker" message
+    # (the wedged-slot fix) — not a generic crash string.
+    msg = _driver_failure_message(SoftTimeLimitExceeded())
+    assert "time limit" in msg.lower()
+    assert "Retry" in msg
+
+
+def test_driver_failure_message_generic_uses_hint():
+    exc = ConnectionError(
+        "Panorama unreachable and no direct route available for fw1: "
+        "The read operation timed out"
+    )
+    msg = _driver_failure_message(exc)
+    assert msg.startswith("Upgrade driver error:")
+    assert "Panorama" in msg  # crash hint fired

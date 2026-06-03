@@ -22,6 +22,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
 
@@ -177,14 +178,19 @@ def drive_pair(job_id: int, ha_pair_key: str) -> None:
 
         # When the last pair finishes successfully, flip the job to COMPLETED.
         _maybe_mark_job_done(db, job_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — also catches SoftTimeLimitExceeded
         log.exception("drive_pair crashed for job=%s key=%s", job_id, ha_pair_key)
-        hint = _crash_hint(exc)
-        # Make the crash RECOVERABLE: flip any still-in-flight task to FAILED
+        # A SoftTimeLimitExceeded means the task blew past its time ceiling —
+        # almost always a device/Panorama op hanging without honoring its read
+        # timeout. A hung task must never wedge the small upgrade worker pool
+        # (it blocks every other pair in the job), so the ceiling converts it
+        # into a clean, retryable failure that frees the slot.
+        msg = _driver_failure_message(exc)
+        # Make the failure RECOVERABLE: flip any still-in-flight task to FAILED
         # (leaving DONE tasks alone) so it lands in a retryable state, the UI
         # offers Retry, and resume picks up from the last completed marker. A
         # bare driver crash used to freeze tasks mid-phase with no way forward.
-        # Best-effort — cleanup must never mask the original crash.
+        # Best-effort — cleanup must never mask the original error.
         try:
             for t in (
                 db.query(DeviceUpgradeTask)
@@ -195,10 +201,10 @@ def drive_pair(job_id: int, ha_pair_key: str) -> None:
                 .all()
             ):
                 if t.phase not in (TaskPhase.DONE, TaskPhase.FAILED):
-                    _record(db, t, f"Upgrade driver error: {exc}{hint}", phase=TaskPhase.FAILED)
+                    _record(db, t, msg, phase=TaskPhase.FAILED)
         except Exception:  # noqa: BLE001
             log.exception("post-crash task cleanup failed for job=%s", job_id)
-        _fail_job(db, job_id, f"Driver error: {exc}{hint}"[:500])
+        _fail_job(db, job_id, msg[:500])
     finally:
         db.close()
 
@@ -1776,6 +1782,24 @@ def _crash_hint(exc: BaseException) -> str:
             "firewall). Confirm Panorama shows it connected, then Retry to resume."
         )
     return ""
+
+
+def _driver_failure_message(exc: BaseException) -> str:
+    """Operator-facing message for a drive_pair failure.
+
+    A time-limit trip (SoftTimeLimitExceeded) gets a distinct, actionable
+    message — the task was killed to free the worker because a device/Panorama
+    op was hanging, and Retry resumes from the last completed marker. Every
+    other error uses the crash hint.
+    """
+    if isinstance(exc, SoftTimeLimitExceeded):
+        return (
+            "Upgrade task hit its time limit and was stopped to free the "
+            "upgrade worker — a device or Panorama operation was likely "
+            "hanging. Click Retry to resume from the last completed step; if it "
+            "keeps timing out, confirm the device and its Panorama are reachable."
+        )
+    return f"Upgrade driver error: {exc}{_crash_hint(exc)}"
 
 
 def _warn_if_target_exceeds_panorama(

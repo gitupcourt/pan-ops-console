@@ -347,6 +347,7 @@ export type UpgradeJobDetail = UpgradeJob & {
   require_primary_upgrade_confirmation: boolean;
   auto_failback: boolean;
   auto_reboot_after_install: boolean;
+  pre_stage_mode: string; // "none" | "stage_only"
   auto_ack_precheck_failures: boolean;
   auto_ack_postcheck_failures: boolean;
   tasks: UpgradeTask[];
@@ -429,6 +430,7 @@ export type UpgradeJobCreate = {
   require_primary_upgrade_confirmation?: boolean;
   auto_failback?: boolean;
   auto_reboot_after_install?: boolean;
+  pre_stage_mode?: string; // "none" (default) | "stage_only"
   auto_ack_precheck_failures?: boolean;
   auto_ack_postcheck_failures?: boolean;
   precheck_set_id?: number | null;

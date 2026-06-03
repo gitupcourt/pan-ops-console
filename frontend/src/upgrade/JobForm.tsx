@@ -12,6 +12,10 @@ import {
   Device,
   UpgradeJobCreate,
 } from "../api";
+import {
+  DeviceConnectionStatus,
+  deviceConnectionState,
+} from "../core/devices/DeviceConnectionStatus";
 import { AnimatedEllipsis, Button, Field, Input, Select } from "../core/ui/ui";
 
 /**
@@ -70,6 +74,28 @@ export function JobForm({
     () => new Set(initialDeviceIds),
   );
 
+  // Devices the operator must not upgrade: anything Inventory would show as
+  // "offline" (Panorama reports it disconnected, or a direct device's polls
+  // are failing). We disable selecting them below AND defensively exclude any
+  // that slipped in via the inventory handoff, so a job never launches against
+  // a device that's already down. `deviceConnectionState` is the SAME logic
+  // the Inventory pill uses, so "offline" means the same thing in both places.
+  const offlineDeviceIds = useMemo(() => {
+    const ds = devicesQ.data ?? [];
+    return new Set(
+      ds.filter((d) => deviceConnectionState(d) === "offline").map((d) => d.id),
+    );
+  }, [devicesQ.data]);
+  // The selection minus offline devices — what actually counts, queries, and
+  // submits. `selectedDeviceIds` stays the raw checkbox state.
+  const effectiveSelectedIds = useMemo(
+    () =>
+      new Set(
+        Array.from(selectedDeviceIds).filter((id) => !offlineDeviceIds.has(id)),
+      ),
+    [selectedDeviceIds, offlineDeviceIds],
+  );
+
   // Software-availability query for the version picker. Keyed on a
   // stable sorted-CSV of the current selection so any change to the
   // device set re-fetches with fresh model-compatible versions. The
@@ -82,10 +108,10 @@ export function JobForm({
   // staleTime: Infinity — call is slow and the catalog changes rarely;
   // a manual "Refresh" button covers post-release re-poll.
   const selectedDeviceIdsArr = useMemo(() => {
-    const arr = Array.from(selectedDeviceIds);
+    const arr = Array.from(effectiveSelectedIds);
     arr.sort((a, b) => a - b);
     return arr;
-  }, [selectedDeviceIds]);
+  }, [effectiveSelectedIds]);
   const softwareQ = useQuery<AvailableSoftwareBulkOut>({
     queryKey: ["upgrade-software-bulk", selectedDeviceIdsArr.join(",")],
     queryFn: () => api.getDeviceSoftwareBulk(selectedDeviceIdsArr),
@@ -127,7 +153,7 @@ export function JobForm({
       const body: UpgradeJobCreate = {
         name,
         target_version: targetVersion,
-        device_ids: Array.from(selectedDeviceIds),
+        device_ids: Array.from(effectiveSelectedIds),
         image_id: imageMode === "select" ? selectedImageId : null,
         device_pull_image: imageMode === "pull",
         require_failover_confirmation: requireFailover,
@@ -186,6 +212,70 @@ export function JobForm({
   const anyFilterActive =
     !!filterModel || !!filterDeviceGroup || !!filterTemplateStack;
 
+  // Group the visible rows so HA pairs render as a single bounded, labeled
+  // block (not just a left-border tint). Standalone devices render as their
+  // own one-row group.
+  const pickerGroups = useMemo(
+    () => groupDevicesForPicker(visibleDevices),
+    [visibleDevices],
+  );
+
+  // One device row, shared by the standalone and HA-pair group renderers.
+  // Offline devices are dimmed, show a status pill, and can't be checked.
+  const renderDeviceRow = (d: Device) => {
+    const offline = offlineDeviceIds.has(d.id);
+    const role =
+      d.ha_role && d.ha_role !== "standalone" && d.ha_role !== "unknown"
+        ? d.ha_role
+        : null;
+    return (
+      <tr
+        key={d.id}
+        className={`border-b border-zinc-800/40 ${
+          offline ? "opacity-50" : "hover:bg-zinc-900/30"
+        }`}
+      >
+        <td className="px-3 py-1.5 w-8">
+          <input
+            type="checkbox"
+            checked={effectiveSelectedIds.has(d.id)}
+            disabled={offline}
+            title={offline ? "Offline — can't be upgraded" : undefined}
+            onChange={(e) => {
+              const next = new Set(selectedDeviceIds);
+              if (e.target.checked) next.add(d.id);
+              else next.delete(d.id);
+              setSelectedDeviceIds(next);
+            }}
+          />
+        </td>
+        <td className="px-3 py-1.5 text-zinc-100">
+          {d.name}
+          {role && (
+            <span className="ml-2 inline-block align-middle rounded border border-blue-800/50 bg-blue-950/50 px-1 py-0.5 text-[9px] uppercase tracking-wide text-blue-300">
+              {role}
+            </span>
+          )}
+          {offline && (
+            <span className="ml-2 align-middle">
+              <DeviceConnectionStatus device={d} variant="pill" />
+            </span>
+          )}
+        </td>
+        <td className="px-3 py-1.5 text-zinc-500 text-xs">{d.model ?? "—"}</td>
+        <td className="px-3 py-1.5 text-zinc-500 text-xs tabular-nums">
+          {d.sw_version ?? "—"}
+        </td>
+        <td className="px-3 py-1.5 text-zinc-500 text-xs">
+          {d.device_group ?? (
+            <span className="text-zinc-700 italic">standalone</span>
+          )}
+        </td>
+        <td className="px-3 py-1.5 text-zinc-500 text-xs">{d.source}</td>
+      </tr>
+    );
+  };
+
   // HA pairs are grouped adjacently in the picker (sorted by pair key above)
   // and visually stitched in the rows below, mirroring the Inventory page.
   // The orchestrator still derives pair grouping from ha_peer_id at job-create
@@ -195,7 +285,7 @@ export function JobForm({
   const canSubmit =
     name.trim().length > 0 &&
     targetVersion.trim().length > 0 &&
-    selectedDeviceIds.size > 0 &&
+    effectiveSelectedIds.size > 0 &&
     (imageMode === "pull" ||
       (imageMode === "select" && selectedImageId != null));
 
@@ -222,15 +312,22 @@ export function JobForm({
         onModeChange={setVersionMode}
         targetVersion={targetVersion}
         onTargetVersionChange={setTargetVersion}
-        selectedDeviceCount={selectedDeviceIds.size}
+        selectedDeviceCount={effectiveSelectedIds.size}
         softwareQ={softwareQ}
+        onDeselectDeviceIds={(ids) =>
+          setSelectedDeviceIds((prev) => {
+            const next = new Set(prev);
+            ids.forEach((id) => next.delete(id));
+            return next;
+          })
+        }
       />
 
       {/* Device picker */}
       <div className="rounded border border-zinc-800 p-3 grid gap-2">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="text-xs uppercase tracking-wider text-zinc-500">
-            Devices ({selectedDeviceIds.size} selected
+            Devices ({effectiveSelectedIds.size} selected
             {anyFilterActive
               ? `, ${visibleDevices.length} of ${devices.length} shown`
               : ""}
@@ -245,7 +342,8 @@ export function JobForm({
                 // operator can DG-narrow → select-all-in-DG → repeat
                 // for another DG.
                 const next = new Set(selectedDeviceIds);
-                for (const d of visibleDevices) next.add(d.id);
+                for (const d of visibleDevices)
+                  if (!offlineDeviceIds.has(d.id)) next.add(d.id);
                 setSelectedDeviceIds(next);
               }}
             >
@@ -301,62 +399,43 @@ export function JobForm({
 
         <div className="max-h-64 overflow-auto border border-zinc-800 rounded">
           <table className="w-full text-sm">
-            <tbody>
-              {visibleDevices.map((d) => (
-                <tr
-                  key={d.id}
-                  className={`hover:bg-zinc-900/30 ${
-                    d.ha_peer_id != null
-                      ? "border-b border-l-2 border-b-zinc-800/40 border-l-blue-500/40"
-                      : "border-b border-zinc-800/40"
-                  }`}
-                >
-                  <td className="px-3 py-1.5 w-8">
-                    <input
-                      type="checkbox"
-                      checked={selectedDeviceIds.has(d.id)}
-                      onChange={(e) => {
-                        const next = new Set(selectedDeviceIds);
-                        if (e.target.checked) next.add(d.id);
-                        else next.delete(d.id);
-                        setSelectedDeviceIds(next);
-                      }}
-                    />
-                  </td>
-                  <td className="px-3 py-1.5 text-zinc-100">
-                    {d.name}
-                    {d.ha_peer_id != null && (
-                      <span className="ml-2 inline-block align-middle rounded border border-blue-800/50 bg-blue-950/50 px-1 py-0.5 text-[9px] uppercase tracking-wide text-blue-300">
-                        HA{d.ha_role ? ` · ${d.ha_role}` : ""}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-3 py-1.5 text-zinc-500 text-xs">
-                    {d.model ?? "—"}
-                  </td>
-                  <td className="px-3 py-1.5 text-zinc-500 text-xs tabular-nums">
-                    {d.sw_version ?? "—"}
-                  </td>
-                  <td className="px-3 py-1.5 text-zinc-500 text-xs">
-                    {d.device_group ?? (
-                      <span className="text-zinc-700 italic">standalone</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-1.5 text-zinc-500 text-xs">
-                    {d.source}
-                  </td>
-                </tr>
-              ))}
-              {visibleDevices.length === 0 && (
+            {visibleDevices.length === 0 ? (
+              <tbody>
                 <tr>
-                  <td colSpan={6} className="p-4 text-xs text-zinc-500 text-center">
+                  <td
+                    colSpan={6}
+                    className="p-4 text-xs text-zinc-500 text-center"
+                  >
                     {devices.length === 0
                       ? "No devices in inventory. Add some first."
                       : "No devices match the current filters."}
                   </td>
                 </tr>
-              )}
-            </tbody>
+              </tbody>
+            ) : (
+              pickerGroups.map((g) =>
+                g.kind === "single" ? (
+                  <tbody key={`s-${g.device.id}`}>
+                    {renderDeviceRow(g.device)}
+                  </tbody>
+                ) : (
+                  // HA pair — a bounded, labeled block, not just a tint.
+                  <tbody
+                    key={`p-${g.key}`}
+                    className="border-y-2 border-blue-500/30 bg-blue-950/10"
+                  >
+                    <tr>
+                      <td colSpan={6} className="px-3 pt-1.5 pb-1">
+                        <span className="inline-flex items-center gap-1 rounded border border-blue-800/50 bg-blue-950/50 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-blue-300">
+                          ⛓ HA pair
+                        </span>
+                      </td>
+                    </tr>
+                    {g.members.map((d) => renderDeviceRow(d))}
+                  </tbody>
+                ),
+              )
+            )}
           </table>
         </div>
         <p className="text-[11px] text-zinc-500">
@@ -627,6 +706,7 @@ function VersionPicker({
   onTargetVersionChange,
   selectedDeviceCount,
   softwareQ,
+  onDeselectDeviceIds,
 }: {
   mode: "device" | "custom";
   onModeChange: (m: "device" | "custom") => void;
@@ -634,6 +714,7 @@ function VersionPicker({
   onTargetVersionChange: (v: string) => void;
   selectedDeviceCount: number;
   softwareQ: UseQueryResult<AvailableSoftwareBulkOut>;
+  onDeselectDeviceIds: (ids: number[]) => void;
 }) {
   // Aggregate per-version across all selected devices. For each
   // version we collect: which devices report it, which already have
@@ -818,19 +899,53 @@ function VersionPicker({
           </div>
           {targetVersion && (() => {
             const agg = aggregates.find((a) => a.version === targetVersion);
-            if (!agg) return null;
-            const onAll = agg.deviceIds.length === deviceCount;
-            return onAll ? (
-              <p className="text-[11px] text-emerald-400">
-                ✓ Compatible with all {deviceCount} selected device
-                {deviceCount === 1 ? "" : "s"}.
-              </p>
-            ) : (
-              <p className="text-[11px] text-amber-400">
-                ⚠ Reported by {agg.deviceIds.length} of {deviceCount} selected
-                devices. The orchestrator will fail the install on
-                non-reporting devices — usually a model-compatibility issue.
-              </p>
+            const onAll = !!agg && agg.deviceIds.length === deviceCount;
+            if (onAll) {
+              return (
+                <p className="text-[11px] text-emerald-400">
+                  ✓ Compatible with all {deviceCount} selected device
+                  {deviceCount === 1 ? "" : "s"}.
+                </p>
+              );
+            }
+            // Devices that reported successfully but DON'T list the target =
+            // model-incompatible. (Errored devices are surfaced separately
+            // below — those couldn't report a list at all.)
+            const results = softwareQ.data?.results ?? {};
+            const incompatible = Object.entries(results).filter(
+              ([, r]) =>
+                !r.error &&
+                !r.available.some((e) => e.version === targetVersion),
+            );
+            if (incompatible.length === 0) return null;
+            const incompatibleIds = incompatible.map(([idStr]) => Number(idStr));
+            const names = incompatible.map(([, r]) => r.device_name);
+            const n = incompatible.length;
+            return (
+              <div className="rounded border border-amber-700 bg-amber-900/30 text-amber-200 px-3 py-2 text-[11px]">
+                <div className="font-semibold">
+                  ⚠ {n} selected device{n === 1 ? "" : "s"} can&apos;t install{" "}
+                  {targetVersion}
+                </div>
+                <div className="mt-0.5">
+                  <span className="font-mono text-amber-100">
+                    {names.join(", ")}
+                  </span>{" "}
+                  {n === 1 ? "doesn't" : "don't"} report {targetVersion} as an
+                  available version — usually a model-compatibility limit (a
+                  given PAN-OS build only supports certain platforms). The
+                  orchestrator would fail the install on{" "}
+                  {n === 1 ? "it" : "them"}. Deselect {n === 1 ? "it" : "them"}{" "}
+                  or run a separate job for the compatible set.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onDeselectDeviceIds(incompatibleIds)}
+                  className="mt-1.5 rounded border border-amber-700/60 bg-amber-950/40 px-2 py-0.5 text-[11px] text-amber-100 hover:bg-amber-900/60"
+                >
+                  Deselect {n} incompatible device{n === 1 ? "" : "s"}
+                </button>
+              </div>
             );
           })()}
           {errored.length > 0 && (
@@ -880,4 +995,36 @@ function compareVersionDesc(a: string, b: string): number {
     if (pa[i] !== pb[i]) return pb[i] - pa[i]; // desc
   }
   return 0;
+}
+
+type PickerGroup =
+  | { kind: "single"; device: Device }
+  | { kind: "pair"; key: number; members: Device[] };
+
+/**
+ * Group the (already pair-key-sorted) visible devices so HA pairs render as
+ * one bounded block instead of a row tint. A device with an `ha_peer_id`
+ * joins the group keyed by min(id, ha_peer_id); everything else is its own
+ * single-row group. If a filter hides one half of a pair, the visible half
+ * still renders as a (one-member) HA group — the role badge keeps the
+ * membership clear.
+ */
+function groupDevicesForPicker(devices: Device[]): PickerGroup[] {
+  const groups: PickerGroup[] = [];
+  const pairByKey = new Map<number, Device[]>();
+  for (const d of devices) {
+    if (d.ha_peer_id == null) {
+      groups.push({ kind: "single", device: d });
+      continue;
+    }
+    const key = Math.min(d.id, d.ha_peer_id);
+    let members = pairByKey.get(key);
+    if (!members) {
+      members = [];
+      pairByKey.set(key, members);
+      groups.push({ kind: "pair", key, members });
+    }
+    members.push(d);
+  }
+  return groups;
 }

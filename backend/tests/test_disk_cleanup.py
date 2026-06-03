@@ -103,26 +103,24 @@ def test_execute_refuses_versions_outside_safe_set(client, db, monkeypatch):
 
     assert fake.deleted == ["10.2.0"]
     assert {f["version"] for f in result.failed} == {"11.1.4", "11.1.2"}
-    assert result.standard_cleanup_ran is True
-    assert fake.cleanup_called is True
+    # Standard disk-usage cleanup is intentionally NOT run (bare form
+    # unsupported; the `deep` form deletes logs).
+    assert result.standard_cleanup_ran is False
+    assert fake.cleanup_called is False
     assert result.disk_space_before and result.disk_space_after
 
 
-def test_execute_standard_cleanup_is_nonfatal(client, db, monkeypatch):
+def test_execute_does_not_run_standard_cleanup(client, db, monkeypatch):
+    # The standard `debug software disk-usage cleanup` is intentionally never
+    # run (bare form unsupported on current PAN-OS; the `deep` form deletes
+    # logs). Deleting old-train images is the whole safe pass.
     dev = _device(db, current="11.1.4")
     fake = _FakeClient()
-
-    def _boom():
-        raise ConnectionError("disk-usage cleanup failed: unknown command")
-
-    fake.disk_usage_cleanup = _boom
     monkeypatch.setattr(
         svc, "build_client_with_fallback", lambda db, device: (fake, "direct")
     )
 
-    # The image delete is the primary win; a cleanup-command rejection must
-    # not fail the whole operation.
     result = svc.execute_cleanup(db, dev, ["10.2.0"])
     assert fake.deleted == ["10.2.0"]
+    assert fake.cleanup_called is False
     assert result.standard_cleanup_ran is False
-    assert "unknown command" in result.standard_cleanup_output

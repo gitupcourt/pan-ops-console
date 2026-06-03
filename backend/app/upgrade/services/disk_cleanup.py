@@ -13,9 +13,10 @@ Operator-approved SAFE scope (deliberately narrow):
      (including its base, which a within-train rollback/upgrade may need) is
      never touched, and PAN-OS itself refuses to delete the running version
      as a backstop.
-  2. Run ``debug software disk-usage cleanup`` (standard form) to reclaim
-     stale install/download artifacts. Best-effort — non-fatal if the PAN-OS
-     build doesn't accept it; the image deletion is the primary win.
+Old-image deletion is the whole safe pass. We do NOT run ``debug software
+disk-usage cleanup``: the bare form isn't accepted on current PAN-OS, and the
+only documented working form (``cleanup deep ...``) purges current log files —
+outside our safe scope.
 
 Explicitly NOT in scope: deleting logs (``aggressive-cleaning`` / ``deep``),
 core files, or anything that loses troubleshooting history. The UI links the
@@ -131,8 +132,7 @@ def plan_cleanup(db: Session, device: Device) -> CleanupPlan:
 
 def execute_cleanup(db: Session, device: Device, versions: list[str]) -> CleanupResult:
     """Delete the requested images (intersected with the freshly-recomputed
-    safe set), then run the standard disk-usage cleanup. Measures disk space
-    before/after.
+    safe set). Measures disk space before/after.
 
     SECURITY: we never trust the caller's `versions` blindly — we recompute
     the safe set server-side from the live software list and refuse anything
@@ -160,15 +160,14 @@ def execute_cleanup(db: Session, device: Device, versions: list[str]) -> Cleanup
         except Exception as exc:  # noqa: BLE001 — surface per-image, keep going
             failed.append({"version": v, "error": str(exc)[:300]})
 
-    # Standard cleanup — best-effort, non-fatal.
+    # We intentionally DON'T run `debug software disk-usage cleanup` here: the
+    # bare form isn't accepted on current PAN-OS (it errored on every device),
+    # and the only documented working form (`cleanup deep ...`) purges current
+    # log files — outside our safe scope. Old-image deletion is the safe,
+    # high-value reclaim; the UI links the KB for manual deeper cleaning.
+    # Fields kept (always false/empty) for API + frontend stability.
     std_ran = False
     std_out = ""
-    try:
-        std_out = client.disk_usage_cleanup()
-        std_ran = True
-    except Exception as exc:  # noqa: BLE001
-        log.info("Standard disk-usage cleanup unavailable on %s: %s", device.name, exc)
-        std_out = str(exc)[:300]
 
     after = client.get_disk_space()
     log.info(

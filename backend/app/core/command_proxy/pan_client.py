@@ -703,15 +703,19 @@ class PanDeviceClient:
         return rows
 
     def delete_software_image(self, version: str) -> None:
-        """`request system software delete version X.Y.Z`.
+        """Delete a downloaded image to free disk — CLI ``delete software
+        version X.Y.Z`` → op ``<delete><software><version>X</version>…``.
 
-        Frees disk by removing a previously-downloaded image. Refuses on the
-        device side if you try to delete the running version, so this is
-        safe to call without local guarding (we guard anyway in the caller).
+        This is the TOP-LEVEL ``delete`` op, NOT ``request system software
+        delete``: PAN-OS has no ``delete`` node under request/system/software
+        and rejects that form with "request -> system -> software -> delete is
+        unexpected" (the disk-cleanup bug, 2026-06). The device refuses to
+        delete the running version, so this is safe to call without local
+        guarding (we guard anyway in the caller).
         """
         cmd = (
-            f"<request><system><software><delete><version>{version}</version>"
-            f"</delete></software></system></request>"
+            f"<delete><software><version>{version}</version>"
+            f"</software></delete>"
         )
         try:
             self._proxy.op(cmd, cmd_xml=False)

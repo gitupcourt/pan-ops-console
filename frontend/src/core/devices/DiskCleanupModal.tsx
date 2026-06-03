@@ -198,9 +198,8 @@ export function DiskCleanupModal({
                     ))}
                     <div className="text-[11px] text-zinc-500">
                       {selectedImages.length} selected · ~
-                      {fmtKb(totalKb(selectedImages))} reclaimable. The standard
-                      disk-usage cleanup runs too. Logs and config are never
-                      touched.
+                      {fmtKb(totalKb(selectedImages))} reclaimable. Logs and
+                      config are never touched.
                     </div>
                   </div>
                 )}
@@ -220,10 +219,10 @@ export function DiskCleanupModal({
                   onClick={() => run.mutate()}
                 >
                   {run.isPending
-                    ? "Cleaning…"
-                    : `Delete ${selectedImages.length} image${
+                    ? "Deleting…"
+                    : `Delete ${selectedImages.length} old image${
                         selectedImages.length === 1 ? "" : "s"
-                      } + clean up`}
+                      }`}
                 </Button>
               </div>
             </>

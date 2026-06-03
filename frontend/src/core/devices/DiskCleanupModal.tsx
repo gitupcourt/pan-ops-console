@@ -157,14 +157,17 @@ export function DiskCleanupModal({
 
               <div>
                 <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
-                  Reclaimable software images (outside the current train
-                  {plan.current_version ? ` — running ${plan.current_version}` : ""})
+                  Reclaimable software images
+                  {plan.current_version
+                    ? ` (older than ${plan.current_version} — running version & train base kept)`
+                    : ""}
                 </div>
                 {deletable.length === 0 ? (
                   <div className="rounded border border-zinc-800 bg-zinc-900/40 p-2 text-zinc-400">
-                    No old-train images are safe to remove on this device — the
-                    running version and its train (including the base) are never
-                    touched. If it&apos;s logs/temp filling the disk, use{" "}
+                    No older downloaded images to remove on this device — the
+                    running version, the current train&apos;s base, and any
+                    newer pre-staged image are all kept. If it&apos;s logs/temp
+                    filling the disk, use{" "}
                     <span className="text-amber-300">Deep clean</span> below.
                   </div>
                 ) : (

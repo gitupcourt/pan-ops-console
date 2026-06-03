@@ -730,14 +730,22 @@ class PanDeviceClient:
         The ``deep`` form DOES remove backup/rotated logs (current logs and
         config are untouched) — callers MUST surface that to the operator. Both
         ``deep`` and ``threshold`` are required; the bare ``cleanup`` form is
-        rejected by PAN-OS ("...cleanup is unexpected"). Issued with
-        ``cmd_xml=True`` so pan-os-python builds the op XML — hand-nesting the
-        deep/threshold elements is exactly how the software-delete op got
-        miswritten. Returns the device's textual result (best-effort).
+        rejected by PAN-OS.
+
+        Hand-built XML with ``cmd_xml=False`` (the sequential nesting the
+        CLI->XML converter produces for ``cleanup deep threshold N``). NOTE:
+        ``cmd_xml=True`` does NOT work through a FirewallProxy — it sends the
+        raw CLI string and PAN-OS returns "Request is not a valid XML" — which
+        is why every method here builds XML directly. Returns the device's
+        textual result (best-effort).
         """
-        cmd = f"debug software disk-usage cleanup deep threshold {int(threshold)}"
+        cmd = (
+            f"<debug><software><disk-usage><cleanup><deep>"
+            f"<threshold>{int(threshold)}</threshold>"
+            f"</deep></cleanup></disk-usage></software></debug>"
+        )
         try:
-            resp = self._proxy.op(cmd, cmd_xml=True)
+            resp = self._proxy.op(cmd, cmd_xml=False)
         except PanDeviceError as exc:
             raise ConnectionError(f"deep disk cleanup failed: {exc}") from exc
         res = resp.find(".//result")

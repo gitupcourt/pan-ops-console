@@ -47,9 +47,6 @@ class DiskCleanupExecuteIn(BaseModel):
     # Versions the operator approved from the plan. Re-validated server-side
     # against the recomputed safe set — anything not in it is refused.
     versions: list[str]
-    # Opt-in: also run `debug software disk-usage cleanup deep` (rotated logs +
-    # temp). The UI gates this behind a disclaimer. Default off.
-    deep_clean: bool = False
 
 
 class DiskCleanupResultOut(BaseModel):
@@ -57,8 +54,6 @@ class DiskCleanupResultOut(BaseModel):
     device_name: str
     deleted: list[str]
     failed: list[dict]
-    deep_cleanup_ran: bool
-    deep_cleanup_output: str
     disk_space_before: list[dict]
     disk_space_after: list[dict]
 
@@ -110,21 +105,13 @@ def run_disk_cleanup(
     db: Session = Depends(get_db),
     user: User = Depends(current_user),
 ) -> DiskCleanupResultOut:
-    """Delete the approved (and server-re-validated) old-train images and/or
-    run the opt-in deep clean. Returns disk-space before/after + a per-image
-    outcome."""
+    """Delete the approved (and server-re-validated) old images. Returns
+    disk-space before/after + a per-image outcome."""
     device = _device_or_404(db, device_id)
-    # Allow deep-clean-only (no images): a small device with no old-train
-    # images to delete still needs the rotated-log/temp cleanup.
-    if not payload.versions and not payload.deep_clean:
-        raise HTTPException(
-            status_code=400,
-            detail="nothing to do: select at least one image or enable deep clean",
-        )
+    if not payload.versions:
+        raise HTTPException(status_code=400, detail="versions must be non-empty")
     try:
-        result = svc.execute_cleanup(
-            db, device, payload.versions, deep_clean=payload.deep_clean
-        )
+        result = svc.execute_cleanup(db, device, payload.versions)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"disk cleanup failed: {str(exc)[:300]}"
@@ -134,8 +121,6 @@ def run_disk_cleanup(
         device_name=result.device_name,
         deleted=result.deleted,
         failed=result.failed,
-        deep_cleanup_ran=result.deep_cleanup_ran,
-        deep_cleanup_output=result.deep_cleanup_output,
         disk_space_before=result.disk_space_before,
         disk_space_after=result.disk_space_after,
     )

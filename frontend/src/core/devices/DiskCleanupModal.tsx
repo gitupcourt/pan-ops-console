@@ -76,9 +76,6 @@ export function DiskCleanupModal({
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<DiskCleanupResult | null>(null);
-  // Opt-in deep clean (rotated logs + temp). Off by default — it removes old
-  // debug history, so the operator must consciously check it.
-  const [deepClean, setDeepClean] = useState(false);
 
   // Default-select every deletable image once the plan arrives.
   useEffect(() => {
@@ -88,8 +85,7 @@ export function DiskCleanupModal({
   }, [planQ.data]);
 
   const run = useMutation({
-    mutationFn: () =>
-      api.runDiskCleanup(deviceId, Array.from(selected), deepClean),
+    mutationFn: () => api.runDiskCleanup(deviceId, Array.from(selected)),
     onSuccess: (r) => {
       setResult(r);
       onDone?.();
@@ -99,13 +95,6 @@ export function DiskCleanupModal({
   const plan = planQ.data;
   const deletable = plan?.deletable_images ?? [];
   const selectedImages = deletable.filter((i) => selected.has(i.version));
-  const nothingSelected = selectedImages.length === 0 && !deepClean;
-  const actionLabel =
-    selectedImages.length > 0
-      ? `Delete ${selectedImages.length} old image${
-          selectedImages.length === 1 ? "" : "s"
-        }${deepClean ? " + deep clean" : ""}`
-      : "Run deep clean";
 
   return (
     <div
@@ -166,9 +155,17 @@ export function DiskCleanupModal({
                   <div className="rounded border border-zinc-800 bg-zinc-900/40 p-2 text-zinc-400">
                     No older downloaded images to remove on this device — the
                     running version, the current train&apos;s base, and any
-                    newer pre-staged image are all kept. If it&apos;s logs/temp
-                    filling the disk, use{" "}
-                    <span className="text-amber-300">Deep clean</span> below.
+                    newer pre-staged image are all kept. If the disk is filled by
+                    logs/temp instead, see the{" "}
+                    <a
+                      href={KB_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-blue-400 underline hover:text-blue-300"
+                    >
+                      PAN cleanup KB
+                    </a>
+                    .
                   </div>
                 ) : (
                   <div className="space-y-1">
@@ -211,32 +208,6 @@ export function DiskCleanupModal({
                 )}
               </div>
 
-              {/* Opt-in deep clean — removes old debug history, so off by
-                  default behind a clear disclaimer. */}
-              <label className="flex cursor-pointer items-start gap-2 rounded border border-amber-900/40 bg-amber-950/20 p-2">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  checked={deepClean}
-                  onChange={(e) => setDeepClean(e.target.checked)}
-                />
-                <span>
-                  <span className="font-medium text-amber-200">
-                    Deep clean (rotated logs &amp; temp)
-                  </span>
-                  <span className="mt-0.5 block text-[11px] text-amber-300/80">
-                    Also runs{" "}
-                    <span className="font-mono">
-                      debug software disk-usage cleanup deep
-                    </span>{" "}
-                    to delete rotated/backup log files and temporary data down to
-                    ~80% usage. Current logs and configuration are kept, but older
-                    debug history is removed. Best for small devices where old
-                    images aren&apos;t the problem.
-                  </span>
-                </span>
-              </label>
-
               {run.error && (
                 <div className="text-rose-400">
                   Cleanup failed: {(run.error as Error).message}
@@ -247,10 +218,14 @@ export function DiskCleanupModal({
                 <Button onClick={onClose}>Cancel</Button>
                 <Button
                   variant="danger"
-                  disabled={nothingSelected || run.isPending}
+                  disabled={selectedImages.length === 0 || run.isPending}
                   onClick={() => run.mutate()}
                 >
-                  {run.isPending ? "Cleaning…" : actionLabel}
+                  {run.isPending
+                    ? "Deleting…"
+                    : `Delete ${selectedImages.length} old image${
+                        selectedImages.length === 1 ? "" : "s"
+                      }`}
                 </Button>
               </div>
             </>
@@ -260,15 +235,11 @@ export function DiskCleanupModal({
             <div className="space-y-3">
               <div className="rounded border border-emerald-900/40 bg-emerald-950/30 p-2 text-emerald-200">
                 Done.
-                {result.deleted.length > 0 &&
-                  ` Deleted ${result.deleted.length} image${
-                    result.deleted.length === 1 ? "" : "s"
-                  }.`}
-                {result.deep_cleanup_ran &&
-                  " Ran the deep clean (rotated logs + temp)."}
-                {result.deleted.length === 0 &&
-                  !result.deep_cleanup_ran &&
-                  " Nothing was removed."}
+                {result.deleted.length > 0
+                  ? ` Deleted ${result.deleted.length} image${
+                      result.deleted.length === 1 ? "" : "s"
+                    }.`
+                  : " Nothing was removed."}
               </div>
               {result.deleted.length > 0 && (
                 <div>
@@ -294,11 +265,6 @@ export function DiskCleanupModal({
                       </li>
                     ))}
                   </ul>
-                </div>
-              )}
-              {deepClean && !result.deep_cleanup_ran && result.deep_cleanup_output && (
-                <div className="text-[11px] text-amber-300">
-                  Deep clean didn&apos;t run: {result.deep_cleanup_output}
                 </div>
               )}
               {result.disk_space_after.length > 0 && (

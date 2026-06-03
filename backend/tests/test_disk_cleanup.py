@@ -87,7 +87,6 @@ def test_deletable_images_empty_when_current_unparseable():
 class _FakeClient:
     def __init__(self):
         self.deleted: list[str] = []
-        self.deep_threshold: int | None = None  # set when deep_disk_cleanup runs
         self._disk = [{
             "filesystem": "/dev/root", "size": "7.0G", "used": "6.0G",
             "avail": "1.0G", "use_pct": "86", "mounted_on": "/",
@@ -102,10 +101,6 @@ class _FakeClient:
     def delete_software_image(self, v):
         self.deleted.append(v)
 
-    def deep_disk_cleanup(self, threshold=80):
-        self.deep_threshold = threshold
-        return "Cleanup complete"
-
 
 def test_execute_refuses_versions_outside_safe_set(client, db, monkeypatch):
     dev = _device(db, current="11.1.4")
@@ -114,61 +109,10 @@ def test_execute_refuses_versions_outside_safe_set(client, db, monkeypatch):
         svc, "build_client_with_fallback", lambda db, device: (fake, "direct")
     )
 
-    # Request a safe old-train image, the RUNNING version, and the current
-    # train's base. Only the first may be deleted.
+    # Request a safe old image, the RUNNING version, and the current train's
+    # base. Only the first may be deleted.
     result = svc.execute_cleanup(db, dev, ["10.2.0", "11.1.4", "11.1.2"])
 
     assert fake.deleted == ["10.2.0"]
     assert {f["version"] for f in result.failed} == {"11.1.4", "11.1.2"}
     assert result.disk_space_before and result.disk_space_after
-
-
-def test_execute_deep_clean_off_by_default(client, db, monkeypatch):
-    # Without deep_clean, the deep cleanup must NOT run (it deletes rotated
-    # logs — opt-in only). Deleting old-train images is the default safe pass.
-    dev = _device(db, current="11.1.4")
-    fake = _FakeClient()
-    monkeypatch.setattr(
-        svc, "build_client_with_fallback", lambda db, device: (fake, "direct")
-    )
-
-    result = svc.execute_cleanup(db, dev, ["10.2.0"])
-    assert fake.deleted == ["10.2.0"]
-    assert fake.deep_threshold is None  # deep clean never invoked
-    assert result.deep_cleanup_ran is False
-
-
-def test_execute_deep_clean_runs_when_opted_in(client, db, monkeypatch):
-    # deep_clean=True runs the deep cleanup at the configured threshold and
-    # reports it; image deletion still happens too.
-    dev = _device(db, current="11.1.4")
-    fake = _FakeClient()
-    monkeypatch.setattr(
-        svc, "build_client_with_fallback", lambda db, device: (fake, "direct")
-    )
-
-    result = svc.execute_cleanup(db, dev, ["10.2.0"], deep_clean=True)
-    assert fake.deleted == ["10.2.0"]
-    assert fake.deep_threshold == svc.DEEP_CLEAN_THRESHOLD_PCT
-    assert result.deep_cleanup_ran is True
-    assert "Cleanup complete" in result.deep_cleanup_output
-
-
-def test_execute_deep_clean_failure_is_nonfatal(client, db, monkeypatch):
-    # A deep-clean rejection must not fail the whole op — image deletion (the
-    # primary win) still succeeds and is reported.
-    dev = _device(db, current="11.1.4")
-    fake = _FakeClient()
-
-    def _boom(threshold=80):
-        raise ConnectionError("deep disk cleanup failed: unexpected")
-
-    fake.deep_disk_cleanup = _boom
-    monkeypatch.setattr(
-        svc, "build_client_with_fallback", lambda db, device: (fake, "direct")
-    )
-
-    result = svc.execute_cleanup(db, dev, ["10.2.0"], deep_clean=True)
-    assert fake.deleted == ["10.2.0"]
-    assert result.deep_cleanup_ran is False
-    assert "unexpected" in result.deep_cleanup_output

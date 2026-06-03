@@ -4,28 +4,19 @@ Surfaced on the precheck disk-space alert and the Inventory row action. The
 disk-space precheck warns the operator; this gives them a one-click,
 conservative way to actually reclaim space.
 
-Two tiers:
+Scope — delete downloaded software images OLDER than the running version: old
+other-train images (e.g. a leftover ``10.2.0`` base while running ``12.1.7``)
+AND old same-train maintenance releases (e.g. ``12.1.3`` while running
+``12.1.7``). Base images are the largest files on a firewall, so these are the
+biggest, safest reclaim. Always kept: the running version (PAN-OS refuses to
+delete it anyway), the current train's base (a within-train install/rollback
+needs it), and anything NEWER than running (likely pre-staged for an upcoming
+upgrade).
 
-  1. ALWAYS-SAFE DEFAULT — delete downloaded software images OLDER than the
-     running version: old other-train images (e.g. a leftover ``10.2.0`` base
-     while running ``12.1.7``) AND old same-train maintenance releases (e.g.
-     ``12.1.3`` while running ``12.1.7``). Base images are the largest files on
-     a firewall, so these are the biggest, safest reclaim. Always kept: the
-     running version (PAN-OS refuses to delete it anyway), the current train's
-     base (a within-train install/rollback needs it), and anything NEWER than
-     running (likely pre-staged for an upcoming upgrade).
-
-  2. OPT-IN "deep clean" (``deep_clean=True``) — also run ``debug software
-     disk-usage cleanup deep threshold N``, which deletes rotated/backup log
-     files and temporary data until the system partition drops below N%. This
-     is for small devices whose disk is filled by logs/temp rather than old
-     images (an old-image pass finds nothing to reclaim there). It removes
-     OLD/rotated debug history — current logs and config are untouched — so
-     it's OFF by default and the UI shows a clear disclaimer. Issued via
-     ``cmd_xml=True`` so pan-os-python builds the op XML.
-
-Still NOT in scope: deleting core files individually, or anything that loses
-config. The UI links the PAN KB for manual deeper cleaning beyond this.
+NOT in scope (deliberately): rotated-log / temp "deep clean" and per-file
+deletes. The `debug software disk-usage cleanup deep` command has fiddly
+threshold semantics and reclaims little (logs rotate frequently), so it was
+dropped — the UI links the PAN KB for manual deeper cleaning when needed.
 
 Everything routes through ``build_client_with_fallback`` so the proxy-by-
 default policy applies, same as the rest of the upgrade module.
@@ -43,11 +34,6 @@ from app.core.command_proxy.pan_client import feature_train, version_tuple
 from app.core.devices.models.device import Device
 
 log = logging.getLogger(__name__)
-
-# Target system-partition usage for the opt-in deep clean: `cleanup deep`
-# deletes rotated logs + temp until usage drops below this percent. 80 frees a
-# meaningful amount on a log-bound device without being maximally aggressive.
-DEEP_CLEAN_THRESHOLD_PCT = 80
 
 
 @dataclass
@@ -72,11 +58,6 @@ class CleanupResult:
     device_name: str
     deleted: list[str]
     failed: list[dict]  # [{"version", "error"}]
-    # Opt-in deep clean (rotated logs + temp). ran=False when not requested OR
-    # when the device rejected the command; output carries the device text or
-    # the error (non-fatal — image deletion is the primary win regardless).
-    deep_cleanup_ran: bool
-    deep_cleanup_output: str
     disk_space_before: list[dict]
     disk_space_after: list[dict]
 
@@ -154,25 +135,14 @@ def plan_cleanup(db: Session, device: Device) -> CleanupPlan:
     )
 
 
-def execute_cleanup(
-    db: Session,
-    device: Device,
-    versions: list[str],
-    *,
-    deep_clean: bool = False,
-) -> CleanupResult:
+def execute_cleanup(db: Session, device: Device, versions: list[str]) -> CleanupResult:
     """Delete the requested images (intersected with the freshly-recomputed
-    safe set), then optionally run the deep clean. Measures disk space
-    before/after.
+    safe set). Measures disk space before/after.
 
     SECURITY: we never trust the caller's `versions` blindly — we recompute
     the safe set server-side from the live software list and refuse anything
     not in it. So even a tampered request can't delete the running version or
     a current-train image.
-
-    `deep_clean=True` additionally runs `debug software disk-usage cleanup deep`
-    (rotated logs + temp). Best-effort and non-fatal — image deletion is the
-    primary win, so a deep-clean failure never fails the whole operation.
     """
     client, _route = build_client_with_fallback(db, device)
     software = client.list_software()
@@ -195,31 +165,16 @@ def execute_cleanup(
         except Exception as exc:  # noqa: BLE001 — surface per-image, keep going
             failed.append({"version": v, "error": str(exc)[:300]})
 
-    # Opt-in deep clean: rotated/backup logs + temp via `cleanup deep`. The
-    # operator accepted the "removes old debug history" disclaimer in the UI.
-    # Best-effort + non-fatal — a rejection here must not undo the image win.
-    deep_ran = False
-    deep_out = ""
-    if deep_clean:
-        try:
-            deep_out = client.deep_disk_cleanup(threshold=DEEP_CLEAN_THRESHOLD_PCT)
-            deep_ran = True
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Deep disk cleanup failed on %s: %s", device.name, exc)
-            deep_out = str(exc)[:300]
-
     after = client.get_disk_space()
     log.info(
-        "Disk-cleanup on %s: deleted=%s failed=%d deep_clean=%s(ran=%s)",
-        device.name, deleted, len(failed), deep_clean, deep_ran,
+        "Disk-cleanup on %s: deleted=%s failed=%d",
+        device.name, deleted, len(failed),
     )
     return CleanupResult(
         device_id=device.id,
         device_name=device.name,
         deleted=deleted,
         failed=failed,
-        deep_cleanup_ran=deep_ran,
-        deep_cleanup_output=deep_out,
         disk_space_before=before,
         disk_space_after=after,
     )

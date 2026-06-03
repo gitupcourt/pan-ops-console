@@ -209,6 +209,31 @@ def drive_pair(job_id: int, ha_pair_key: str) -> None:
         db.close()
 
 
+# ---------- pre-stage gate ----------
+
+
+def _pre_stage_stop(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask]) -> bool:
+    """Stage-only gate, applied AFTER precheck + image-download + pre-snapshot
+    and BEFORE any install/reboot.
+
+    For a ``pre_stage_mode == "stage_only"`` job, mark the given task(s) staged
+    + DONE and return True so the caller STOPS before install. The slow work
+    (precheck, image download, pre-snapshot) has already run, so a later real
+    upgrade job installs fast. Returns False for a normal (full) job — proceed.
+    """
+    if (job.pre_stage_mode or "none") != "stage_only":
+        return False
+    for t in tasks:
+        _record(
+            db, t,
+            "Stage-only job: precheck, image download, and pre-snapshot complete "
+            "— install and reboot skipped. The image is downloaded; run a normal "
+            "upgrade job to install when ready.",
+        )
+        _set_phase(db, t, TaskPhase.DONE)
+    return True
+
+
 # ---------- standalone flow ----------
 
 
@@ -220,6 +245,8 @@ def _drive_solo(db: Session, job: UpgradeJob, task: DeviceUpgradeTask) -> None:
     if not _phase_snapshot(db, job, task, device):
         return
     if not _phase_ensure_image(db, job, task, device):
+        return
+    if _pre_stage_stop(db, job, [task]):
         return
     if not _phase_install_and_wait(db, job, task, device):
         return
@@ -290,6 +317,11 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     for t in (passive, active):
         if not _phase_ensure_image(db, job, t, t.device):
             return
+
+    # Stage-only job: both members are staged (precheck + image + pre-snapshot
+    # done); stop before any suspend/install/failover.
+    if _pre_stage_stop(db, job, [passive, active]):
+        return
 
     # ---- Phase: upgrade the passive ----
     if not _phase_suspend_ha(db, job, passive, passive.device):

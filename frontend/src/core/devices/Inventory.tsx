@@ -12,6 +12,7 @@ import {
 } from "../../api";
 import { Button, Card, CardHeader, Empty, Field, Input, Select, TableScroll } from "../ui/ui";
 import { DeviceConnectionStatus } from "./DeviceConnectionStatus";
+import { DiskCleanupModal } from "./DiskCleanupModal";
 
 export default function Inventory() {
   return (
@@ -596,6 +597,9 @@ function DevicesSection() {
   // breakpoints hide on narrower viewports, so nothing is ever lost and
   // we never need a horizontal scrollbar.
   const [detailFor, setDetailFor] = useState<number | null>(null);
+  // Per-device disk-space cleanup dialog (null = closed). Holds the whole
+  // device so the modal has the name without a re-lookup.
+  const [cleanupFor, setCleanupFor] = useState<Device | null>(null);
 
   const devs: Device[] = devsQ.data ?? [];
 
@@ -971,6 +975,10 @@ function DevicesSection() {
                             onClick: () => setEditing(editing === d.id ? null : d.id),
                           },
                           {
+                            label: "Free up disk space",
+                            onClick: () => setCleanupFor(d),
+                          },
+                          {
                             label: "Delete",
                             onClick: () => del.mutate(d.id),
                             danger: true,
@@ -1048,6 +1056,13 @@ function DevicesSection() {
           </tbody>
         </table>
         </TableScroll>
+      )}
+      {cleanupFor && (
+        <DiskCleanupModal
+          deviceId={cleanupFor.id}
+          deviceName={cleanupFor.name}
+          onClose={() => setCleanupFor(null)}
+        />
       )}
     </Card>
   );

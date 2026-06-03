@@ -145,6 +145,10 @@ export function JobForm({
   const [autoReboot, setAutoReboot] = useState(false);
   const [autoAckPrecheck, setAutoAckPrecheck] = useState(false);
   const [autoAckPostcheck, setAutoAckPostcheck] = useState(false);
+  // "none" = full upgrade; "stage_only" = precheck + image download +
+  // pre-snapshot, then stop before install/reboot.
+  const [preStageMode, setPreStageMode] = useState<"none" | "stage_only">("none");
+  const stageOnly = preStageMode === "stage_only";
 
   const [err, setErr] = useState<string | null>(null);
 
@@ -160,6 +164,7 @@ export function JobForm({
         require_primary_upgrade_confirmation: requirePrimaryUpgrade,
         auto_failback: autoFailback,
         auto_reboot_after_install: autoReboot,
+        pre_stage_mode: preStageMode,
         auto_ack_precheck_failures: autoAckPrecheck,
         auto_ack_postcheck_failures: autoAckPostcheck,
         precheck_set_id: precheckSetId,
@@ -521,6 +526,51 @@ export function JobForm({
         </Select>
       </div>
 
+      {/* Job mode: full upgrade vs stage-only */}
+      <div className="rounded border border-zinc-800 p-3 grid gap-2">
+        <div className="text-xs uppercase tracking-wider text-zinc-500">Mode</div>
+        <div className="inline-flex w-fit overflow-hidden rounded border border-zinc-700 text-[11px]">
+          <button
+            type="button"
+            onClick={() => setPreStageMode("none")}
+            className={
+              "px-3 py-1 " +
+              (!stageOnly
+                ? "bg-zinc-700 text-zinc-100"
+                : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
+            }
+          >
+            Full upgrade
+          </button>
+          <button
+            type="button"
+            onClick={() => setPreStageMode("stage_only")}
+            className={
+              "px-3 py-1 " +
+              (stageOnly
+                ? "bg-zinc-700 text-zinc-100"
+                : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
+            }
+          >
+            Stage only
+          </button>
+        </div>
+        <p className="text-[11px] text-zinc-500">
+          {stageOnly ? (
+            <>
+              Runs prechecks, downloads the image, and takes a pre-snapshot on
+              each device — then <span className="text-amber-300">stops before
+              install/reboot</span>. Use it to pre-stage a fleet ahead of a
+              maintenance window; run a normal upgrade later to install (the
+              image will already be downloaded). The reboot/failover/postcheck
+              settings below don&apos;t apply.
+            </>
+          ) : (
+            "Full upgrade: prechecks → image download → snapshot → install → reboot → postcheck."
+          )}
+        </p>
+      </div>
+
       {/* Automation / safety toggles */}
       <div className="rounded border border-zinc-800 p-3 grid gap-2">
         <div className="text-xs uppercase tracking-wider text-zinc-500">
@@ -577,7 +627,13 @@ export function JobForm({
           variant="primary"
           disabled={!canSubmit || create.isPending}
         >
-          {create.isPending ? "Creating…" : "Create job"}
+          {create.isPending
+            ? stageOnly
+              ? "Staging…"
+              : "Creating…"
+            : stageOnly
+              ? "Stage devices"
+              : "Create job"}
         </Button>
         <Button type="button" onClick={onDone}>
           Cancel

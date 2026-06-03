@@ -237,6 +237,12 @@ function JobConfigSummary({ job }: { job: UpgradeJobDetail }) {
   // the create form.
   const rows: [string, string][] = [
     [
+      "Mode",
+      job.pre_stage_mode === "stage_only"
+        ? "Stage only — precheck + download + snapshot, no install"
+        : "Full upgrade",
+    ],
+    [
       "Image source",
       job.device_pull_image
         ? "Each device pulls from updates.paloaltonetworks.com"

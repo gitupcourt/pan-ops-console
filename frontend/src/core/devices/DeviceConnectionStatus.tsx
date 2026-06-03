@@ -84,7 +84,7 @@ type Props = {
  *     OR sync is stale on a Panorama-imported device.
  */
 export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
-  const state = computeState(device);
+  const state = deviceConnectionState(device);
   if (state === "hidden") return null;
 
   const lastSeen =
@@ -182,7 +182,14 @@ export function DeviceConnectionStatus({ device, variant = "pill" }: Props) {
 
 type State = "ok" | "stale" | "offline" | "hidden";
 
-function computeState(d: Props["device"]): State {
+/**
+ * Liveness verdict for a device, shared so other surfaces (e.g. the upgrade
+ * JobForm device picker) gate on the EXACT same logic the Inventory pill
+ * shows — "offline" here means the same thing it means there. Returns
+ * "hidden" only for direct devices we've never polled (genuinely unknown),
+ * which callers should treat as "not definitively offline."
+ */
+export function deviceConnectionState(d: Props["device"]): State {
   if (d.source === "panorama") {
     if (!d.connected) return "offline";
     // Connected per the last sync — but check that the sync itself

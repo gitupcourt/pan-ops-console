@@ -380,6 +380,45 @@ export type AvailableSoftwareBulkOut = {
   results: Record<number, AvailableSoftwareOut>;
 };
 
+// ---------- Disk-space cleanup ----------
+
+export type DiskSpaceRow = {
+  filesystem: string;
+  size: string;
+  used: string;
+  avail: string;
+  use_pct: string;
+  mounted_on: string;
+};
+
+export type DiskCleanupDeletableImage = {
+  version: string;
+  size_kb: string | null;
+  release_type: string; // "Base" for the largest old-train images
+};
+
+export type DiskCleanupPlan = {
+  device_id: number;
+  device_name: string;
+  current_version: string | null;
+  disk_space: DiskSpaceRow[];
+  // Downloaded images outside the current feature train — the only things
+  // cleanup will delete. Empty when nothing's reclaimable / the train is
+  // unparseable.
+  deletable_images: DiskCleanupDeletableImage[];
+};
+
+export type DiskCleanupResult = {
+  device_id: number;
+  device_name: string;
+  deleted: string[];
+  failed: { version: string; error: string }[];
+  standard_cleanup_ran: boolean;
+  standard_cleanup_output: string;
+  disk_space_before: DiskSpaceRow[];
+  disk_space_after: DiskSpaceRow[];
+};
+
 export type UpgradeJobCreate = {
   name: string;
   target_version: string;
@@ -763,6 +802,17 @@ export const api = {
     j<AvailableSoftwareBulkOut>(`/upgrade/devices/software/bulk`, {
       method: "POST",
       body: JSON.stringify({ device_ids: deviceIds }),
+    }),
+
+  // Disk-space cleanup. The plan is a pure-read dry run; runDiskCleanup is
+  // destructive (deletes old-train images + standard cleanup) and is
+  // re-validated server-side against the safe set.
+  getDiskCleanupPlan: (deviceId: number) =>
+    j<DiskCleanupPlan>(`/upgrade/devices/${deviceId}/disk-cleanup/plan`),
+  runDiskCleanup: (deviceId: number, versions: string[]) =>
+    j<DiskCleanupResult>(`/upgrade/devices/${deviceId}/disk-cleanup`, {
+      method: "POST",
+      body: JSON.stringify({ versions }),
     }),
 
   // Upgrade: tasks (within a job)

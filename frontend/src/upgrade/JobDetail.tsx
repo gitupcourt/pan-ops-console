@@ -12,6 +12,7 @@ import {
   UpgradeJobDetail,
   UpgradeTask,
 } from "../api";
+import { DiskCleanupModal } from "../core/devices/DiskCleanupModal";
 import { ErrorBoundary } from "../core/ui/ErrorBoundary";
 import { Button, Card, CardHeader } from "../core/ui/ui";
 import { JobStateBadge } from "./UpgradeJobs";
@@ -438,7 +439,13 @@ function TaskExpandedDetail({ task: t }: { task: UpgradeTask }) {
         </div>
       )}
 
-      {t.precheck && <PrecheckResultsTable precheck={t.precheck} />}
+      {t.precheck && (
+        <PrecheckResultsTable
+          precheck={t.precheck}
+          deviceId={t.device_id}
+          deviceName={t.device_name}
+        />
+      )}
 
       <SnapshotsSection task={t} />
 
@@ -593,7 +600,22 @@ function CurrentPhaseExplainer({
   return null;
 }
 
-function PrecheckResultsTable({ precheck }: { precheck: PrecheckSummary }) {
+function PrecheckResultsTable({
+  precheck,
+  deviceId,
+  deviceName,
+}: {
+  precheck: PrecheckSummary;
+  deviceId: number;
+  deviceName: string;
+}) {
+  const [cleanup, setCleanup] = useState(false);
+  // A failing/warning disk-space check is the cue to offer cleanup inline.
+  const diskCheck = precheck.checks.find(
+    (c) =>
+      c.name.toLowerCase().includes("disk") &&
+      String(c.severity).toLowerCase() !== "pass",
+  );
   return (
     <div>
       <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-3">
@@ -607,6 +629,21 @@ function PrecheckResultsTable({ precheck }: { precheck: PrecheckSummary }) {
           <PrecheckCount label="skip" n={precheck.skip_count} tone="zinc" />
         </span>
       </div>
+      {diskCheck && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded border border-amber-800/40 bg-amber-950/20 px-2 py-1 text-[11px]">
+          <span className="text-amber-200">
+            Low disk space flagged
+            {diskCheck.reason ? ` — ${diskCheck.reason}` : ""}.
+          </span>
+          <button
+            type="button"
+            onClick={() => setCleanup(true)}
+            className="text-blue-400 underline hover:text-blue-300"
+          >
+            Free up disk space
+          </button>
+        </div>
+      )}
       {precheck.error ? (
         <div className="p-2 rounded bg-rose-950/40 border border-rose-900/40 text-rose-300 text-[11px]">
           Check runner errored before evaluating any check:{" "}
@@ -635,6 +672,13 @@ function PrecheckResultsTable({ precheck }: { precheck: PrecheckSummary }) {
             ))}
           </tbody>
         </table>
+      )}
+      {cleanup && (
+        <DiskCleanupModal
+          deviceId={deviceId}
+          deviceName={deviceName}
+          onClose={() => setCleanup(false)}
+        />
       )}
     </div>
   );

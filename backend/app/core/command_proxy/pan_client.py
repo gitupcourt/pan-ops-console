@@ -722,35 +722,6 @@ class PanDeviceClient:
         except PanDeviceError as exc:
             raise ConnectionError(f"software delete failed: {exc}") from exc
 
-    def deep_disk_cleanup(self, threshold: int = 80) -> str:
-        """`debug software disk-usage cleanup deep threshold N` — reclaim space
-        by deleting rotated/backup log files and temporary data until the
-        system partition drops below N% usage.
-
-        The ``deep`` form DOES remove backup/rotated logs (current logs and
-        config are untouched) — callers MUST surface that to the operator. Both
-        ``deep`` and ``threshold`` are required; the bare ``cleanup`` form is
-        rejected by PAN-OS.
-
-        Hand-built XML with ``cmd_xml=False`` (the sequential nesting the
-        CLI->XML converter produces for ``cleanup deep threshold N``). NOTE:
-        ``cmd_xml=True`` does NOT work through a FirewallProxy — it sends the
-        raw CLI string and PAN-OS returns "Request is not a valid XML" — which
-        is why every method here builds XML directly. Returns the device's
-        textual result (best-effort).
-        """
-        cmd = (
-            f"<debug><software><disk-usage><cleanup><deep>"
-            f"<threshold>{int(threshold)}</threshold>"
-            f"</deep></cleanup></disk-usage></software></debug>"
-        )
-        try:
-            resp = self._proxy.op(cmd, cmd_xml=False)
-        except PanDeviceError as exc:
-            raise ConnectionError(f"deep disk cleanup failed: {exc}") from exc
-        res = resp.find(".//result")
-        return (res.text or "").strip() if res is not None and res.text else ""
-
     def request_software_install(self, version: str) -> str:
         """`request system software install version X.Y.Z` — returns the job id.
 

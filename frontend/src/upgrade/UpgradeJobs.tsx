@@ -195,6 +195,7 @@ export function JobStateBadge({ state }: { state: JobState }) {
     running: "border-blue-700 bg-blue-900/40 text-blue-200",
     awaiting_confirmation: "border-amber-700 bg-amber-900/40 text-amber-200",
     completed: "border-emerald-700 bg-emerald-900/40 text-emerald-200",
+    completed_with_errors: "border-orange-700 bg-orange-900/40 text-orange-200",
     failed: "border-rose-700 bg-rose-900/40 text-rose-200",
     aborted: "border-zinc-700 bg-zinc-900/40 text-zinc-400",
   };

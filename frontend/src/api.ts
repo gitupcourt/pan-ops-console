@@ -192,6 +192,7 @@ export type JobState =
   | "running"
   | "awaiting_confirmation"
   | "completed"
+  | "completed_with_errors"
   | "failed"
   | "aborted";
 
@@ -559,6 +560,7 @@ export type JobsSummary = {
   running: number;
   awaiting_confirmation: number;
   completed: number;
+  completed_with_errors: number;
   failed: number;
   aborted: number;
 };

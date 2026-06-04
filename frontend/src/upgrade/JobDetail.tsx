@@ -41,7 +41,9 @@ export default function JobDetail() {
     refetchInterval: (q) => {
       const state = q.state.data?.state;
       if (!state) return 5000;
-      return ["completed", "failed", "aborted"].includes(state)
+      return ["completed", "completed_with_errors", "failed", "aborted"].includes(
+        state,
+      )
         ? false
         : 3000;
     },
@@ -80,16 +82,34 @@ export default function JobDetail() {
           description={`Target ${job.target_version} · ${job.workflow} workflow · ${job.task_count} device(s)`}
           action={<JobLifecycleActions job={job} />}
         />
-        {job.state === "failed" && job.failure_reason && (
-          <div className="mx-4 mt-1 mb-2 px-3 py-2 rounded bg-rose-950/40 border border-rose-900/50 text-rose-200 text-xs">
-            <span className="font-semibold">Job failed:</span>{" "}
-            {job.failure_reason}
-            <div className="text-[11px] text-rose-300/70 mt-1">
-              Expand the affected device row below for the per-phase
-              activity log, or check the worker logs for a full traceback.
+        {(job.state === "failed" || job.state === "completed_with_errors") &&
+          job.failure_reason && (
+            <div
+              className={`mx-4 mt-1 mb-2 px-3 py-2 rounded border text-xs ${
+                job.state === "failed"
+                  ? "bg-rose-950/40 border-rose-900/50 text-rose-200"
+                  : "bg-orange-950/40 border-orange-900/50 text-orange-200"
+              }`}
+            >
+              <span className="font-semibold">
+                {job.state === "failed"
+                  ? "Job failed:"
+                  : "Completed with errors:"}
+              </span>{" "}
+              {job.failure_reason}
+              <div
+                className={`text-[11px] mt-1 ${
+                  job.state === "failed"
+                    ? "text-rose-300/70"
+                    : "text-orange-300/70"
+                }`}
+              >
+                Expand each failed device row below for its per-phase activity
+                log; the devices that succeeded are marked done. Retry a failed
+                device after fixing the cause.
+              </div>
             </div>
-          </div>
-        )}
+          )}
         <JobConfigSummary job={job} />
       </Card>
 
@@ -160,7 +180,9 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
           <BusyLabel busy={abortM.isPending} busyLabel="Aborting…" idleLabel="Abort" />
         </Button>
       )}
-      {["pending", "completed", "failed", "aborted"].includes(job.state) && (
+      {["pending", "completed", "completed_with_errors", "failed", "aborted"].includes(
+        job.state,
+      ) && (
         <Button
           variant="danger"
           onClick={() => {
@@ -814,7 +836,12 @@ const PARKED_OVERRIDE: TaskPhase[] = [
   "awaiting_postcheck_override",
 ];
 
-const TERMINAL_JOB_STATES: JobState[] = ["completed", "failed", "aborted"];
+const TERMINAL_JOB_STATES: JobState[] = [
+  "completed",
+  "completed_with_errors",
+  "failed",
+  "aborted",
+];
 
 function TaskActionButtons({
   task,
@@ -855,9 +882,10 @@ function TaskActionButtons({
     onSuccess: invalidate,
   });
 
-  // A FAILED task is retryable even on a FAILED job: retry resumes from the
-  // last completed marker AND un-fails the job server-side (the recovery path
-  // after a driver crash or phase failure). COMPLETED / ABORTED stay terminal.
+  // A FAILED task is retryable even on a FAILED or COMPLETED_WITH_ERRORS job:
+  // retry resumes from the last completed marker AND un-terminals the job
+  // server-side (the recovery path after a driver crash, phase failure, or a
+  // partial-failure run). COMPLETED / ABORTED stay terminal.
   if (
     task.phase === "failed" &&
     jobState !== "completed" &&

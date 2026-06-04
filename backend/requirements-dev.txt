@@ -1,7 +1,7 @@
 # Dev-only deps. NOT installed into the production image. CI installs
 # these alongside requirements.txt before running tests.
 pytest==8.3.4
-pytest-asyncio==0.24.0
+pytest-asyncio==1.4.0
 # FastAPI's TestClient needs httpx (the prod stack already has it but
 # pinning explicitly here so dev installs are reproducible too).
 httpx==0.28.1

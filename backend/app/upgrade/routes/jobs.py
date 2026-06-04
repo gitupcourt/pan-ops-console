@@ -518,6 +518,7 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
 # the URL prefix makes the intent unambiguous.
 
 _AWAITING_CONFIRM = {
+    TaskPhase.AWAITING_INSTALL_CONFIRM,
     TaskPhase.AWAITING_REBOOT_CONFIRM,
     TaskPhase.AWAITING_FAILOVER_CONFIRM,
     TaskPhase.AWAITING_PRIMARY_UPGRADE_CONFIRM,

@@ -146,8 +146,11 @@ export function JobForm({
   const [autoAckPrecheck, setAutoAckPrecheck] = useState(false);
   const [autoAckPostcheck, setAutoAckPostcheck] = useState(false);
   // "none" = full upgrade; "stage_only" = precheck + image download +
-  // pre-snapshot, then stop before install/reboot.
-  const [preStageMode, setPreStageMode] = useState<"none" | "stage_only">("none");
+  // pre-snapshot, then stop before install/reboot; "hold" = same prep, then
+  // pause at an install gate (resume via "Proceed to install").
+  const [preStageMode, setPreStageMode] = useState<
+    "none" | "stage_only" | "hold"
+  >("none");
   const stageOnly = preStageMode === "stage_only";
 
   const [err, setErr] = useState<string | null>(null);
@@ -530,40 +533,46 @@ export function JobForm({
       <div className="rounded border border-zinc-800 p-3 grid gap-2">
         <div className="text-xs uppercase tracking-wider text-zinc-500">Mode</div>
         <div className="inline-flex w-fit overflow-hidden rounded border border-zinc-700 text-[11px]">
-          <button
-            type="button"
-            onClick={() => setPreStageMode("none")}
-            className={
-              "px-3 py-1 " +
-              (!stageOnly
-                ? "bg-zinc-700 text-zinc-100"
-                : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
-            }
-          >
-            Full upgrade
-          </button>
-          <button
-            type="button"
-            onClick={() => setPreStageMode("stage_only")}
-            className={
-              "px-3 py-1 " +
-              (stageOnly
-                ? "bg-zinc-700 text-zinc-100"
-                : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
-            }
-          >
-            Stage only
-          </button>
+          {(
+            [
+              ["none", "Full upgrade"],
+              ["hold", "Stage & hold"],
+              ["stage_only", "Stage only"],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setPreStageMode(mode)}
+              className={
+                "px-3 py-1 " +
+                (preStageMode === mode
+                  ? "bg-zinc-700 text-zinc-100"
+                  : "bg-zinc-900 text-zinc-400 hover:text-zinc-200")
+              }
+            >
+              {label}
+            </button>
+          ))}
         </div>
         <p className="text-[11px] text-zinc-500">
-          {stageOnly ? (
+          {preStageMode === "stage_only" ? (
             <>
               Runs prechecks, downloads the image, and takes a pre-snapshot on
               each device — then <span className="text-amber-300">stops before
-              install/reboot</span>. Use it to pre-stage a fleet ahead of a
-              maintenance window; run a normal upgrade later to install (the
-              image will already be downloaded). The reboot/failover/postcheck
-              settings below don&apos;t apply.
+              install/reboot</span>. Pre-stage a fleet ahead of a maintenance
+              window; run a normal upgrade later to install (the image will
+              already be downloaded). The reboot/failover/postcheck settings
+              below don&apos;t apply.
+            </>
+          ) : preStageMode === "hold" ? (
+            <>
+              Same prep (precheck → download → snapshot), then{" "}
+              <span className="text-amber-300">pauses before install</span> —
+              each device parks at &quot;awaiting install&quot; and you click{" "}
+              <span className="text-blue-300">Proceed to install</span> on the
+              job to continue the <em>same</em> job. The hold can last as long
+              as you need.
             </>
           ) : (
             "Full upgrade: prechecks → image download → snapshot → install → reboot → postcheck."

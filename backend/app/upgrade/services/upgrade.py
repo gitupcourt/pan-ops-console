@@ -234,6 +234,41 @@ def _pre_stage_stop(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask]
     return True
 
 
+def _pre_stage_hold_gate(db: Session, job: UpgradeJob, gate_task: DeviceUpgradeTask) -> bool:
+    """Stage-and-hold gate (``pre_stage_mode == "hold"``), at the same point as
+    the stage-only gate — after precheck + image + pre-snapshot, before install.
+
+    NON-BLOCKING, unlike the reboot/failover ``_wait_for_confirm`` gates: it
+    parks the task at AWAITING_INSTALL_CONFIRM and RETURNS so drive_pair exits,
+    freeing the worker slot (and not counting against the task time limit) while
+    the operator decides — so a hold can last hours/days. The /confirm route
+    re-dispatches drive_pair on "Proceed to install"; on re-entry the token is
+    consumed and an ``install_confirmed`` marker advances past the gate (and
+    keeps it advanced on any later re-dispatch).
+
+    Returns True to proceed to install, False to STOP this invocation (parked —
+    drive_pair returns cleanly; NOT a failure).
+    """
+    if (job.pre_stage_mode or "none") != "hold":
+        return True
+    if _phase_already_done(gate_task, "install_confirmed"):
+        return True
+    db.refresh(gate_task)
+    if gate_task.confirmation_token:
+        gate_task.confirmation_token = None
+        db.commit()
+        _mark_phase_done(db, gate_task, "install_confirmed")
+        _record(db, gate_task, "Proceed-to-install confirmed; installing now.")
+        return True
+    _record(
+        db, gate_task,
+        "Staged — precheck, image download, and pre-snapshot complete. Paused "
+        "before install; click 'Proceed to install' when ready.",
+        phase=TaskPhase.AWAITING_INSTALL_CONFIRM,
+    )
+    return False
+
+
 # ---------- standalone flow ----------
 
 
@@ -247,6 +282,8 @@ def _drive_solo(db: Session, job: UpgradeJob, task: DeviceUpgradeTask) -> None:
     if not _phase_ensure_image(db, job, task, device):
         return
     if _pre_stage_stop(db, job, [task]):
+        return
+    if not _pre_stage_hold_gate(db, job, task):
         return
     if not _phase_install_and_wait(db, job, task, device):
         return
@@ -321,6 +358,11 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     # Stage-only job: both members are staged (precheck + image + pre-snapshot
     # done); stop before any suspend/install/failover.
     if _pre_stage_stop(db, job, [passive, active]):
+        return
+
+    # Stage-and-hold: park on the passive (the first member we'd upgrade) until
+    # the operator clicks "Proceed to install". Non-blocking — frees the slot.
+    if not _pre_stage_hold_gate(db, job, passive):
         return
 
     # ---- Phase: upgrade the passive ----

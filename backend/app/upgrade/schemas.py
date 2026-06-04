@@ -260,7 +260,9 @@ class JobCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_pre_stage_mode(self) -> "JobCreate":
-        allowed = {"none", "stage_only"}
+        # "none" = full upgrade; "stage_only" = stop before install;
+        # "hold" = pause at an install gate, resume via "Proceed to install".
+        allowed = {"none", "stage_only", "hold"}
         if self.pre_stage_mode not in allowed:
             raise ValueError(
                 f"pre_stage_mode must be one of {sorted(allowed)}"

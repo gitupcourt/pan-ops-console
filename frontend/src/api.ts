@@ -201,6 +201,7 @@ export type TaskPhase =
   | "awaiting_precheck_override"
   | "snapshot"
   | "downloading_image"
+  | "awaiting_install_confirm"
   | "suspend_secondary"
   | "upgrade_secondary"
   | "awaiting_reboot_confirm"

@@ -53,6 +53,11 @@ class TaskPhase(str, enum.Enum):
     AWAITING_PRECHECK_OVERRIDE = "awaiting_precheck_override"
     SNAPSHOT = "snapshot"
     DOWNLOADING_IMAGE = "downloading_image"
+    # "Stage & hold" park: precheck + image + pre-snapshot done, paused before
+    # install until the operator clicks "Proceed to install". Non-blocking gate
+    # (drive_pair returns; the /confirm route re-dispatches), so it frees the
+    # worker slot and doesn't count against the task time limit while parked.
+    AWAITING_INSTALL_CONFIRM = "awaiting_install_confirm"
     SUSPEND_SECONDARY = "suspend_secondary"
     UPGRADE_SECONDARY = "upgrade_secondary"
     AWAITING_REBOOT_CONFIRM = "awaiting_reboot_confirm"

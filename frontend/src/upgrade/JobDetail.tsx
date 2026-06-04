@@ -240,7 +240,9 @@ function JobConfigSummary({ job }: { job: UpgradeJobDetail }) {
       "Mode",
       job.pre_stage_mode === "stage_only"
         ? "Stage only — precheck + download + snapshot, no install"
-        : "Full upgrade",
+        : job.pre_stage_mode === "hold"
+          ? "Stage & hold — pauses before install (Proceed to install to continue)"
+          : "Full upgrade",
     ],
     [
       "Image source",
@@ -554,6 +556,16 @@ function CurrentPhaseExplainer({
       </div>
     );
   }
+  if (phase === "awaiting_install_confirm") {
+    return (
+      <div className="px-2 py-1.5 rounded bg-blue-950/40 border border-blue-900/40 text-blue-200">
+        <strong>Staged — waiting on you.</strong> Precheck, image download, and
+        the pre-snapshot are done; nothing has been installed. Click{" "}
+        <em>Proceed to install</em> when you&apos;re ready to continue this job
+        through install &amp; reboot.
+      </div>
+    );
+  }
   if (PARKED_CONFIRM.includes(phase)) {
     const desc =
       phase === "awaiting_reboot_confirm"
@@ -792,6 +804,7 @@ function fmtTime(iso: string): string {
 }
 
 const PARKED_CONFIRM: TaskPhase[] = [
+  "awaiting_install_confirm",
   "awaiting_reboot_confirm",
   "awaiting_failover_confirm",
   "awaiting_primary_upgrade_confirm",
@@ -881,6 +894,12 @@ function TaskActionButtons({
   }
 
   if (PARKED_CONFIRM.includes(task.phase)) {
+    const idleLabel =
+      task.phase === "awaiting_install_confirm"
+        ? "Proceed to install"
+        : task.phase === "awaiting_reboot_confirm"
+          ? "Reboot now"
+          : "Confirm";
     return (
       <Button
         variant="primary"
@@ -889,8 +908,8 @@ function TaskActionButtons({
       >
         <BusyLabel
           busy={confirmM.isPending}
-          busyLabel="Confirming…"
-          idleLabel="Confirm"
+          busyLabel="Working…"
+          idleLabel={idleLabel}
         />
       </Button>
     );

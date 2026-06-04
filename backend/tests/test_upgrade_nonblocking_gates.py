@@ -169,7 +169,10 @@ def precheck_io(monkeypatch):
 
 
 def _precheck_job(**over):
-    base = dict(id=1, created_by_id=1, target_version="12.1.7", auto_ack_precheck_failures=False)
+    base = dict(
+        id=1, created_by_id=1, target_version="12.1.7",
+        auto_ack_precheck_failures=False, pre_stage_mode="none",
+    )
     base.update(over)
     return SimpleNamespace(**base)
 

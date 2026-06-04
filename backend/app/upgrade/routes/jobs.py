@@ -473,7 +473,12 @@ def abort_job(
     job = db.get(UpgradeJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.state in (JobState.COMPLETED, JobState.FAILED, JobState.ABORTED):
+    if job.state in (
+        JobState.COMPLETED,
+        JobState.COMPLETED_WITH_ERRORS,
+        JobState.FAILED,
+        JobState.ABORTED,
+    ):
         raise HTTPException(
             status_code=409,
             detail=f"job already terminal ({job.state.value})",
@@ -576,6 +581,7 @@ def _refuse_if_job_terminal(task: DeviceUpgradeTask, db: Session) -> None:
     job = db.get(UpgradeJob, task.job_id)
     if job is not None and job.state in (
         JobState.COMPLETED,
+        JobState.COMPLETED_WITH_ERRORS,
         JobState.FAILED,
         JobState.ABORTED,
     ):
@@ -831,10 +837,16 @@ def retry_task(
     failed_from = task.phase.value
     task.phase = TaskPhase.PENDING
     task.error = None
-    # Un-fail the job so drive_pair (which bails on terminal-job state) actually
-    # resumes. Clear the stale reason — a fresh failure sets a new one; the
-    # prior cause stays in the task timeline + worker logs.
-    if job is not None and job.state == JobState.FAILED:
+    # Un-terminal the job so drive_pair (which bails on terminal-job state)
+    # actually resumes. FAILED and COMPLETED_WITH_ERRORS are both retryable —
+    # retrying a failed device in a partially-failed job re-opens the job;
+    # _maybe_mark_job_done recomputes the terminal state when it finishes.
+    # Clear the stale reason — a fresh failure sets a new one; the prior cause
+    # stays in the task timeline + worker logs.
+    if job is not None and job.state in (
+        JobState.FAILED,
+        JobState.COMPLETED_WITH_ERRORS,
+    ):
         job.state = JobState.RUNNING
         job.failure_reason = None
         job.finished_at = None

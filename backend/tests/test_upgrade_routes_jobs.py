@@ -347,10 +347,11 @@ def test_get_unknown_job_404s(client):
 # ---------- /upgrade/jobs lifecycle ----------
 
 
-def test_fail_job_persists_first_reason_and_surfaces_via_api(client, db):
-    """_fail_job records WHY a job failed (first-write-wins) so the
-    JobDetail header can explain a bare FAILED state — including the
-    orchestrator-crash path where no task is marked FAILED."""
+def test_fail_job_records_first_reason_without_failing_whole_job(client, db):
+    """_fail_job records WHY a device failed (first-write-wins) so the JobDetail
+    header can explain it — but, with failure isolation, a single device's
+    failure does NOT flip the whole job to FAILED. The terminal job state is
+    computed by _maybe_mark_job_done once every device is terminal."""
     from app.upgrade.services.upgrade import _fail_job
 
     _signup(client)
@@ -362,17 +363,21 @@ def test_fail_job_persists_first_reason_and_surfaces_via_api(client, db):
     job_id = create.json()["id"]
     # Fresh job has no failure reason.
     assert create.json()["failure_reason"] is None
+    state_before = create.json()["state"]
 
-    # First failure sets the reason + flips state.
+    # First device failure records the reason; a later cascade must not
+    # overwrite the root cause.
     _fail_job(db, job_id, "driver crashed; see worker logs")
-    # A later cascade failure must NOT overwrite the root cause.
     _fail_job(db, job_id, "some downstream symptom")
 
     r = client.get(f"/upgrade/jobs/{job_id}")
     assert r.status_code == 200
     body = r.json()
-    assert body["state"] == JobState.FAILED.value
+    # Reason recorded (first-write-wins) and surfaced via the API…
     assert body["failure_reason"] == "driver crashed; see worker logs"
+    # …but the job itself is NOT failed by one device (isolation).
+    assert body["state"] == state_before
+    assert body["state"] != JobState.FAILED.value
 
 
 def test_start_job_transitions_pending_to_running(client, db):

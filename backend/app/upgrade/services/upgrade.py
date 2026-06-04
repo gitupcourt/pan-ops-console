@@ -189,7 +189,13 @@ def drive_pair(job_id: int, ha_pair_key: str) -> None:
         else:
             _drive_ha_pair(db, job, tasks)
 
-        # When the last pair finishes successfully, flip the job to COMPLETED.
+        # If any member of this pair failed, fail the whole pair atomically
+        # (you can't half-upgrade an HA pair) so the partner doesn't sit
+        # non-terminal forever and the job can reach a terminal state.
+        _fail_pair_if_partial(db, tasks)
+        # Recompute the job state. Only flips terminal once EVERY task across
+        # the job is terminal (COMPLETED / COMPLETED_WITH_ERRORS / FAILED) —
+        # other pairs in flight or parked keep it RUNNING.
         _maybe_mark_job_done(db, job_id)
     except Exception as exc:  # noqa: BLE001 — also catches SoftTimeLimitExceeded
         log.exception("drive_pair crashed for job=%s key=%s", job_id, ha_pair_key)
@@ -217,7 +223,11 @@ def drive_pair(job_id: int, ha_pair_key: str) -> None:
                     _record(db, t, msg, phase=TaskPhase.FAILED)
         except Exception:  # noqa: BLE001
             log.exception("post-crash task cleanup failed for job=%s", job_id)
+        # The loop above already failed this pair's in-flight tasks (atomic pair
+        # failure). Record the reason, then recompute the job state — OTHER
+        # pairs are unaffected and the job only goes terminal once they all are.
         _fail_job(db, job_id, msg[:500])
+        _maybe_mark_job_done(db, job_id)
     finally:
         db.close()
 
@@ -354,11 +364,7 @@ def _resolve_override_action(
         exits and the slot stays free until the operator acts.
     """
     job = db.get(UpgradeJob, task.job_id)
-    if job is None or job.state in (
-        JobState.ABORTED,
-        JobState.FAILED,
-        JobState.COMPLETED,
-    ):
+    if job is None or job.state in _TERMINAL_JOB_STATES:
         return _OverrideOutcome.ABORT
     db.refresh(task)
     tok = task.confirmation_token
@@ -2055,40 +2061,89 @@ def _warn_if_target_exceeds_panorama(
 
 
 def _fail_job(db: Session, job_id: int, reason: str) -> None:
+    """Record a DEVICE-level failure reason on the job — WITHOUT marking the
+    whole job FAILED.
+
+    Failure isolation: one device failing must not stop the others. The
+    per-device failure is already recorded on its task (via
+    ``_record(..., phase=FAILED)``); here we only keep the first such reason on
+    the job as a useful root-cause hint. The terminal JOB state is decided by
+    ``_maybe_mark_job_done`` once every task reaches DONE/FAILED:
+        all DONE -> COMPLETED; some of each -> COMPLETED_WITH_ERRORS;
+        all FAILED -> FAILED.
+
+    (The name is kept for its many call sites; it no longer fails the job.)
+    """
     job = db.get(UpgradeJob, job_id)
     if job is None:
         return
-    # First-write-wins on the reason: the first thing to fail a job is the
-    # root cause; later cascade failures (e.g. a second task tripping over
-    # the now-FAILED job) must not overwrite it. We set it even if the job
-    # is already terminal-without-a-reason, to cover a state flipped
-    # elsewhere. Without this the orchestrator-crash / timeout paths left
-    # the UI showing a bare "FAILED" with no explanation.
+    # First-write-wins: the first device failure is the most useful root cause
+    # to surface if the whole job ends up FAILED.
     if reason and not job.failure_reason:
         job.failure_reason = reason
-    if job.state not in (JobState.COMPLETED, JobState.FAILED, JobState.ABORTED):
-        job.state = JobState.FAILED
-        job.finished_at = datetime.now(timezone.utc)
-    db.commit()
+        db.commit()
+
+
+# Job states that mean "no more orchestrator work will run for this job".
+_TERMINAL_JOB_STATES = (
+    JobState.COMPLETED,
+    JobState.COMPLETED_WITH_ERRORS,
+    JobState.FAILED,
+    JobState.ABORTED,
+)
 
 
 def _job_terminal(db: Session, job: UpgradeJob) -> bool:
     db.refresh(job)
-    return job.state in (JobState.COMPLETED, JobState.FAILED, JobState.ABORTED)
+    return job.state in _TERMINAL_JOB_STATES
+
+
+def _fail_pair_if_partial(db: Session, tasks: list[DeviceUpgradeTask]) -> None:
+    """Fail an HA pair atomically: if any task in this pair/standalone ended
+    FAILED, fail the rest of the pair too (you can't half-upgrade an HA pair,
+    and a partner left at a non-terminal phase would keep the whole job RUNNING
+    forever). DONE tasks are left alone — they genuinely succeeded."""
+    if not any(t.phase == TaskPhase.FAILED for t in tasks):
+        return
+    for t in tasks:
+        if t.phase not in (TaskPhase.DONE, TaskPhase.FAILED):
+            _record(
+                db, t,
+                "Pair upgrade stopped because its HA partner failed.",
+                phase=TaskPhase.FAILED,
+            )
 
 
 def _maybe_mark_job_done(db: Session, job_id: int) -> None:
-    """Flip the job to COMPLETED iff every task is in a terminal phase and none failed."""
+    """Compute the terminal job state once EVERY task has reached a terminal
+    phase (DONE or FAILED). Until then the job stays RUNNING — a parked or
+    in-flight task keeps it open.
+
+    Failure isolation: a single FAILED task no longer fails the whole job.
+        all DONE                -> COMPLETED
+        mix of DONE and FAILED  -> COMPLETED_WITH_ERRORS
+        all FAILED              -> FAILED
+    """
     job = db.get(UpgradeJob, job_id)
-    if job is None or job.state in (JobState.FAILED, JobState.ABORTED, JobState.COMPLETED):
+    if job is None or job.state in _TERMINAL_JOB_STATES:
         return
     tasks = db.query(DeviceUpgradeTask).filter(DeviceUpgradeTask.job_id == job_id).all()
-    if any(t.phase == TaskPhase.FAILED for t in tasks):
-        job.state = JobState.FAILED
-        job.finished_at = datetime.now(timezone.utc)
-        db.commit()
-        return
-    if all(t.phase == TaskPhase.DONE for t in tasks):
+    terminal = (TaskPhase.DONE, TaskPhase.FAILED)
+    if not tasks or not all(t.phase in terminal for t in tasks):
+        return  # still in flight, or parked at a gate — leave the job RUNNING
+    failed = sum(1 for t in tasks if t.phase == TaskPhase.FAILED)
+    total = len(tasks)
+    job.finished_at = datetime.now(timezone.utc)
+    if failed == 0:
         job.state = JobState.COMPLETED
-        job.finished_at = datetime.now(timezone.utc)
-        db.commit()
+    elif failed == total:
+        job.state = JobState.FAILED
+        if not job.failure_reason:
+            job.failure_reason = f"All {total} device(s) failed."
+    else:
+        job.state = JobState.COMPLETED_WITH_ERRORS
+        job.failure_reason = (
+            f"{failed} of {total} device(s) failed; {total - failed} succeeded. "
+            "See each device's timeline for details."
+        )
+    db.commit()

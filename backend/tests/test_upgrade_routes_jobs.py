@@ -499,9 +499,9 @@ def test_task_confirm_requires_parked_phase(client, db):
 def test_task_confirm_signals_advance_when_parked(client, db):
     """When the task is parked at an AWAITING_*_CONFIRM phase, hitting
     /confirm sets a non-empty confirmation_token so the orchestrator's
-    `_wait_for_confirm` poll loop picks it up on the next tick and
-    proceeds. No request body required — auth via session cookie is
-    the access-control gate.
+    non-blocking `_confirm_gate` consumes it on the re-dispatched
+    drive_pair and proceeds. No request body required — auth via
+    session cookie is the access-control gate.
     """
     _signup(client)
     dev = _seed_standalone(db, name="fw1")
@@ -594,8 +594,8 @@ def test_task_override_records_audit_entry(client, db):
 
 def test_task_rerun_check_sets_rerun_token_and_audits(client, db):
     """Re-run check sets a RERUN_-prefixed token (so the orchestrator's
-    _wait_for_override routes to its RERUN branch) AND records the
-    operator on the activity log."""
+    override resume `_resolve_override_action` routes to its RERUN
+    branch) AND records the operator on the activity log."""
     _signup(client)
     dev = _seed_standalone(db, name="fw1")
     create = client.post("/upgrade/jobs", json={

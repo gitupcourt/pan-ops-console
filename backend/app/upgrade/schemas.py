@@ -204,6 +204,10 @@ class JobCreate(BaseModel):
     auto_failback: bool = False
     auto_reboot_after_install: bool = False
 
+    # "none" (full upgrade — default) or "stage_only" (run precheck + image
+    # download + pre-snapshot, then STOP before install). Validator enforces.
+    pre_stage_mode: str = "none"
+
     # Pre-acknowledge ALL precheck/postcheck FAIL severities — used when
     # the operator has reviewed acceptable failures up front and wants a
     # fully automated run. Bypasses a human safety gate; off by default.
@@ -254,6 +258,17 @@ class JobCreate(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_pre_stage_mode(self) -> "JobCreate":
+        # "none" = full upgrade; "stage_only" = stop before install;
+        # "hold" = pause at an install gate, resume via "Proceed to install".
+        allowed = {"none", "stage_only", "hold"}
+        if self.pre_stage_mode not in allowed:
+            raise ValueError(
+                f"pre_stage_mode must be one of {sorted(allowed)}"
+            )
+        return self
+
 
 class JobRead(BaseModel):
     """List view of an UpgradeJob — no tasks embedded."""
@@ -290,6 +305,7 @@ class JobDetail(JobRead):
     require_primary_upgrade_confirmation: bool
     auto_failback: bool
     auto_reboot_after_install: bool
+    pre_stage_mode: str
     auto_ack_precheck_failures: bool
     auto_ack_postcheck_failures: bool
 

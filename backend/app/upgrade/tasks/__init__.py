@@ -50,7 +50,29 @@ from app.workers.celery_app import celery
 log = logging.getLogger(__name__)
 
 
-@celery.task(name="upgrade.drive_pair", bind=True)
+# A single drive_pair invocation runs until it parks at a confirm/override gate
+# or completes. With auto-reboot + auto-ack (no parks) one invocation can
+# legitimately run the whole pair upgrade — two reboot waits (REBOOT_TIMEOUT_S
+# each), an image download, snapshots, and checks — so the ceiling is generous.
+# But it MUST be finite: a device op that hangs without honoring its read
+# timeout (e.g. a Panorama proxy holding the connection open) would otherwise
+# wedge a worker slot forever and stall every other pair in the job, since the
+# upgrade pool is small (concurrency 2). At the SOFT limit Celery raises
+# SoftTimeLimitExceeded inside drive_pair; its except-handler turns that into a
+# FAILED + retryable task (slot freed, Retry resumes from the last completed
+# marker — no rework). The HARD limit SIGKILLs the child as a last resort if
+# the graceful path itself wedges. A rare false-positive on a genuinely slow
+# upgrade just needs one Retry click, so erring generous is cheap.
+UPGRADE_TASK_SOFT_TIME_LIMIT_S = 150 * 60  # 2.5 h graceful ceiling
+UPGRADE_TASK_HARD_TIME_LIMIT_S = 155 * 60  # +5 m hard backstop
+
+
+@celery.task(
+    name="upgrade.drive_pair",
+    bind=True,
+    soft_time_limit=UPGRADE_TASK_SOFT_TIME_LIMIT_S,
+    time_limit=UPGRADE_TASK_HARD_TIME_LIMIT_S,
+)
 def drive_pair_task(self, job_id: int, ha_pair_key: str) -> dict:
     """Drive one HA pair (or standalone device) until the next park or done.
 
@@ -61,11 +83,12 @@ def drive_pair_task(self, job_id: int, ha_pair_key: str) -> dict:
 
     Always returns successfully even when the orchestrator parks; the
     return dict is just observability. A genuine crash inside the
-    orchestrator is caught and converted to `_fail_job` (see the
-    `drive_pair` implementation), which writes JobState.FAILED + the
-    reason. Letting the celery task itself fail would queue a retry,
-    which is the wrong semantics for upgrade orchestration — failures
-    here need explicit operator action (Retry button), not automatic.
+    orchestrator is caught in the `drive_pair` implementation, which fails
+    THIS pair's tasks (not the whole job — failure isolation) and recomputes
+    the job's terminal state (COMPLETED / COMPLETED_WITH_ERRORS / FAILED).
+    Letting the celery task itself fail would queue a retry, which is the wrong
+    semantics for upgrade orchestration — failures here need explicit operator
+    action (Retry button), not automatic.
     """
     from app.upgrade.services.upgrade import drive_pair
 

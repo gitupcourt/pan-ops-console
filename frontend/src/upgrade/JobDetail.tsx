@@ -12,6 +12,7 @@ import {
   UpgradeJobDetail,
   UpgradeTask,
 } from "../api";
+import { DiskCleanupModal } from "../core/devices/DiskCleanupModal";
 import { ErrorBoundary } from "../core/ui/ErrorBoundary";
 import { Button, Card, CardHeader } from "../core/ui/ui";
 import { JobStateBadge } from "./UpgradeJobs";
@@ -40,7 +41,9 @@ export default function JobDetail() {
     refetchInterval: (q) => {
       const state = q.state.data?.state;
       if (!state) return 5000;
-      return ["completed", "failed", "aborted"].includes(state)
+      return ["completed", "completed_with_errors", "failed", "aborted"].includes(
+        state,
+      )
         ? false
         : 3000;
     },
@@ -79,16 +82,34 @@ export default function JobDetail() {
           description={`Target ${job.target_version} · ${job.workflow} workflow · ${job.task_count} device(s)`}
           action={<JobLifecycleActions job={job} />}
         />
-        {job.state === "failed" && job.failure_reason && (
-          <div className="mx-4 mt-1 mb-2 px-3 py-2 rounded bg-rose-950/40 border border-rose-900/50 text-rose-200 text-xs">
-            <span className="font-semibold">Job failed:</span>{" "}
-            {job.failure_reason}
-            <div className="text-[11px] text-rose-300/70 mt-1">
-              Expand the affected device row below for the per-phase
-              activity log, or check the worker logs for a full traceback.
+        {(job.state === "failed" || job.state === "completed_with_errors") &&
+          job.failure_reason && (
+            <div
+              className={`mx-4 mt-1 mb-2 px-3 py-2 rounded border text-xs ${
+                job.state === "failed"
+                  ? "bg-rose-950/40 border-rose-900/50 text-rose-200"
+                  : "bg-orange-950/40 border-orange-900/50 text-orange-200"
+              }`}
+            >
+              <span className="font-semibold">
+                {job.state === "failed"
+                  ? "Job failed:"
+                  : "Completed with errors:"}
+              </span>{" "}
+              {job.failure_reason}
+              <div
+                className={`text-[11px] mt-1 ${
+                  job.state === "failed"
+                    ? "text-rose-300/70"
+                    : "text-orange-300/70"
+                }`}
+              >
+                Expand each failed device row below for its per-phase activity
+                log; the devices that succeeded are marked done. Retry a failed
+                device after fixing the cause.
+              </div>
             </div>
-          </div>
-        )}
+          )}
         <JobConfigSummary job={job} />
       </Card>
 
@@ -159,7 +180,9 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
           <BusyLabel busy={abortM.isPending} busyLabel="Aborting…" idleLabel="Abort" />
         </Button>
       )}
-      {["pending", "completed", "failed", "aborted"].includes(job.state) && (
+      {["pending", "completed", "completed_with_errors", "failed", "aborted"].includes(
+        job.state,
+      ) && (
         <Button
           variant="danger"
           onClick={() => {
@@ -235,6 +258,14 @@ function JobConfigSummary({ job }: { job: UpgradeJobDetail }) {
   // operator can verify what they signed up for without re-opening
   // the create form.
   const rows: [string, string][] = [
+    [
+      "Mode",
+      job.pre_stage_mode === "stage_only"
+        ? "Stage only — precheck + download + snapshot, no install"
+        : job.pre_stage_mode === "hold"
+          ? "Stage & hold — pauses before install (Proceed to install to continue)"
+          : "Full upgrade",
+    ],
     [
       "Image source",
       job.device_pull_image
@@ -369,8 +400,17 @@ function TaskRow({
           </button>
         </td>
         <td className="px-4 py-2 text-zinc-100">{t.device_name}</td>
-        <td className="px-4 py-2 text-zinc-500 text-xs font-mono">
-          {isPaired ? pairKey : "—"}
+        <td className="px-4 py-2 text-zinc-500 text-xs">
+          {isPaired ? (
+            <span
+              title={`Grouping key: ${pairKey}`}
+              className="rounded border border-blue-800/50 bg-blue-950/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-blue-300"
+            >
+              HA pair
+            </span>
+          ) : (
+            "—"
+          )}
         </td>
         <td className="px-4 py-2">
           <div className="flex items-center gap-1.5 flex-wrap">
@@ -438,7 +478,13 @@ function TaskExpandedDetail({ task: t }: { task: UpgradeTask }) {
         </div>
       )}
 
-      {t.precheck && <PrecheckResultsTable precheck={t.precheck} />}
+      {t.precheck && (
+        <PrecheckResultsTable
+          precheck={t.precheck}
+          deviceId={t.device_id}
+          deviceName={t.device_name}
+        />
+      )}
 
       <SnapshotsSection task={t} />
 
@@ -532,6 +578,16 @@ function CurrentPhaseExplainer({
       </div>
     );
   }
+  if (phase === "awaiting_install_confirm") {
+    return (
+      <div className="px-2 py-1.5 rounded bg-blue-950/40 border border-blue-900/40 text-blue-200">
+        <strong>Staged — waiting on you.</strong> Precheck, image download, and
+        the pre-snapshot are done; nothing has been installed. Click{" "}
+        <em>Proceed to install</em> when you&apos;re ready to continue this job
+        through install &amp; reboot.
+      </div>
+    );
+  }
   if (PARKED_CONFIRM.includes(phase)) {
     const desc =
       phase === "awaiting_reboot_confirm"
@@ -559,8 +615,8 @@ function CurrentPhaseExplainer({
   if (phase === "pending") {
     return (
       <div className="text-zinc-400">
-        Pending. The orchestrator hasn't started this task yet — typically
-        means an HA pair peer is being upgraded first.
+        Pending — not started yet. Upgrades run a few at a time; this task is
+        queued behind others. (For an HA pair, the peer member upgrades first.)
       </div>
     );
   }
@@ -593,7 +649,22 @@ function CurrentPhaseExplainer({
   return null;
 }
 
-function PrecheckResultsTable({ precheck }: { precheck: PrecheckSummary }) {
+function PrecheckResultsTable({
+  precheck,
+  deviceId,
+  deviceName,
+}: {
+  precheck: PrecheckSummary;
+  deviceId: number;
+  deviceName: string;
+}) {
+  const [cleanup, setCleanup] = useState(false);
+  // A failing/warning disk-space check is the cue to offer cleanup inline.
+  const diskCheck = precheck.checks.find(
+    (c) =>
+      c.name.toLowerCase().includes("disk") &&
+      String(c.severity).toLowerCase() !== "pass",
+  );
   return (
     <div>
       <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-3">
@@ -607,6 +678,21 @@ function PrecheckResultsTable({ precheck }: { precheck: PrecheckSummary }) {
           <PrecheckCount label="skip" n={precheck.skip_count} tone="zinc" />
         </span>
       </div>
+      {diskCheck && (
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded border border-amber-800/40 bg-amber-950/20 px-2 py-1 text-[11px]">
+          <span className="text-amber-200">
+            Low disk space flagged
+            {diskCheck.reason ? ` — ${diskCheck.reason}` : ""}.
+          </span>
+          <button
+            type="button"
+            onClick={() => setCleanup(true)}
+            className="text-blue-400 underline hover:text-blue-300"
+          >
+            Free up disk space
+          </button>
+        </div>
+      )}
       {precheck.error ? (
         <div className="p-2 rounded bg-rose-950/40 border border-rose-900/40 text-rose-300 text-[11px]">
           Check runner errored before evaluating any check:{" "}
@@ -635,6 +721,13 @@ function PrecheckResultsTable({ precheck }: { precheck: PrecheckSummary }) {
             ))}
           </tbody>
         </table>
+      )}
+      {cleanup && (
+        <DiskCleanupModal
+          deviceId={deviceId}
+          deviceName={deviceName}
+          onClose={() => setCleanup(false)}
+        />
       )}
     </div>
   );
@@ -733,6 +826,7 @@ function fmtTime(iso: string): string {
 }
 
 const PARKED_CONFIRM: TaskPhase[] = [
+  "awaiting_install_confirm",
   "awaiting_reboot_confirm",
   "awaiting_failover_confirm",
   "awaiting_primary_upgrade_confirm",
@@ -742,7 +836,12 @@ const PARKED_OVERRIDE: TaskPhase[] = [
   "awaiting_postcheck_override",
 ];
 
-const TERMINAL_JOB_STATES: JobState[] = ["completed", "failed", "aborted"];
+const TERMINAL_JOB_STATES: JobState[] = [
+  "completed",
+  "completed_with_errors",
+  "failed",
+  "aborted",
+];
 
 function TaskActionButtons({
   task,
@@ -783,9 +882,10 @@ function TaskActionButtons({
     onSuccess: invalidate,
   });
 
-  // A FAILED task is retryable even on a FAILED job: retry resumes from the
-  // last completed marker AND un-fails the job server-side (the recovery path
-  // after a driver crash or phase failure). COMPLETED / ABORTED stay terminal.
+  // A FAILED task is retryable even on a FAILED or COMPLETED_WITH_ERRORS job:
+  // retry resumes from the last completed marker AND un-terminals the job
+  // server-side (the recovery path after a driver crash, phase failure, or a
+  // partial-failure run). COMPLETED / ABORTED stay terminal.
   if (
     task.phase === "failed" &&
     jobState !== "completed" &&
@@ -822,6 +922,12 @@ function TaskActionButtons({
   }
 
   if (PARKED_CONFIRM.includes(task.phase)) {
+    const idleLabel =
+      task.phase === "awaiting_install_confirm"
+        ? "Proceed to install"
+        : task.phase === "awaiting_reboot_confirm"
+          ? "Reboot now"
+          : "Confirm";
     return (
       <Button
         variant="primary"
@@ -830,8 +936,8 @@ function TaskActionButtons({
       >
         <BusyLabel
           busy={confirmM.isPending}
-          busyLabel="Confirming…"
-          idleLabel="Confirm"
+          busyLabel="Working…"
+          idleLabel={idleLabel}
         />
       </Button>
     );

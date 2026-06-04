@@ -192,6 +192,7 @@ export type JobState =
   | "running"
   | "awaiting_confirmation"
   | "completed"
+  | "completed_with_errors"
   | "failed"
   | "aborted";
 
@@ -201,6 +202,7 @@ export type TaskPhase =
   | "awaiting_precheck_override"
   | "snapshot"
   | "downloading_image"
+  | "awaiting_install_confirm"
   | "suspend_secondary"
   | "upgrade_secondary"
   | "awaiting_reboot_confirm"
@@ -347,6 +349,7 @@ export type UpgradeJobDetail = UpgradeJob & {
   require_primary_upgrade_confirmation: boolean;
   auto_failback: boolean;
   auto_reboot_after_install: boolean;
+  pre_stage_mode: string; // "none" | "stage_only"
   auto_ack_precheck_failures: boolean;
   auto_ack_postcheck_failures: boolean;
   tasks: UpgradeTask[];
@@ -380,6 +383,43 @@ export type AvailableSoftwareBulkOut = {
   results: Record<number, AvailableSoftwareOut>;
 };
 
+// ---------- Disk-space cleanup ----------
+
+export type DiskSpaceRow = {
+  filesystem: string;
+  size: string;
+  used: string;
+  avail: string;
+  use_pct: string;
+  mounted_on: string;
+};
+
+export type DiskCleanupDeletableImage = {
+  version: string;
+  size_kb: string | null;
+  release_type: string; // "Base" for the largest old-train images
+};
+
+export type DiskCleanupPlan = {
+  device_id: number;
+  device_name: string;
+  current_version: string | null;
+  disk_space: DiskSpaceRow[];
+  // Downloaded images outside the current feature train — the only things
+  // cleanup will delete. Empty when nothing's reclaimable / the train is
+  // unparseable.
+  deletable_images: DiskCleanupDeletableImage[];
+};
+
+export type DiskCleanupResult = {
+  device_id: number;
+  device_name: string;
+  deleted: string[];
+  failed: { version: string; error: string }[];
+  disk_space_before: DiskSpaceRow[];
+  disk_space_after: DiskSpaceRow[];
+};
+
 export type UpgradeJobCreate = {
   name: string;
   target_version: string;
@@ -392,6 +432,7 @@ export type UpgradeJobCreate = {
   require_primary_upgrade_confirmation?: boolean;
   auto_failback?: boolean;
   auto_reboot_after_install?: boolean;
+  pre_stage_mode?: string; // "none" (default) | "stage_only"
   auto_ack_precheck_failures?: boolean;
   auto_ack_postcheck_failures?: boolean;
   precheck_set_id?: number | null;
@@ -519,6 +560,7 @@ export type JobsSummary = {
   running: number;
   awaiting_confirmation: number;
   completed: number;
+  completed_with_errors: number;
   failed: number;
   aborted: number;
 };
@@ -757,12 +799,28 @@ export const api = {
   // version picker. The bulk endpoint is the hot path; the single
   // endpoint is here for any future "show available versions for
   // device X" affordance (e.g. an Inventory row action).
-  getDeviceSoftware: (deviceId: number) =>
-    j<AvailableSoftwareOut>(`/upgrade/devices/${deviceId}/software`),
-  getDeviceSoftwareBulk: (deviceIds: number[]) =>
+  // `refresh` false (default) returns each device's cached catalog (fast);
+  // true makes the device re-check updates.paloaltonetworks.com first (slow) —
+  // used by the picker's explicit "check update server" action.
+  getDeviceSoftware: (deviceId: number, refresh = false) =>
+    j<AvailableSoftwareOut>(
+      `/upgrade/devices/${deviceId}/software${refresh ? "?refresh=true" : ""}`,
+    ),
+  getDeviceSoftwareBulk: (deviceIds: number[], refresh = false) =>
     j<AvailableSoftwareBulkOut>(`/upgrade/devices/software/bulk`, {
       method: "POST",
-      body: JSON.stringify({ device_ids: deviceIds }),
+      body: JSON.stringify({ device_ids: deviceIds, refresh }),
+    }),
+
+  // Disk-space cleanup. The plan is a pure-read dry run; runDiskCleanup is
+  // destructive (deletes downloaded images older than the running version) and
+  // is re-validated server-side against the safe set.
+  getDiskCleanupPlan: (deviceId: number) =>
+    j<DiskCleanupPlan>(`/upgrade/devices/${deviceId}/disk-cleanup/plan`),
+  runDiskCleanup: (deviceId: number, versions: string[]) =>
+    j<DiskCleanupResult>(`/upgrade/devices/${deviceId}/disk-cleanup`, {
+      method: "POST",
+      body: JSON.stringify({ versions }),
     }),
 
   // Upgrade: tasks (within a job)

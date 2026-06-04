@@ -188,12 +188,15 @@ function UpgradesContent({
   // upgrade orchestrator — count it as Active so it doesn't disappear
   // visually while the operator is mid-flow.
   const active = summary.pending + summary.running + summary.awaiting_confirmation;
+  // Partial failures (completed_with_errors) also need an operator's eyes, so
+  // they roll into the needs-attention tile alongside outright failures.
+  const needsAttention = summary.failed + summary.completed_with_errors;
   const tiles: { label: string; value: number; tone: Tone }[] = [
     { label: "Active", value: active, tone: active > 0 ? "info" : "muted" },
     {
       label: "Failed",
-      value: summary.failed,
-      tone: summary.failed > 0 ? "danger" : "muted",
+      value: needsAttention,
+      tone: needsAttention > 0 ? "danger" : "muted",
     },
     {
       label: "Completed",

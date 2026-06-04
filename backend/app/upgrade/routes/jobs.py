@@ -117,28 +117,26 @@ def _job_to_read(job: UpgradeJob, task_count: int) -> JobRead:
 def _task_to_read(task: DeviceUpgradeTask) -> TaskRead:
     from app.upgrade.models.precheck import PrecheckRun  # local — avoid cycle
 
-    # Find the latest PrecheckRun for this task's device. We pick by
-    # ran_at desc; with realistic job sizes (~5-20 tasks) this is one
-    # cheap indexed query per task per render. If JobDetail starts
-    # showing more than a few jobs at once we can batch this with a
-    # single grouped query.
+    progress = task.progress or {}
+
+    # Show the pre/post-check run THIS task actually produced — scoped via the
+    # run ids the orchestrator stashes on the task (postcheck preferred, then
+    # precheck). The old behavior picked the device's globally-latest run by
+    # device_id, which surfaced a PREVIOUS job's errored precheck on a brand-
+    # new PENDING task (e.g. yesterday's job #4 "Panorama unreachable" showing
+    # on today's job). A task that hasn't run its own check yet shows nothing.
     db = object_session(task)
     precheck_payload = None
-    if db is not None:
-        latest = (
-            db.query(PrecheckRun)
-            .filter(PrecheckRun.device_id == task.device_id)
-            .order_by(PrecheckRun.ran_at.desc())
-            .first()
-        )
-        if latest is not None:
-            precheck_payload = _precheck_to_summary(latest)
+    run_id = progress.get("postcheck_run_id") or progress.get("precheck_run_id")
+    if db is not None and run_id is not None:
+        run = db.get(PrecheckRun, run_id)
+        if run is not None:
+            precheck_payload = _precheck_to_summary(run)
 
     # Snapshot IDs are stashed in progress by the orchestrator
     # (_phase_snapshot / _phase_post_snapshot_and_diff). Lift them to
     # top-level fields on TaskRead so the UI doesn't have to scrape
     # progress to know what's clickable.
-    progress = task.progress or {}
     failing_areas_raw = progress.get("snapshot_diff_failing_areas")
     if isinstance(failing_areas_raw, str):
         failing_areas = [a.strip() for a in failing_areas_raw.split(",") if a.strip()]
@@ -228,6 +226,7 @@ def _job_to_detail(job: UpgradeJob) -> JobDetail:
             ),
             "auto_failback": job.auto_failback,
             "auto_reboot_after_install": job.auto_reboot_after_install,
+            "pre_stage_mode": job.pre_stage_mode,
             "auto_ack_precheck_failures": job.auto_ack_precheck_failures,
             "auto_ack_postcheck_failures": job.auto_ack_postcheck_failures,
             "tasks": [_task_to_read(t) for t in job.tasks],
@@ -371,6 +370,7 @@ def create_job(
         ),
         auto_failback=payload.auto_failback,
         auto_reboot_after_install=payload.auto_reboot_after_install,
+        pre_stage_mode=payload.pre_stage_mode,
         auto_ack_precheck_failures=payload.auto_ack_precheck_failures,
         auto_ack_postcheck_failures=payload.auto_ack_postcheck_failures,
         precheck_set_id=payload.precheck_set_id,
@@ -473,7 +473,12 @@ def abort_job(
     job = db.get(UpgradeJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
-    if job.state in (JobState.COMPLETED, JobState.FAILED, JobState.ABORTED):
+    if job.state in (
+        JobState.COMPLETED,
+        JobState.COMPLETED_WITH_ERRORS,
+        JobState.FAILED,
+        JobState.ABORTED,
+    ):
         raise HTTPException(
             status_code=409,
             detail=f"job already terminal ({job.state.value})",
@@ -518,6 +523,7 @@ def delete_job(job_id: int, db: Session = Depends(get_db)):
 # the URL prefix makes the intent unambiguous.
 
 _AWAITING_CONFIRM = {
+    TaskPhase.AWAITING_INSTALL_CONFIRM,
     TaskPhase.AWAITING_REBOOT_CONFIRM,
     TaskPhase.AWAITING_FAILOVER_CONFIRM,
     TaskPhase.AWAITING_PRIMARY_UPGRADE_CONFIRM,
@@ -575,6 +581,7 @@ def _refuse_if_job_terminal(task: DeviceUpgradeTask, db: Session) -> None:
     job = db.get(UpgradeJob, task.job_id)
     if job is not None and job.state in (
         JobState.COMPLETED,
+        JobState.COMPLETED_WITH_ERRORS,
         JobState.FAILED,
         JobState.ABORTED,
     ):
@@ -590,24 +597,19 @@ def _refuse_if_job_terminal(task: DeviceUpgradeTask, db: Session) -> None:
 def _signal_task_advance(
     task: DeviceUpgradeTask, *, valid_phases: set
 ) -> None:
-    """Tell the orchestrator's poll loop the operator wants to advance.
+    """Tell the orchestrator the operator wants to advance past a gate.
 
-    The orchestrator's `_wait_for_confirm` / `_wait_for_override` loops
-    poll `task.confirmation_token` waiting for it to BECOME truthy.
-    When set, they clear it and return True to proceed. So the
-    operator-facing endpoints just need to SET the token to any
-    truthy sentinel; the orchestrator's next tick picks it up.
+    The non-blocking confirm/override gates park the task at an
+    AWAITING_* phase and RETURN (freeing the worker slot). The
+    operator-facing endpoints set `task.confirmation_token` to a
+    truthy sentinel and then re-dispatch drive_pair; on re-entry the
+    gate consumes the token and proceeds. So this helper just needs to
+    SET the token — the caller does the re-dispatch.
 
-    Earlier code in this module tried to validate a server-issued
-    token here (i.e. "expect token == previously-stored value"), but
-    the orchestrator never issued one — _wait_for_override sets the
-    phase and immediately polls. That mismatch meant every override
-    POST 409'd with "no pending confirmation token," AND the
-    frontend's button was disabled on the same empty field. Two-way
-    deadlock. Fixed by making the route issue the signal rather than
-    validate it; route-level auth via `current_user` is the real
-    access-control gate (token-validation here was defense-in-depth
-    that never actually worked given the empty-token state).
+    Route-level auth via `current_user` is the real access-control
+    gate. An earlier attempt to also validate a server-issued token
+    here deadlocked (the orchestrator never issued one), so the route
+    issues the signal rather than validating it.
 
     Raises 409 if the task isn't parked at a phase that accepts this
     operation.
@@ -652,11 +654,11 @@ def confirm_task(
     confirmation gate.
 
     The orchestrator parks at AWAITING_*_CONFIRM phases when the job
-    has the corresponding `require_*` flag set. Operator clicks
-    "Confirm" in the UI; we set `task.confirmation_token` to a
-    sentinel so the orchestrator's polling `_wait_for_confirm` loop
-    sees it on the next tick, clears it, and proceeds. Route-level
-    auth gates access; no body required.
+    has the corresponding `require_*` flag set (or for the install
+    hold). Operator clicks "Confirm" in the UI; we set
+    `task.confirmation_token` to a sentinel and re-dispatch drive_pair,
+    whose non-blocking `_confirm_gate` consumes the token on re-entry
+    and proceeds. Route-level auth gates access; no body required.
     """
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
@@ -758,9 +760,9 @@ def rerun_task_check(
     blindly.
 
     Implementation: set `task.confirmation_token` to a sentinel that
-    starts with RERUN_ — `_wait_for_override` in the orchestrator
-    recognizes it and returns its RERUN outcome to the phase
-    function, which loops back and re-executes the check.
+    starts with RERUN_ and re-dispatch drive_pair — the orchestrator's
+    override resume (`_resolve_override_action`) recognizes the prefix
+    and re-executes the check instead of advancing past it.
     """
     task = db.get(DeviceUpgradeTask, task_id)
     if task is None:
@@ -775,9 +777,9 @@ def rerun_task_check(
                 f"{sorted(p.value for p in _AWAITING_OVERRIDE)}"
             ),
         )
-    # RERUN_ prefix is the protocol with _wait_for_override —
-    # any token starting with this string triggers a rerun; everything
-    # else falls through to PROCEED.
+    # RERUN_ prefix is the protocol with _resolve_override_action — any token
+    # starting with this string triggers a rerun; everything else falls through
+    # to PROCEED.
     task.confirmation_token = f"RERUN_{secrets.token_hex(8)}"
     _audit_log(
         task,
@@ -835,10 +837,16 @@ def retry_task(
     failed_from = task.phase.value
     task.phase = TaskPhase.PENDING
     task.error = None
-    # Un-fail the job so drive_pair (which bails on terminal-job state) actually
-    # resumes. Clear the stale reason — a fresh failure sets a new one; the
-    # prior cause stays in the task timeline + worker logs.
-    if job is not None and job.state == JobState.FAILED:
+    # Un-terminal the job so drive_pair (which bails on terminal-job state)
+    # actually resumes. FAILED and COMPLETED_WITH_ERRORS are both retryable —
+    # retrying a failed device in a partially-failed job re-opens the job;
+    # _maybe_mark_job_done recomputes the terminal state when it finishes.
+    # Clear the stale reason — a fresh failure sets a new one; the prior cause
+    # stays in the task timeline + worker logs.
+    if job is not None and job.state in (
+        JobState.FAILED,
+        JobState.COMPLETED_WITH_ERRORS,
+    ):
         job.state = JobState.RUNNING
         job.failure_reason = None
         job.finished_at = None

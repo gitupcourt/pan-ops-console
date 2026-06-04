@@ -70,6 +70,18 @@ class UpgradeJob(Base):
         Boolean, default=False, nullable=False
     )
 
+    # Pre-stage mode:
+    #   "none"       — full upgrade (default).
+    #   "stage_only" — run precheck + image download + pre-snapshot, then STOP
+    #                  before install/reboot. For pre-staging a fleet ahead of
+    #                  a maintenance window (the image download is the slow part;
+    #                  caching it makes the later real upgrade fast).
+    # A plain string (not a DB enum) so adding modes later (e.g. "hold") is a
+    # no-op migration, not an ALTER TYPE.
+    pre_stage_mode: Mapped[str] = mapped_column(
+        String(16), default="none", server_default="none", nullable=False
+    )
+
     # Pre-acknowledged overrides for the pre-check and post-check gates.
     # When True, a FAIL-severity result skips the AWAITING_*_OVERRIDE
     # park step and the orchestrator proceeds as if the operator had

@@ -54,9 +54,10 @@ REBOOT_POLL_S = 30
 INSTALL_JOB_TIMEOUT_S = 30 * 60
 INSTALL_JOB_POLL_S = 20
 
-# How long to park at a confirmation gate before giving up.
-CONFIRM_TIMEOUT_S = 24 * 60 * 60
-CONFIRM_POLL_S = 5
+# Confirmation gates (reboot / failover / primary-upgrade / install-hold) are
+# NON-BLOCKING: they park the task and return, freeing the worker slot, then
+# resume on the /confirm route's re-dispatch. There is therefore no in-worker
+# poll loop or timeout to tune — a pause can last as long as the operator needs.
 
 # How long after a failover to wait for HA states to settle.
 FAILOVER_SETTLE_S = 60
@@ -238,35 +239,98 @@ def _pre_stage_hold_gate(db: Session, job: UpgradeJob, gate_task: DeviceUpgradeT
     """Stage-and-hold gate (``pre_stage_mode == "hold"``), at the same point as
     the stage-only gate — after precheck + image + pre-snapshot, before install.
 
-    NON-BLOCKING, unlike the reboot/failover ``_wait_for_confirm`` gates: it
-    parks the task at AWAITING_INSTALL_CONFIRM and RETURNS so drive_pair exits,
-    freeing the worker slot (and not counting against the task time limit) while
-    the operator decides — so a hold can last hours/days. The /confirm route
-    re-dispatches drive_pair on "Proceed to install"; on re-entry the token is
-    consumed and an ``install_confirmed`` marker advances past the gate (and
-    keeps it advanced on any later re-dispatch).
+    Thin wrapper over the shared non-blocking ``_confirm_gate``: only active when
+    the job opted into hold mode.
 
     Returns True to proceed to install, False to STOP this invocation (parked —
     drive_pair returns cleanly; NOT a failure).
     """
     if (job.pre_stage_mode or "none") != "hold":
         return True
-    if _phase_already_done(gate_task, "install_confirmed"):
-        return True
-    db.refresh(gate_task)
-    if gate_task.confirmation_token:
-        gate_task.confirmation_token = None
-        db.commit()
-        _mark_phase_done(db, gate_task, "install_confirmed")
-        _record(db, gate_task, "Proceed-to-install confirmed; installing now.")
-        return True
-    _record(
+    return _confirm_gate(
         db, gate_task,
-        "Staged — precheck, image download, and pre-snapshot complete. Paused "
-        "before install; click 'Proceed to install' when ready.",
-        phase=TaskPhase.AWAITING_INSTALL_CONFIRM,
+        TaskPhase.AWAITING_INSTALL_CONFIRM,
+        "install_confirmed",
+        parked_msg=(
+            "Staged — precheck, image download, and pre-snapshot complete. Paused "
+            "before install; click 'Proceed to install' when ready."
+        ),
+        proceed_msg="Proceed-to-install confirmed; installing now.",
     )
+
+
+def _confirm_gate(
+    db: Session,
+    task: DeviceUpgradeTask,
+    parking_phase: TaskPhase,
+    marker: str,
+    *,
+    parked_msg: str,
+    proceed_msg: str,
+) -> bool:
+    """Non-blocking operator-confirmation gate — the shared primitive behind the
+    reboot / failover / primary-upgrade / install-hold pauses.
+
+    Replaces the old blocking ``_wait_for_confirm`` poll loop. Instead of
+    sleeping in the worker (which held a concurrency slot for the *entire* wait
+    and was capped by the task time limit — a single parked pair could starve
+    every other pair in the job), this parks ``task`` at ``parking_phase`` and
+    RETURNS False so ``drive_pair`` exits and frees the slot. The /confirm route
+    sets ``confirmation_token`` and re-dispatches ``drive_pair``; on re-entry the
+    token is consumed, ``marker`` is recorded (so a later re-dispatch never
+    re-parks here), and we return True to proceed. A pause can now last
+    hours/days without tying up a worker.
+
+    Returns True to proceed past the gate, False to STOP this invocation
+    (parked — drive_pair returns cleanly; this is NOT a failure).
+    """
+    if _phase_already_done(task, marker):
+        return True
+    db.refresh(task)
+    if task.confirmation_token:
+        task.confirmation_token = None
+        db.commit()
+        _mark_phase_done(db, task, marker)
+        _record(db, task, proceed_msg)
+        return True
+    _record(db, task, parked_msg, phase=parking_phase)
     return False
+
+
+def _resolve_override_action(
+    db: Session, task: DeviceUpgradeTask
+) -> "_OverrideOutcome | None":
+    """Inspect ``confirmation_token`` at a NON-BLOCKING override gate.
+
+    Called at the top of ``_phase_precheck`` / ``_phase_postcheck`` when the task
+    is re-entered while parked at AWAITING_*_OVERRIDE (the /override or
+    /rerun-check route set a token and re-dispatched drive_pair). Returns:
+
+      - PROCEED: operator clicked "Override + proceed" — token consumed; the
+        caller marks the check done and advances.
+      - RERUN:   operator clicked "Re-run check" — token consumed; the caller
+        re-executes the check fresh.
+      - ABORT:   the job is terminal (operator aborted, or another task failed
+        it) — the caller bails.
+      - None:    no token yet — still parked; the caller returns so drive_pair
+        exits and the slot stays free until the operator acts.
+    """
+    job = db.get(UpgradeJob, task.job_id)
+    if job is None or job.state in (
+        JobState.ABORTED,
+        JobState.FAILED,
+        JobState.COMPLETED,
+    ):
+        return _OverrideOutcome.ABORT
+    db.refresh(task)
+    tok = task.confirmation_token
+    if not tok:
+        return None
+    task.confirmation_token = None
+    db.commit()
+    if tok.startswith(_RERUN_TOKEN_PREFIX):
+        return _OverrideOutcome.RERUN
+    return _OverrideOutcome.PROCEED
 
 
 # ---------- standalone flow ----------
@@ -371,14 +435,25 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     _set_phase(db, passive, TaskPhase.UPGRADE_SECONDARY)
     if not _phase_install_and_wait(db, job, passive, passive.device, started_phase=TaskPhase.UPGRADE_SECONDARY):
         return
-    _set_phase(db, passive, TaskPhase.POSTCHECK_SECONDARY)
+    # _phase_postcheck sets POSTCHECK_SECONDARY itself (after its resume check),
+    # so we must NOT set it here — doing so would clobber a parked
+    # AWAITING_POSTCHECK_OVERRIDE phase and defeat the non-blocking resume.
     if not _phase_postcheck(db, job, passive, passive.device, finishing_phase=TaskPhase.POSTCHECK_SECONDARY):
         return
     _phase_post_snapshot_and_diff(db, job, passive, passive.device)
 
     # ---- Phase: failover ----
     if job.require_failover_confirmation:
-        if not _wait_for_confirm(db, passive, TaskPhase.AWAITING_FAILOVER_CONFIRM):
+        if not _confirm_gate(
+            db, passive,
+            TaskPhase.AWAITING_FAILOVER_CONFIRM,
+            "failover_confirmed",
+            parked_msg=(
+                "Passive member upgraded. Awaiting confirmation to fail service "
+                "over to it before upgrading the active member."
+            ),
+            proceed_msg="Failover confirmed; failing over now.",
+        ):
             return
     _set_phase(db, passive, TaskPhase.FAILOVER)
     if not _phase_failover(db, job, active, passive):
@@ -395,7 +470,18 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
 
     # ---- Optional gate before upgrading the (former) active ----
     if job.require_primary_upgrade_confirmation:
-        if not _wait_for_confirm(db, active, TaskPhase.AWAITING_PRIMARY_UPGRADE_CONFIRM):
+        if not _confirm_gate(
+            db, active,
+            TaskPhase.AWAITING_PRIMARY_UPGRADE_CONFIRM,
+            "primary_upgrade_confirmed",
+            parked_msg=(
+                "Failover complete; the upgraded member is now serving traffic. "
+                "Awaiting confirmation to upgrade the former active member."
+            ),
+            proceed_msg=(
+                "Primary-upgrade confirmed; upgrading the former active member now."
+            ),
+        ):
             return
 
     # ---- Phase: upgrade the (former) active, now passive ----
@@ -404,7 +490,7 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     _set_phase(db, active, TaskPhase.UPGRADE_PRIMARY)
     if not _phase_install_and_wait(db, job, active, active.device, started_phase=TaskPhase.UPGRADE_PRIMARY):
         return
-    _set_phase(db, active, TaskPhase.POSTCHECK_PRIMARY)
+    # See the passive postcheck above — _phase_postcheck owns the phase set.
     if not _phase_postcheck(db, job, active, active.device, finishing_phase=TaskPhase.POSTCHECK_PRIMARY):
         return
     _phase_post_snapshot_and_diff(db, job, active, active.device)
@@ -440,74 +526,81 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
         _record(db, task, "Pre-check already completed in a prior run; skipping")
         return True
 
+    # Resume from a non-blocking override park. If we previously parked at the
+    # precheck override gate, the operator's choice (Override / Re-run / Abort)
+    # arrives as a re-dispatch of drive_pair — handle the token here BEFORE
+    # deciding whether to re-run the check. (This was a blocking poll loop
+    # inside _wait_for_override that held the worker slot for the whole wait.)
+    if task.phase == TaskPhase.AWAITING_PRECHECK_OVERRIDE:
+        action = _resolve_override_action(db, task)
+        if action is None or action == _OverrideOutcome.ABORT:
+            return False  # no token yet (stay parked) / job aborted
+        if action == _OverrideOutcome.PROCEED:
+            _record(db, task, "Operator overrode pre-check failure; proceeding.")
+            _mark_phase_done(db, task, "precheck")
+            return True
+        # RERUN — drop stale results and fall through to execute fresh.
+        progress = dict(task.progress or {})
+        progress.pop("failing_checks", None)
+        task.progress = progress
+        db.commit()
+
     # Advisory, up front: flag if the target would put the firewall ahead of
     # its Panorama (unsupported; breaks post-upgrade ops via Panorama). The
     # "someone forgot to upgrade Panorama first" guard — warns, doesn't block.
     _warn_if_target_exceeds_panorama(db, job, task, device)
 
-    # Outer loop supports the operator's "Re-run check" action — if
-    # they clicked it at the override gate (e.g. after pushing a
-    # fixed candidate config from Panorama), we loop back and execute
-    # the precheck fresh instead of advancing past it.
-    while True:
-        _set_phase(db, task, TaskPhase.PRECHECK)
-        try:
-            run = precheck_svc.run_precheck_for_device(
-                db,
-                device,
-                checks=_resolve_checks_for_job(db, job),
-                user_id=job.created_by_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _record(db, task, f"Pre-check raised: {exc}", phase=TaskPhase.FAILED)
-            _fail_job(db, job.id, f"Pre-check failed for {device.name}")
-            return False
-
-        progress = dict(task.progress or {})
-        progress["precheck_run_id"] = run.id
-        progress["precheck_overall"] = run.overall_severity.value
-        task.progress = progress
-        db.commit()
-
-        if run.overall_severity != Severity.FAIL:
-            break  # pass / warn / skip → advance
-
-        # FAIL — park at override gate so operator can read what
-        # failed, decide if it's acceptable, click Proceed anyway,
-        # click Re-run check, or Abort the job.
-        failing = _failing_check_names(run.results)
-        msg = (
-            f"Pre-check FAILED: {', '.join(failing) if failing else 'see precheck run for details'}."
-            f" Job parked — click Override + proceed, Re-run check, or Abort job."
+    _set_phase(db, task, TaskPhase.PRECHECK)
+    try:
+        run = precheck_svc.run_precheck_for_device(
+            db,
+            device,
+            checks=_resolve_checks_for_job(db, job),
+            user_id=job.created_by_id,
         )
-        progress["failing_checks"] = failing
-        task.progress = progress
-        db.commit()
-        _record(db, task, msg)
-        if job.auto_ack_precheck_failures:
-            # Pre-authorized by the operator at job creation. Log the
-            # bypass explicitly so the timeline shows WHY the job didn't
-            # park — a future audit needs to see the override happened.
-            _record(
-                db, task,
-                "Pre-check failures auto-acknowledged (auto_ack_precheck_failures "
-                "was enabled on this job); proceeding without operator confirmation",
-            )
-            break
-        outcome = _wait_for_override(db, task, TaskPhase.AWAITING_PRECHECK_OVERRIDE)
-        if outcome == _OverrideOutcome.ABORT:
-            return False
-        if outcome == _OverrideOutcome.PROCEED:
-            break
-        # RERUN — clear the failing_checks list and loop back to the
-        # top to execute precheck again. The new run replaces the old.
-        progress.pop("failing_checks", None)
-        task.progress = progress
-        db.commit()
-        # Loop continues, _set_phase(PRECHECK) on next iteration.
+    except Exception as exc:  # noqa: BLE001
+        _record(db, task, f"Pre-check raised: {exc}", phase=TaskPhase.FAILED)
+        _fail_job(db, job.id, f"Pre-check failed for {device.name}")
+        return False
 
-    _mark_phase_done(db, task, "precheck")
-    return True
+    progress = dict(task.progress or {})
+    progress["precheck_run_id"] = run.id
+    progress["precheck_overall"] = run.overall_severity.value
+    task.progress = progress
+    db.commit()
+
+    if run.overall_severity != Severity.FAIL:
+        _mark_phase_done(db, task, "precheck")
+        return True
+
+    # FAIL — record the failing checks, then either auto-ack (pre-authorized at
+    # job creation) or PARK at the override gate. Parking is non-blocking: we
+    # set the phase and RETURN False so the worker slot frees while the operator
+    # reads the failures and decides. The /override and /rerun-check routes
+    # re-dispatch drive_pair, which re-enters this function via the resume block
+    # above.
+    failing = _failing_check_names(run.results)
+    failing_str = ", ".join(failing) if failing else "see precheck run for details"
+    progress = dict(task.progress or {})
+    progress["failing_checks"] = failing
+    task.progress = progress
+    db.commit()
+    if job.auto_ack_precheck_failures:
+        _record(
+            db, task,
+            f"Pre-check FAILED: {failing_str}. Failures auto-acknowledged "
+            "(auto_ack_precheck_failures was enabled on this job); proceeding "
+            "without operator confirmation",
+        )
+        _mark_phase_done(db, task, "precheck")
+        return True
+    _record(
+        db, task,
+        f"Pre-check FAILED: {failing_str}. Job parked — click Override + proceed, "
+        "Re-run check, or Abort job.",
+        phase=TaskPhase.AWAITING_PRECHECK_OVERRIDE,
+    )
+    return False
 
 
 def _phase_snapshot(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device) -> bool:
@@ -757,28 +850,41 @@ def _phase_install_and_wait(
 
     if install_needed:
         _set_phase(db, task, started_phase)
-        # Step 1+2: install.
-        try:
-            client = _client_for(db, device)
-            _set_substep(db, task, "installing")
-            install_job = client.request_software_install(job.target_version)
-            if not install_job:
-                raise RuntimeError("install request returned no job id")
-            ok = _wait_for_install_job(client, install_job, task=task, db=db)
-            if not ok:
-                log.info("Install job %s did not FIN cleanly; proceeding to restart anyway", install_job)
-            _record(db, task, "Install complete")
-        except Exception as exc:  # noqa: BLE001
-            _record(db, task, f"Install failed: {exc}", phase=TaskPhase.FAILED)
-            _fail_job(db, job.id, f"Install failed for {device.name}")
-            return False
+        # Step 1+2: install. Guarded by its own "software_installed" marker so
+        # that parking at the reboot gate below (which RETURNS and frees the
+        # worker slot) doesn't re-issue the install on the re-dispatch — the
+        # image is already on the boot partition, only the reboot is pending.
+        if not _phase_already_done(task, "software_installed"):
+            try:
+                client = _client_for(db, device)
+                _set_substep(db, task, "installing")
+                install_job = client.request_software_install(job.target_version)
+                if not install_job:
+                    raise RuntimeError("install request returned no job id")
+                ok = _wait_for_install_job(client, install_job, task=task, db=db)
+                if not ok:
+                    log.info("Install job %s did not FIN cleanly; proceeding to restart anyway", install_job)
+                _record(db, task, "Install complete")
+            except Exception as exc:  # noqa: BLE001
+                _record(db, task, f"Install failed: {exc}", phase=TaskPhase.FAILED)
+                _fail_job(db, job.id, f"Install failed for {device.name}")
+                return False
+            _mark_phase_done(db, task, "software_installed")
 
-        # Step 3: optional pause before reboot. Default behavior — the
-        # operator explicitly clicks Reboot now.
+        # Step 3: optional pause before reboot. Default behavior — the operator
+        # explicitly clicks Reboot now. Non-blocking: _confirm_gate parks at
+        # AWAITING_REBOOT_CONFIRM and RETURNS so the slot frees until /confirm
+        # re-dispatches; the "reboot_confirmed" marker keeps us past the gate on
+        # any later re-dispatch.
         if not job.auto_reboot_after_install:
             _set_substep(db, task, None)
-            _record(db, task, "Install done; awaiting operator confirmation to reboot")
-            if not _wait_for_confirm(db, task, TaskPhase.AWAITING_REBOOT_CONFIRM):
+            if not _confirm_gate(
+                db, task,
+                TaskPhase.AWAITING_REBOOT_CONFIRM,
+                "reboot_confirmed",
+                parked_msg="Install done; awaiting operator confirmation to reboot.",
+                proceed_msg="Reboot confirmed; restarting now.",
+            ):
                 return False
             _set_phase(db, task, started_phase)
 
@@ -898,6 +1004,29 @@ def _phase_postcheck(
         _record(db, task, "Post-check already completed in a prior run; skipping")
         return True
 
+    # Resume from a non-blocking override park (see _phase_precheck for the full
+    # rationale) — handle the operator's Override / Re-run / Abort here before
+    # re-running anything.
+    if task.phase == TaskPhase.AWAITING_POSTCHECK_OVERRIDE:
+        action = _resolve_override_action(db, task)
+        if action is None or action == _OverrideOutcome.ABORT:
+            return False
+        if action == _OverrideOutcome.PROCEED:
+            _record(db, task, "Operator overrode post-check failure; proceeding.")
+            _mark_phase_done(db, task, "postcheck")
+            return True
+        # RERUN — drop stale results and fall through to execute fresh.
+        progress = dict(task.progress or {})
+        progress.pop("failing_postchecks", None)
+        task.progress = progress
+        db.commit()
+
+    # Enter the postcheck phase now (not in the caller) so the badge reflects
+    # it through the reachability wait below — AND so the resume block above
+    # sees the still-parked AWAITING_POSTCHECK_OVERRIDE phase on re-entry
+    # rather than a phase the caller clobbered before this function ran.
+    _set_phase(db, task, finishing_phase)
+
     # Post-reboot reconnect window. The device's own mgmt plane is back
     # (wait_for_ready cleared) and HA has resumed, but the managing Panorama
     # can lag in re-establishing its connection — and the postcheck runs
@@ -924,70 +1053,58 @@ def _phase_postcheck(
         )
     _set_substep(db, task, None)
 
-    # Same rerun-loop pattern as _phase_precheck — operator can fix a
-    # post-upgrade issue and re-run the check rather than override or
-    # abort.
-    while True:
-        _set_phase(db, task, finishing_phase)
-        try:
-            run = precheck_svc.run_precheck_for_device(
-                db,
-                device,
-                checks=_resolve_checks_for_job(db, job),
-                user_id=job.created_by_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            _record(db, task, f"Post-check raised: {exc}", phase=TaskPhase.FAILED)
-            _fail_job(db, job.id, f"Post-check failed for {device.name}")
-            return False
+    try:
+        run = precheck_svc.run_precheck_for_device(
+            db,
+            device,
+            checks=_resolve_checks_for_job(db, job),
+            user_id=job.created_by_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _record(db, task, f"Post-check raised: {exc}", phase=TaskPhase.FAILED)
+        _fail_job(db, job.id, f"Post-check failed for {device.name}")
+        return False
 
-        progress = dict(task.progress or {})
-        progress["postcheck_run_id"] = run.id
-        progress["postcheck_overall"] = run.overall_severity.value
-        task.progress = progress
-        db.commit()
+    progress = dict(task.progress or {})
+    progress["postcheck_run_id"] = run.id
+    progress["postcheck_overall"] = run.overall_severity.value
+    task.progress = progress
+    db.commit()
 
-        if run.overall_severity != Severity.FAIL:
-            break
+    if run.overall_severity != Severity.FAIL:
+        _mark_phase_done(db, task, "postcheck")
+        return True
 
-        failing = _failing_check_names(run.results)
-        # Distinguish "ran and some checks failed" from "couldn't run at all"
-        # (runner errored before evaluating anything: 0 results + an error,
-        # e.g. the device was unreachable through Panorama). Same parking
-        # behavior, but the timeline message should say which it was.
-        if not run.results and run.error:
-            msg = (
-                f"Post-check could not run: {run.error}"
-                " — Job parked; click Override + proceed, Re-run check, or Abort job."
-            )
-        else:
-            msg = (
-                f"Post-check FAILED: {', '.join(failing) if failing else 'see post-check run for details'}."
-                f" Job parked — click Override + proceed, Re-run check, or Abort job."
-            )
-        progress["failing_postchecks"] = failing
-        task.progress = progress
-        db.commit()
-        _record(db, task, msg)
-        if job.auto_ack_postcheck_failures:
-            _record(
-                db, task,
-                "Post-check failures auto-acknowledged (auto_ack_postcheck_failures "
-                "was enabled on this job); proceeding without operator confirmation",
-            )
-            break
-        outcome = _wait_for_override(db, task, TaskPhase.AWAITING_POSTCHECK_OVERRIDE)
-        if outcome == _OverrideOutcome.ABORT:
-            return False
-        if outcome == _OverrideOutcome.PROCEED:
-            break
-        # RERUN — clear and loop.
-        progress.pop("failing_postchecks", None)
-        task.progress = progress
-        db.commit()
-
-    _mark_phase_done(db, task, "postcheck")
-    return True
+    # FAIL — record, then auto-ack (pre-authorized) or PARK (non-blocking) at
+    # the override gate. Distinguish "ran and some checks failed" from "couldn't
+    # run at all" (runner errored before evaluating anything: 0 results + an
+    # error, e.g. unreachable through Panorama) in the timeline message.
+    failing = _failing_check_names(run.results)
+    if not run.results and run.error:
+        detail = f"Post-check could not run: {run.error}"
+    else:
+        detail = (
+            "Post-check FAILED: "
+            f"{', '.join(failing) if failing else 'see post-check run for details'}"
+        )
+    progress = dict(task.progress or {})
+    progress["failing_postchecks"] = failing
+    task.progress = progress
+    db.commit()
+    if job.auto_ack_postcheck_failures:
+        _record(
+            db, task,
+            f"{detail}. Failures auto-acknowledged (auto_ack_postcheck_failures "
+            "was enabled on this job); proceeding without operator confirmation",
+        )
+        _mark_phase_done(db, task, "postcheck")
+        return True
+    _record(
+        db, task,
+        f"{detail}. Job parked — click Override + proceed, Re-run check, or Abort job.",
+        phase=TaskPhase.AWAITING_POSTCHECK_OVERRIDE,
+    )
+    return False
 
 
 def _phase_failover(
@@ -1260,6 +1377,10 @@ def reconcile_markers_with_device_state(
     # Only trust the probe (don't clear if we couldn't get fresh state).
     elif probed and not target_at and _phase_already_done(task, "install_complete"):
         _unmark_phase(db, task, "install_complete")
+        # "software_installed" gates the install step inside the same block; if
+        # the device isn't actually at target, the install didn't stick either —
+        # clear it so a retry re-installs rather than only re-issuing the reboot.
+        _unmark_phase(db, task, "software_installed")
         corrections.append(
             f"-install_complete (marker was set but device is on "
             f"{device.current_version}, not {job.target_version})"
@@ -1701,30 +1822,9 @@ def _wait_for_install_job(
     return False
 
 
-def _wait_for_confirm(db: Session, task: DeviceUpgradeTask, parking_phase: TaskPhase) -> bool:
-    """Park `task` at `parking_phase` and poll until confirmation_token is set
-    by the user (via POST /tasks/{id}/confirm) or until the job is aborted/timed out."""
-    _set_phase(db, task, parking_phase)
-    deadline = time.monotonic() + CONFIRM_TIMEOUT_S
-    while time.monotonic() < deadline:
-        time.sleep(CONFIRM_POLL_S)
-        db.refresh(task)
-        if task.confirmation_token:
-            # Clear it so a future gate doesn't reuse this confirmation.
-            task.confirmation_token = None
-            db.commit()
-            return True
-        # Also check job state — a user could have aborted.
-        job = db.get(UpgradeJob, task.job_id)
-        if job is None or job.state in (JobState.ABORTED, JobState.FAILED, JobState.COMPLETED):
-            return False
-    _record(db, task, f"Confirmation timeout at {parking_phase.value}", phase=TaskPhase.FAILED)
-    _fail_job(db, task.job_id, "Confirmation timeout")
-    return False
-
-
 class _OverrideOutcome(enum.Enum):
-    """Three-state return for `_wait_for_override`. Callers in the
+    """Three-state classification of an operator's choice at a check-failure
+    override gate, returned by `_resolve_override_action`. Callers in the
     phase functions branch on these.
 
     - PROCEED: operator clicked "Override + proceed" — accept the
@@ -1741,51 +1841,11 @@ class _OverrideOutcome(enum.Enum):
     ABORT = "abort"
 
 
-# Token-value sentinels written by the route endpoints. `_wait_for_override`
-# inspects the token to disambiguate proceed vs rerun. Any other non-empty
-# token value falls through to PROCEED for backward-compat (the older
-# /override endpoint set a random hex value).
+# Token-value sentinels written by the route endpoints. `_resolve_override_action`
+# inspects the token to disambiguate proceed vs rerun. Any other non-empty token
+# value falls through to PROCEED for backward-compat (the older /override
+# endpoint set a random hex value).
 _RERUN_TOKEN_PREFIX = "RERUN_"
-
-
-def _wait_for_override(
-    db: Session, task: DeviceUpgradeTask, parking_phase: TaskPhase
-) -> _OverrideOutcome:
-    """Park at a check-failure override gate. Same polling shape as
-    _wait_for_confirm. Three-state return per `_OverrideOutcome` so
-    the calling phase can decide whether to advance, re-run, or fail.
-    """
-    _set_phase(db, task, parking_phase)
-    deadline = time.monotonic() + CONFIRM_TIMEOUT_S
-    while time.monotonic() < deadline:
-        time.sleep(CONFIRM_POLL_S)
-        db.refresh(task)
-        if task.confirmation_token:
-            tok = task.confirmation_token
-            task.confirmation_token = None
-            if tok.startswith(_RERUN_TOKEN_PREFIX):
-                _record(
-                    db, task,
-                    f"Operator requested re-run at {parking_phase.value}",
-                )
-                db.commit()
-                return _OverrideOutcome.RERUN
-            _record(
-                db, task,
-                f"Operator overrode check failure at {parking_phase.value}; proceeding.",
-            )
-            db.commit()
-            return _OverrideOutcome.PROCEED
-        job = db.get(UpgradeJob, task.job_id)
-        if job is None or job.state in (JobState.ABORTED, JobState.FAILED, JobState.COMPLETED):
-            # User aborted (or another task failed the job). Mark this task
-            # FAILED so the timeline reflects that we stopped here.
-            _record(db, task, "Aborted at check-failure override gate", phase=TaskPhase.FAILED)
-            return _OverrideOutcome.ABORT
-    _record(db, task, f"Override timeout at {parking_phase.value}", phase=TaskPhase.FAILED)
-    _fail_job(db, task.job_id, "Override timeout")
-    return _OverrideOutcome.ABORT
-    return False
 
 
 def _set_phase(db: Session, task: DeviceUpgradeTask, phase: TaskPhase) -> None:

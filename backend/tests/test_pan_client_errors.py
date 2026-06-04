@@ -13,9 +13,16 @@ matters most.
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
+
+import pytest
+
+from app.core.command_proxy import pan_client as pan_client_mod
 from app.core.command_proxy.pan_client import (
+    PanDeviceClient,
     TargetDisconnectedError,
     _friendly_check_error,
+    _is_parse_error,
     _looks_like_target_disconnect,
 )
 
@@ -236,3 +243,91 @@ def test_keygen_invalid_credential_xml_response():
     assert msg.startswith("Authentication:")
     assert "Authentication rejected" in msg
     assert "XML API access" in msg
+
+
+# ---------- _is_parse_error (readiness malformed-XML detection) ----------
+#
+# Job 9: a readiness check on branch2fw01 came back as malformed XML
+# ("ParseError: not well-formed (invalid token): line 2, column 39") — almost
+# certainly a transient Panorama-proxy hiccup. We detect + retry these rather
+# than zeroing the whole readiness run.
+
+
+def test_is_parse_error_true_for_elementtree_parseerror():
+    assert _is_parse_error(ET.ParseError("not well-formed (invalid token): line 2, column 39"))
+
+
+def test_is_parse_error_true_for_message_shapes():
+    assert _is_parse_error(
+        Exception("ElementTree.fromstring ParseError: not well-formed (invalid token): line 2, column 39")
+    )
+    assert _is_parse_error(Exception("no element found: line 1, column 0"))
+
+
+def test_is_parse_error_false_for_other_errors():
+    assert not _is_parse_error(Exception("Connection refused"))
+    assert not _is_parse_error(Exception("HTTP 401 unauthorized"))
+    assert not _is_parse_error(Exception("Cloud management is enabled"))
+
+
+# ---------- _run_readiness_with_parse_retry ----------
+
+
+def _bare_client() -> PanDeviceClient:
+    # The retry method only touches self._proxy (handed to CheckFirewall, which
+    # we stub) — so we can skip the full __init__.
+    client = PanDeviceClient.__new__(PanDeviceClient)
+    client._proxy = object()
+    return client
+
+
+def _stub_checkfirewall(monkeypatch, side_effect):
+    """Replace CheckFirewall with one whose run_readiness_checks pulls from
+    `side_effect` (raise the value if it's an exception, else return it)."""
+    calls = {"n": 0}
+    seq = list(side_effect)
+
+    class _CF:
+        def __init__(self, proxy, skip_force_locale=True):
+            pass
+
+        def run_readiness_checks(self, checks_configuration=None):
+            calls["n"] += 1
+            item = seq[min(calls["n"] - 1, len(seq) - 1)]
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    monkeypatch.setattr(pan_client_mod, "CheckFirewall", _CF)
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+    return calls
+
+
+def test_readiness_retry_recovers_after_transient_parse_error(monkeypatch):
+    ok = {"ntp_sync": {"state": True, "reason": "ok"}}
+    calls = _stub_checkfirewall(
+        monkeypatch,
+        [ET.ParseError("not well-formed: line 2, column 39"),
+         ET.ParseError("not well-formed: line 2, column 39"),
+         ok],
+    )
+    out = _bare_client()._run_readiness_with_parse_retry(["ntp_sync"])
+    assert out == ok
+    assert calls["n"] == 3  # failed twice, third attempt succeeded
+
+
+def test_readiness_retry_raises_after_exhausting_attempts(monkeypatch):
+    _stub_checkfirewall(
+        monkeypatch, [ET.ParseError("not well-formed: line 2, column 39")]
+    )
+    with pytest.raises(ET.ParseError):
+        _bare_client()._run_readiness_with_parse_retry(["ntp_sync"])
+
+
+def test_readiness_retry_does_not_retry_non_parse_errors(monkeypatch):
+    calls = _stub_checkfirewall(
+        monkeypatch, [RuntimeError("Cloud management is enabled")]
+    )
+    with pytest.raises(RuntimeError):
+        _bare_client()._run_readiness_with_parse_retry(["panorama"])
+    assert calls["n"] == 1  # non-parse → propagates immediately, no retry

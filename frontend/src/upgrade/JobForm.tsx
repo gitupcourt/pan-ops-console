@@ -152,6 +152,10 @@ export function JobForm({
     "none" | "stage_only" | "hold"
   >("none");
   const stageOnly = preStageMode === "stage_only";
+  // Staging (stage-only or hold) only downloads an image — prechecks run for
+  // information but don't gate it, so the backend auto-acks precheck FAILs in
+  // these modes regardless of the toggle below. Reflect that in the UI.
+  const staging = preStageMode !== "none";
 
   const [err, setErr] = useState<string | null>(null);
 
@@ -563,7 +567,8 @@ export function JobForm({
               install/reboot</span>. Pre-stage a fleet ahead of a maintenance
               window; run a normal upgrade later to install (the image will
               already be downloaded). The reboot/failover/postcheck settings
-              below don&apos;t apply.
+              below don&apos;t apply, and precheck failures are recorded but
+              won&apos;t pause staging.
             </>
           ) : preStageMode === "hold" ? (
             <>
@@ -572,7 +577,8 @@ export function JobForm({
               each device parks at &quot;awaiting install&quot; and you click{" "}
               <span className="text-blue-300">Proceed to install</span> on the
               job to continue the <em>same</em> job. The hold can last as long
-              as you need.
+              as you need. Precheck failures won&apos;t pause staging — they&apos;re
+              recorded for you to review before you proceed.
             </>
           ) : (
             "Full upgrade: prechecks → image download → snapshot → install → reboot → postcheck."
@@ -612,8 +618,12 @@ export function JobForm({
             onChange={setAutoReboot}
           />
           <Toggle
-            label="Auto-acknowledge precheck FAIL severities (skip safety gate)"
-            checked={autoAckPrecheck}
+            label={
+              staging
+                ? "Auto-acknowledge precheck FAIL severities (auto-on while staging)"
+                : "Auto-acknowledge precheck FAIL severities (skip safety gate)"
+            }
+            checked={autoAckPrecheck || staging}
             onChange={setAutoAckPrecheck}
             danger
           />

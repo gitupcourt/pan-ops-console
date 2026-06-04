@@ -54,6 +54,18 @@ REBOOT_POLL_S = 30
 INSTALL_JOB_TIMEOUT_S = 30 * 60
 INSTALL_JOB_POLL_S = 20
 
+# A software download can transiently fail when the device is already busy with
+# another download (a content/dynamic-update pull, or a leftover download from a
+# prior job): PAN-OS returns "Another download is in progress. Please try again
+# later". That's not a real failure — wait and retry a few times.
+DOWNLOAD_RETRY_ATTEMPTS = 3
+DOWNLOAD_RETRY_WAIT_S = 60
+
+# pre_stage_mode values that mean "stage, don't upgrade now". Prechecks run for
+# information in these modes but must NOT gate (you're only downloading an
+# image; nothing risky happens until the operator proceeds to install).
+_STAGING_MODES = frozenset({"stage_only", "hold"})
+
 # Confirmation gates (reboot / failover / primary-upgrade / install-hold) are
 # NON-BLOCKING: they park the task and return, freeing the worker slot, then
 # resume on the /confirm route's re-dispatch. There is therefore no in-worker
@@ -235,28 +247,54 @@ def _pre_stage_stop(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask]
     return True
 
 
-def _pre_stage_hold_gate(db: Session, job: UpgradeJob, gate_task: DeviceUpgradeTask) -> bool:
-    """Stage-and-hold gate (``pre_stage_mode == "hold"``), at the same point as
-    the stage-only gate — after precheck + image + pre-snapshot, before install.
+def _pre_stage_hold_gate(
+    db: Session,
+    job: UpgradeJob,
+    gate_task: DeviceUpgradeTask,
+    *,
+    pair_tasks: list[DeviceUpgradeTask] | None = None,
+) -> bool:
+    """Stage-and-hold gate (``pre_stage_mode == "hold"``), after precheck +
+    image + pre-snapshot and before install.
 
-    Thin wrapper over the shared non-blocking ``_confirm_gate``: only active when
-    the job opted into hold mode.
+    NON-BLOCKING (like ``_confirm_gate``): parks the task(s) at
+    AWAITING_INSTALL_CONFIRM and RETURNS False so drive_pair exits and frees the
+    worker slot until the operator clicks "Proceed to install". The /confirm
+    route sets confirmation_token and re-dispatches; on re-entry the token is
+    consumed, ``install_confirmed`` is marked on ``gate_task`` (so a later
+    re-dispatch never re-parks), and we proceed.
+
+    For an HA pair, pass BOTH members via ``pair_tasks``: otherwise the non-gate
+    member sits at DOWNLOADING_IMAGE forever (it finished downloading but nothing
+    moved its phase), which reads as "stuck". With both passed, both members show
+    the held state and Proceed works from either member's button.
 
     Returns True to proceed to install, False to STOP this invocation (parked —
-    drive_pair returns cleanly; NOT a failure).
+    NOT a failure).
     """
     if (job.pre_stage_mode or "none") != "hold":
         return True
-    return _confirm_gate(
-        db, gate_task,
-        TaskPhase.AWAITING_INSTALL_CONFIRM,
-        "install_confirmed",
-        parked_msg=(
+    tasks = pair_tasks or [gate_task]
+    if _phase_already_done(gate_task, "install_confirmed"):
+        return True
+    for t in tasks:
+        db.refresh(t)
+    # Proceed if the operator confirmed on ANY member of the pair.
+    if any(t.confirmation_token for t in tasks):
+        for t in tasks:
+            t.confirmation_token = None
+        db.commit()
+        _mark_phase_done(db, gate_task, "install_confirmed")
+        _record(db, gate_task, "Proceed-to-install confirmed; installing now.")
+        return True
+    for t in tasks:
+        _record(
+            db, t,
             "Staged — precheck, image download, and pre-snapshot complete. Paused "
-            "before install; click 'Proceed to install' when ready."
-        ),
-        proceed_msg="Proceed-to-install confirmed; installing now.",
-    )
+            "before install; click 'Proceed to install' when ready.",
+            phase=TaskPhase.AWAITING_INSTALL_CONFIRM,
+        )
+    return False
 
 
 def _confirm_gate(
@@ -424,9 +462,11 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     if _pre_stage_stop(db, job, [passive, active]):
         return
 
-    # Stage-and-hold: park on the passive (the first member we'd upgrade) until
-    # the operator clicks "Proceed to install". Non-blocking — frees the slot.
-    if not _pre_stage_hold_gate(db, job, passive):
+    # Stage-and-hold: park the WHOLE pair until the operator clicks "Proceed to
+    # install". Non-blocking — frees the slot. Both members are passed so the
+    # active one shows the held state too (not a stale DOWNLOADING_IMAGE) and
+    # Proceed works from either.
+    if not _pre_stage_hold_gate(db, job, passive, pair_tasks=[passive, active]):
         return
 
     # ---- Phase: upgrade the passive ----
@@ -559,6 +599,17 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
             user_id=job.created_by_id,
         )
     except Exception as exc:  # noqa: BLE001
+        if (job.pre_stage_mode or "none") in _STAGING_MODES:
+            # Staging only downloads an image — a precheck that couldn't run
+            # shouldn't block it. Record + proceed; if the device is genuinely
+            # unreachable the download will surface that on its own.
+            _record(
+                db, task,
+                f"Pre-check could not run ({exc}); staging job — proceeding to "
+                "download anyway (prechecks are informational when staging).",
+            )
+            _mark_phase_done(db, task, "precheck")
+            return True
         _record(db, task, f"Pre-check raised: {exc}", phase=TaskPhase.FAILED)
         _fail_job(db, job.id, f"Pre-check failed for {device.name}")
         return False
@@ -585,12 +636,17 @@ def _phase_precheck(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, devic
     progress["failing_checks"] = failing
     task.progress = progress
     db.commit()
-    if job.auto_ack_precheck_failures:
+    staging = (job.pre_stage_mode or "none") in _STAGING_MODES
+    if job.auto_ack_precheck_failures or staging:
+        why = (
+            "staging job — prechecks are informational and do not gate the download"
+            if staging and not job.auto_ack_precheck_failures
+            else "auto_ack_precheck_failures was enabled on this job"
+        )
         _record(
             db, task,
-            f"Pre-check FAILED: {failing_str}. Failures auto-acknowledged "
-            "(auto_ack_precheck_failures was enabled on this job); proceeding "
-            "without operator confirmation",
+            f"Pre-check FAILED: {failing_str}. Proceeding without operator "
+            f"confirmation ({why}).",
         )
         _mark_phase_done(db, task, "precheck")
         return True
@@ -693,6 +749,53 @@ def _phase_post_snapshot_and_diff(
     return True
 
 
+def _is_transient_download_error(exc: BaseException) -> bool:
+    """True for download errors that clear on their own — chiefly PAN-OS's
+    "Another download is in progress. Please try again later" (the device is
+    busy with a content pull or a leftover download). Worth a wait + retry
+    rather than failing the device."""
+    m = str(exc).lower()
+    return (
+        "another download is in progress" in m
+        or "try again later" in m
+        or "download is in progress" in m
+    )
+
+
+def _download_image_with_retry(
+    client: PanDeviceClient, version: str, *, task: DeviceUpgradeTask, db: Session
+) -> None:
+    """Request a software download, wait for it, and verify it landed —
+    retrying on transient "another download in progress" errors with a wait
+    between attempts. Raises the last exception on permanent failure or once
+    the attempts are exhausted (the caller decides how to surface it)."""
+    last_exc: Exception | None = None
+    for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
+        try:
+            dl_job = client.request_software_download(version)
+            if not dl_job:
+                raise RuntimeError("download request returned no job id")
+            if not _wait_for_download_job(client, dl_job, task=task, db=db):
+                raise RuntimeError("download job did not finish OK")
+            if not client.is_version_downloaded(version):
+                raise RuntimeError("post-job software list does not show version downloaded")
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < DOWNLOAD_RETRY_ATTEMPTS and _is_transient_download_error(exc):
+                _record(
+                    db, task,
+                    f"Download of {version} attempt {attempt}/{DOWNLOAD_RETRY_ATTEMPTS} hit a "
+                    f"transient error ({exc}); the device is busy with another download — "
+                    f"retrying in {DOWNLOAD_RETRY_WAIT_S}s",
+                )
+                time.sleep(DOWNLOAD_RETRY_WAIT_S)
+                continue
+            raise
+    if last_exc is not None:  # pragma: no cover - loop always returns or raises
+        raise last_exc
+
+
 def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device) -> bool:
     """Download the target image if not already present. Reuses the stage flow
     so the user-visible Stage badge is set on the device too."""
@@ -748,13 +851,7 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
                     f"{base} first (required before the maintenance release will install)",
                 )
                 try:
-                    base_job = client.request_software_download(base)
-                    if not base_job:
-                        raise RuntimeError("base download request returned no job id")
-                    if not _wait_for_download_job(client, base_job, task=task, db=db):
-                        raise RuntimeError("base download job did not finish OK")
-                    if not client.is_version_downloaded(base):
-                        raise RuntimeError("post-job software list does not show base downloaded")
+                    _download_image_with_retry(client, base, task=task, db=db)
                     _record(db, task, f"Base image {base} downloaded")
                 except Exception as exc:  # noqa: BLE001
                     _record(db, task, f"Base image download failed: {exc}", phase=TaskPhase.FAILED)
@@ -770,14 +867,9 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
 
     # Inline download; same approach as the stage service but we don't create
     # a separate DeviceStageRun here (the Job timeline carries the visibility).
+    # Retries transient "another download in progress" errors.
     try:
-        job_id = client.request_software_download(job.target_version)
-        if not job_id:
-            raise RuntimeError("download request returned no job id")
-        if not _wait_for_download_job(client, job_id, task=task, db=db):
-            raise RuntimeError("download job did not finish OK")
-        if not client.is_version_downloaded(job.target_version):
-            raise RuntimeError("post-job software list does not show version downloaded")
+        _download_image_with_retry(client, job.target_version, task=task, db=db)
     except Exception as exc:  # noqa: BLE001
         _record(db, task, f"Image download failed: {exc}", phase=TaskPhase.FAILED)
         _fail_job(db, job.id, f"Image download failed for {device.name}")

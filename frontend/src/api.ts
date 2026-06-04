@@ -192,6 +192,7 @@ export type JobState =
   | "running"
   | "awaiting_confirmation"
   | "completed"
+  | "completed_with_errors"
   | "failed"
   | "aborted";
 
@@ -559,6 +560,7 @@ export type JobsSummary = {
   running: number;
   awaiting_confirmation: number;
   completed: number;
+  completed_with_errors: number;
   failed: number;
   aborted: number;
 };
@@ -797,12 +799,17 @@ export const api = {
   // version picker. The bulk endpoint is the hot path; the single
   // endpoint is here for any future "show available versions for
   // device X" affordance (e.g. an Inventory row action).
-  getDeviceSoftware: (deviceId: number) =>
-    j<AvailableSoftwareOut>(`/upgrade/devices/${deviceId}/software`),
-  getDeviceSoftwareBulk: (deviceIds: number[]) =>
+  // `refresh` false (default) returns each device's cached catalog (fast);
+  // true makes the device re-check updates.paloaltonetworks.com first (slow) —
+  // used by the picker's explicit "check update server" action.
+  getDeviceSoftware: (deviceId: number, refresh = false) =>
+    j<AvailableSoftwareOut>(
+      `/upgrade/devices/${deviceId}/software${refresh ? "?refresh=true" : ""}`,
+    ),
+  getDeviceSoftwareBulk: (deviceIds: number[], refresh = false) =>
     j<AvailableSoftwareBulkOut>(`/upgrade/devices/software/bulk`, {
       method: "POST",
-      body: JSON.stringify({ device_ids: deviceIds }),
+      body: JSON.stringify({ device_ids: deviceIds, refresh }),
     }),
 
   // Disk-space cleanup. The plan is a pure-read dry run; runDiskCleanup is

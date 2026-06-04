@@ -70,7 +70,7 @@ jobs:
     # sweeps are handled out-of-band by AppSec).
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # full history so the --log-opts range resolves
 
@@ -111,8 +111,8 @@ jobs:
     name: pip-audit (backend) [informational]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: pip-audit against backend/requirements.txt
@@ -133,8 +133,8 @@ jobs:
     name: npm audit (frontend) [informational]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -166,7 +166,7 @@ jobs:
     name: trivy (deps + misconfig) [informational]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Trivy filesystem scan (HIGH/CRITICAL)
         run: |
           set -euo pipefail
@@ -191,7 +191,7 @@ jobs:
     name: SBOM (syft)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Generate SBOM (SPDX + CycloneDX)
         run: |
           set -euo pipefail
@@ -200,7 +200,7 @@ jobs:
             dir:/src \
             -o spdx-json=/src/sbom/pan-ops-console.spdx.json \
             -o cyclonedx-json=/src/sbom/pan-ops-console.cdx.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom/

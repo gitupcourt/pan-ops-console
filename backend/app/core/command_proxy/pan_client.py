@@ -161,6 +161,24 @@ def _text(el: ET.Element | None, path: str) -> str | None:
     return found.text.strip() if found is not None and found.text else None
 
 
+# A readiness-check run can come back as malformed XML — usually a transient
+# Panorama-proxy hiccup (the proxied device reply got truncated or wrapped in an
+# error envelope mid-reconnect). A short wait + retry clears it; a deterministic
+# bad response still surfaces after the retries.
+READINESS_PARSE_RETRIES = 2
+READINESS_PARSE_RETRY_WAIT_S = 8
+
+
+def _is_parse_error(exc: BaseException) -> bool:
+    """True for the XML-not-well-formed failures ElementTree raises when a
+    readiness check parses a garbled device/Panorama response (e.g.
+    "ParseError: not well-formed (invalid token): line 2, column 39")."""
+    if isinstance(exc, ET.ParseError):
+        return True
+    m = str(exc)
+    return "not well-formed" in m or "ParseError" in m or "no element found" in m
+
+
 def _friendly_check_error(exc: BaseException, *, context: str = "Readiness checks") -> str:
     """Turn raw pan-os-python / httpx / urllib exceptions into something operators can act on.
 
@@ -500,10 +518,33 @@ class PanDeviceClient:
     # unsupported locale setting" — orchestrator parks the task at
     # AWAITING_PRECHECK_OVERRIDE indefinitely.
 
+    def _run_readiness_with_parse_retry(self, names: list[str]) -> dict:
+        """Run the library's readiness checks, retrying on a malformed-XML
+        (ParseError) response. Non-parse exceptions propagate immediately so the
+        caller's drop/synth handling (SCM panorama, content_version) still
+        applies on the first attempt."""
+        import time as _t
+        attempt = 0
+        while True:
+            try:
+                return CheckFirewall(
+                    self._proxy, skip_force_locale=True
+                ).run_readiness_checks(checks_configuration=names)
+            except Exception as exc:  # noqa: BLE001
+                if not _is_parse_error(exc) or attempt >= READINESS_PARSE_RETRIES:
+                    raise
+                attempt += 1
+                log.warning(
+                    "Readiness checks returned malformed XML (attempt %d/%d); "
+                    "retrying in %ds: %s",
+                    attempt, READINESS_PARSE_RETRIES, READINESS_PARSE_RETRY_WAIT_S, exc,
+                )
+                _t.sleep(READINESS_PARSE_RETRY_WAIT_S)
+
     def run_readiness_checks(self, checks: list[str] | None = None) -> dict:
         names = list(checks or DEFAULT_READINESS_CHECKS)
         try:
-            results = CheckFirewall(self._proxy, skip_force_locale=True).run_readiness_checks(checks_configuration=names)
+            results = self._run_readiness_with_parse_retry(names)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             # ---- Cloud-managed firewall (Strata Cloud Manager / SCM) ----
@@ -554,7 +595,7 @@ class PanDeviceClient:
             if drop is not None and synth is not None:
                 names = [n for n in names if n != drop]
                 try:
-                    results = CheckFirewall(self._proxy, skip_force_locale=True).run_readiness_checks(checks_configuration=names)
+                    results = self._run_readiness_with_parse_retry(names)
                 except Exception as exc2:  # noqa: BLE001
                     raise ConnectionError(_friendly_check_error(exc2)) from exc2
                 results[drop] = synth
@@ -586,7 +627,7 @@ class PanDeviceClient:
 
     # ---------- software (download / staging) ----------
 
-    def list_software(self) -> list[dict]:
+    def list_software(self, check_updates: bool = False) -> list[dict]:
         """`request system software info` — return all known versions.
 
         Each entry: {version, downloaded(bool), current(bool), latest(bool),
@@ -594,13 +635,24 @@ class PanDeviceClient:
                      release_type}. ``release_type == "Base"`` flags the single
                      base image per feature train (consumed by
                      ``base_image_from_list``); it is NOT always X.Y.0.
+
+        ``check_updates`` (default False): when True, first run `request system
+        software check`, which makes the device refresh its catalog from
+        updates.paloaltonetworks.com — that round-trip is the slow part (5–30s).
+        When False we skip it and return the device's already-cached catalog,
+        which is local and fast (~1s). Every caller here inspects local state
+        (installed / downloaded / base image), so False is correct for them; the
+        version picker uses False by default and only sets True on an explicit
+        operator "check the update server" refresh (to surface a just-released
+        version the device hasn't pulled into its catalog yet).
         """
-        try:
-            self._proxy.op("<request><system><software><check></check></software></system></request>", cmd_xml=False)
-        except PanDeviceError:
-            # `check` reaches out to updates.paloaltonetworks.com; ok to ignore failure here,
-            # the next call will still return whatever the device knows about.
-            pass
+        if check_updates:
+            try:
+                self._proxy.op("<request><system><software><check></check></software></system></request>", cmd_xml=False)
+            except PanDeviceError:
+                # `check` reaches out to updates.paloaltonetworks.com; ok to ignore failure here,
+                # the next call will still return whatever the device knows about.
+                pass
         try:
             resp = self._proxy.op("<request><system><software><info></info></software></system></request>", cmd_xml=False)
         except PanDeviceError as exc:

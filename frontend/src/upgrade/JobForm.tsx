@@ -4,7 +4,7 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import {
   api,
@@ -99,26 +99,38 @@ export function JobForm({
   // Software-availability query for the version picker. Keyed on a
   // stable sorted-CSV of the current selection so any change to the
   // device set re-fetches with fresh model-compatible versions. The
-  // device's own check-now is the source of truth for "what can this
+  // device's own catalog is the source of truth for "what can this
   // model install" — no need for us to keep a model → versions table.
   //
-  // `enabled` gates the slow per-device check-now call behind both
-  //   - operator selected at least one device
-  //   - operator chose the device-reported picker (not custom)
-  // staleTime: Infinity — call is slow and the catalog changes rarely;
-  // a manual "Refresh" button covers post-release re-poll.
+  // By default we read each device's CACHED catalog (fast — no
+  // updates.paloaltonetworks.com round-trip) and the backend fans the
+  // devices out in parallel. The "Check update server" action sets a one-shot
+  // ref so the next fetch passes refresh=true (the slow live check). Using a
+  // ref (not the query key) keeps the cache keyed purely by device set, so the
+  // refresh overwrites the cached result in place instead of forking it.
   const selectedDeviceIdsArr = useMemo(() => {
     const arr = Array.from(effectiveSelectedIds);
     arr.sort((a, b) => a - b);
     return arr;
   }, [effectiveSelectedIds]);
+  const refreshFromServerRef = useRef(false);
+  const [checkingUpdateServer, setCheckingUpdateServer] = useState(false);
   const softwareQ = useQuery<AvailableSoftwareBulkOut>({
     queryKey: ["upgrade-software-bulk", selectedDeviceIdsArr.join(",")],
-    queryFn: () => api.getDeviceSoftwareBulk(selectedDeviceIdsArr),
+    queryFn: () => {
+      const refresh = refreshFromServerRef.current;
+      refreshFromServerRef.current = false; // one-shot
+      return api.getDeviceSoftwareBulk(selectedDeviceIdsArr, refresh);
+    },
     enabled:
       versionMode === "device" && selectedDeviceIdsArr.length > 0,
     staleTime: Infinity,
   });
+  const checkUpdateServer = () => {
+    refreshFromServerRef.current = true;
+    setCheckingUpdateServer(true);
+    void softwareQ.refetch().finally(() => setCheckingUpdateServer(false));
+  };
 
   // Image source: either an existing PanosImage id (when imageMode = "select")
   // or device_pull_image=true (when imageMode = "pull"). Mutually exclusive.
@@ -152,6 +164,10 @@ export function JobForm({
     "none" | "stage_only" | "hold"
   >("none");
   const stageOnly = preStageMode === "stage_only";
+  // Staging (stage-only or hold) only downloads an image — prechecks run for
+  // information but don't gate it, so the backend auto-acks precheck FAILs in
+  // these modes regardless of the toggle below. Reflect that in the UI.
+  const staging = preStageMode !== "none";
 
   const [err, setErr] = useState<string | null>(null);
 
@@ -322,6 +338,8 @@ export function JobForm({
         onTargetVersionChange={setTargetVersion}
         selectedDeviceCount={effectiveSelectedIds.size}
         softwareQ={softwareQ}
+        onCheckUpdateServer={checkUpdateServer}
+        refreshing={checkingUpdateServer}
         onDeselectDeviceIds={(ids) =>
           setSelectedDeviceIds((prev) => {
             const next = new Set(prev);
@@ -563,7 +581,8 @@ export function JobForm({
               install/reboot</span>. Pre-stage a fleet ahead of a maintenance
               window; run a normal upgrade later to install (the image will
               already be downloaded). The reboot/failover/postcheck settings
-              below don&apos;t apply.
+              below don&apos;t apply, and precheck failures are recorded but
+              won&apos;t pause staging.
             </>
           ) : preStageMode === "hold" ? (
             <>
@@ -572,7 +591,8 @@ export function JobForm({
               each device parks at &quot;awaiting install&quot; and you click{" "}
               <span className="text-blue-300">Proceed to install</span> on the
               job to continue the <em>same</em> job. The hold can last as long
-              as you need.
+              as you need. Precheck failures won&apos;t pause staging — they&apos;re
+              recorded for you to review before you proceed.
             </>
           ) : (
             "Full upgrade: prechecks → image download → snapshot → install → reboot → postcheck."
@@ -612,8 +632,12 @@ export function JobForm({
             onChange={setAutoReboot}
           />
           <Toggle
-            label="Auto-acknowledge precheck FAIL severities (skip safety gate)"
-            checked={autoAckPrecheck}
+            label={
+              staging
+                ? "Auto-acknowledge precheck FAIL severities (auto-on while staging)"
+                : "Auto-acknowledge precheck FAIL severities (skip safety gate)"
+            }
+            checked={autoAckPrecheck || staging}
             onChange={setAutoAckPrecheck}
             danger
           />
@@ -771,6 +795,8 @@ function VersionPicker({
   onTargetVersionChange,
   selectedDeviceCount,
   softwareQ,
+  onCheckUpdateServer,
+  refreshing,
   onDeselectDeviceIds,
 }: {
   mode: "device" | "custom";
@@ -779,6 +805,8 @@ function VersionPicker({
   onTargetVersionChange: (v: string) => void;
   selectedDeviceCount: number;
   softwareQ: UseQueryResult<AvailableSoftwareBulkOut>;
+  onCheckUpdateServer: () => void;
+  refreshing: boolean;
   onDeselectDeviceIds: (ids: number[]) => void;
 }) {
   // Aggregate per-version across all selected devices. For each
@@ -909,13 +937,16 @@ function VersionPicker({
             aria-hidden="true"
           />
           <p>
-            Asking {selectedDeviceCount} device
-            {selectedDeviceCount === 1 ? "" : "s"} for available versions
+            {refreshing ? "Checking the update server on " : "Reading versions from "}
+            {selectedDeviceCount} device
+            {selectedDeviceCount === 1 ? "" : "s"}
             <AnimatedEllipsis />
-            <span className="mt-0.5 block text-[11px] text-zinc-500">
-              First call is slow — each firewall reaches out to
-              updates.paloaltonetworks.com. Hang tight.
-            </span>
+            {refreshing && (
+              <span className="mt-0.5 block text-[11px] text-zinc-500">
+                Each firewall is contacting updates.paloaltonetworks.com — this
+                one&apos;s slow (5–30s each). Hang tight.
+              </span>
+            )}
           </p>
         </div>
       ) : (
@@ -955,13 +986,20 @@ function VersionPicker({
             </Select>
             <button
               type="button"
-              onClick={() => softwareQ.refetch()}
-              className="text-xs text-blue-400 hover:text-blue-300"
-              title="Re-poll each device's check-now"
+              onClick={onCheckUpdateServer}
+              disabled={refreshing}
+              className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-50 whitespace-nowrap"
+              title="Make each device re-check updates.paloaltonetworks.com for newly-released versions. Slower (5–30s per device); only needed when a just-released version isn't listed yet."
             >
-              ↻ refresh
+              ↻ Check update server
             </button>
           </div>
+          <p className="text-[11px] text-zinc-500">
+            Showing each device&apos;s cached version list (fast). If a
+            just-released version isn&apos;t here yet, use{" "}
+            <span className="text-zinc-400">↻ Check update server</span> to
+            re-poll updates.paloaltonetworks.com.
+          </p>
           {targetVersion && (() => {
             const agg = aggregates.find((a) => a.version === targetVersion);
             const onAll = !!agg && agg.deviceIds.length === deviceCount;

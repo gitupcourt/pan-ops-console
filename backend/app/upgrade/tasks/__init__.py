@@ -83,11 +83,12 @@ def drive_pair_task(self, job_id: int, ha_pair_key: str) -> dict:
 
     Always returns successfully even when the orchestrator parks; the
     return dict is just observability. A genuine crash inside the
-    orchestrator is caught and converted to `_fail_job` (see the
-    `drive_pair` implementation), which writes JobState.FAILED + the
-    reason. Letting the celery task itself fail would queue a retry,
-    which is the wrong semantics for upgrade orchestration — failures
-    here need explicit operator action (Retry button), not automatic.
+    orchestrator is caught in the `drive_pair` implementation, which fails
+    THIS pair's tasks (not the whole job — failure isolation) and recomputes
+    the job's terminal state (COMPLETED / COMPLETED_WITH_ERRORS / FAILED).
+    Letting the celery task itself fail would queue a retry, which is the wrong
+    semantics for upgrade orchestration — failures here need explicit operator
+    action (Retry button), not automatic.
     """
     from app.upgrade.services.upgrade import drive_pair
 

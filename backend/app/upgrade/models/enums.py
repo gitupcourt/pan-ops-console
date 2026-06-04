@@ -21,6 +21,10 @@ class JobState(str, enum.Enum):
     RUNNING = "running"
     AWAITING_CONFIRMATION = "awaiting_confirmation"
     COMPLETED = "completed"
+    # Terminal: every device reached a terminal state, but a mix of success and
+    # failure — at least one device succeeded and at least one failed. A single
+    # device's failure no longer fails the whole job (failure isolation).
+    COMPLETED_WITH_ERRORS = "completed_with_errors"
     FAILED = "failed"
     ABORTED = "aborted"
 

@@ -627,7 +627,7 @@ class PanDeviceClient:
 
     # ---------- software (download / staging) ----------
 
-    def list_software(self) -> list[dict]:
+    def list_software(self, check_updates: bool = False) -> list[dict]:
         """`request system software info` — return all known versions.
 
         Each entry: {version, downloaded(bool), current(bool), latest(bool),
@@ -635,13 +635,24 @@ class PanDeviceClient:
                      release_type}. ``release_type == "Base"`` flags the single
                      base image per feature train (consumed by
                      ``base_image_from_list``); it is NOT always X.Y.0.
+
+        ``check_updates`` (default False): when True, first run `request system
+        software check`, which makes the device refresh its catalog from
+        updates.paloaltonetworks.com — that round-trip is the slow part (5–30s).
+        When False we skip it and return the device's already-cached catalog,
+        which is local and fast (~1s). Every caller here inspects local state
+        (installed / downloaded / base image), so False is correct for them; the
+        version picker uses False by default and only sets True on an explicit
+        operator "check the update server" refresh (to surface a just-released
+        version the device hasn't pulled into its catalog yet).
         """
-        try:
-            self._proxy.op("<request><system><software><check></check></software></system></request>", cmd_xml=False)
-        except PanDeviceError:
-            # `check` reaches out to updates.paloaltonetworks.com; ok to ignore failure here,
-            # the next call will still return whatever the device knows about.
-            pass
+        if check_updates:
+            try:
+                self._proxy.op("<request><system><software><check></check></software></system></request>", cmd_xml=False)
+            except PanDeviceError:
+                # `check` reaches out to updates.paloaltonetworks.com; ok to ignore failure here,
+                # the next call will still return whatever the device knows about.
+                pass
         try:
             resp = self._proxy.op("<request><system><software><info></info></software></system></request>", cmd_xml=False)
         except PanDeviceError as exc:

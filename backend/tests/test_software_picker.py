@@ -138,12 +138,14 @@ def test_fetch_for_device_surfaces_error(monkeypatch):
 
 
 def _seed(db, name, **over) -> Device:
-    d = Device(
+    fields = dict(
         name=name, hostname=f"{name}.local", verify_tls=False,
         proxy_via_panorama=False, polling_enabled=True,
         source=DeviceSource.DIRECT, ha_role=HARole.STANDALONE,
-        sw_version="12.1.4", **over,
+        sw_version="12.1.4",
     )
+    fields.update(over)  # let callers override (e.g. panorama_id, proxy_via_panorama)
+    d = Device(**fields)
     db.add(d)
     db.commit()
     db.refresh(d)

@@ -84,6 +84,15 @@ celery.conf.update(
     # worker startup) and silence the CPendingDeprecationWarning that prints
     # on every worker/beat boot otherwise.
     broker_connection_retry_on_startup=True,
+    # `upgrade.drive_pair` runs with acks_late + reject_on_worker_lost (see
+    # app.upgrade.tasks) so a task killed by a worker restart/loss is REDELIVERED
+    # and resumed rather than orphaned. For that to be safe the Redis broker's
+    # visibility timeout MUST exceed the task's hard time limit (155 min) —
+    # otherwise Redis would redeliver a still-running drive_pair to a second
+    # worker process and double-drive the same HA pair. 3 h gives clear margin
+    # over the 155-min ceiling. (Early-acked tasks like capacity polling ack on
+    # receipt, so this window never applies to them.)
+    broker_transport_options={"visibility_timeout": 3 * 60 * 60},
     # task_track_started=True is what makes task.state == 'STARTED'
     # observable from the API side. The UI uses it to distinguish
     # "queued" from "actively running" — load-bearing for the

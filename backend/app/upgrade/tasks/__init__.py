@@ -67,11 +67,29 @@ UPGRADE_TASK_SOFT_TIME_LIMIT_S = 150 * 60  # 2.5 h graceful ceiling
 UPGRADE_TASK_HARD_TIME_LIMIT_S = 155 * 60  # +5 m hard backstop
 
 
+# Survive worker restarts / loss. Celery's default is to ack a task on RECEIPT
+# (early ack): if the worker is then SIGKILLed mid-run — a deploy rolling the
+# upgrade-worker, an OOM kill, a node eviction — the in-flight drive_pair is
+# simply LOST. The job's pair strands in a non-terminal phase (e.g. SNAPSHOT)
+# with nothing driving it and no operator-visible recovery. (Observed: a deploy
+# that rolled the worker mid-snapshot orphaned an HA pair on a running job.)
+#
+# acks_late defers the ack until the task returns, and reject_on_worker_lost
+# requeues the task when the worker is lost — so the replacement worker re-runs
+# drive_pair for the same (job, pair) and resumes from the completed_phases
+# markers (reconcile-on-entry makes this idempotent — same mechanism as Retry).
+#
+# Safe against double-delivery because the broker visibility_timeout (set on
+# celery_app) exceeds the hard time limit, and a genuinely stuck pair is failed
+# gracefully by the SOFT-limit handler (acked, not requeued) before the hard
+# limit/SIGKILL path — so there's no redeliver-and-re-kill loop.
 @celery.task(
     name="upgrade.drive_pair",
     bind=True,
     soft_time_limit=UPGRADE_TASK_SOFT_TIME_LIMIT_S,
     time_limit=UPGRADE_TASK_HARD_TIME_LIMIT_S,
+    acks_late=True,
+    reject_on_worker_lost=True,
 )
 def drive_pair_task(self, job_id: int, ha_pair_key: str) -> dict:
     """Drive one HA pair (or standalone device) until the next park or done.

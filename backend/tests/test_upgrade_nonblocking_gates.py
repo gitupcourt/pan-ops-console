@@ -318,6 +318,10 @@ def install_io(monkeypatch):
     monkeypatch.setattr(upgrade, "_client_for", lambda db, d: client)
     monkeypatch.setattr(upgrade, "_wait_for_install_job", lambda *a, **k: True)
     monkeypatch.setattr(upgrade, "_is_already_at_target", lambda d, v: False)
+    # Post-reboot install verification (#186) is out of scope for these
+    # reboot-gate tests — their scenario is a successful install — so stub it to
+    # "applied". The verify logic itself is covered by test_upgrade_verify_install.
+    monkeypatch.setattr(upgrade, "_verify_install_applied", lambda *a, **k: True)
     from app.upgrade.services import precheck as real_precheck  # noqa: PLC0415
     monkeypatch.setattr(real_precheck, "probe_device", lambda *a, **k: None)
     return client

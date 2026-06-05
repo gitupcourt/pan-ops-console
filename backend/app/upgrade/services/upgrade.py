@@ -1253,6 +1253,12 @@ def _phase_install_and_wait(
         except Exception as exc:  # noqa: BLE001
             log.warning("Post-reboot probe failed for %s: %s", device.name, exc)
 
+        # Guard against a silent non-upgrade (issue #186): the device must be
+        # RUNNING the target now, or we fail it (retryable) instead of marking
+        # it done and marching on as if it upgraded.
+        if not _verify_install_applied(db, job, task, device):
+            return False
+
         _mark_phase_done(db, task, "install_complete")
     elif _phase_already_done(task, "install_complete"):
         _record(db, task, "Install + reboot already completed in a prior run; skipping")
@@ -1582,6 +1588,40 @@ def _is_already_at_target(device: Device, target_version: str) -> bool:
     """
     current = (device.current_version or "").strip()
     return current != "" and current == (target_version or "").strip()
+
+
+def _verify_install_applied(
+    db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
+) -> bool:
+    """Confirm the install ACTUALLY took: after install + reboot, the device
+    must be RUNNING the target version.
+
+    Why this exists (issue #186): an install job that "did not FIN cleanly"
+    (most often the device is out of disk and the image can't be written) can
+    reboot the device straight back onto the OLD image. Without this check we'd
+    mark the task `install_complete` and report a non-upgrade as a successful
+    upgrade — exactly what happened to branch1fw01 / Branch 3 / HG440 in job 12.
+
+    The caller runs the post-reboot probe just before this, so `current_version`
+    is fresh. On mismatch we CLEAR `software_installed` so a Retry genuinely
+    re-issues the install (otherwise the stale marker skips it and the device
+    can never converge), then fail the task. Returns True when on target, False
+    (task failed) otherwise.
+    """
+    db.refresh(device)
+    if _is_already_at_target(device, job.target_version):
+        return True
+    _unmark_phase(db, task, "software_installed")
+    _record(
+        db, task,
+        f"Install did not apply — device is still on "
+        f"{device.current_version or 'an unknown version'} after reboot "
+        f"(target {job.target_version}). The most common cause is insufficient "
+        f"disk for the install; free disk space and retry.",
+        phase=TaskPhase.FAILED,
+    )
+    _fail_job(db, job.id, f"Install did not apply for {device.name} (still on old version)")
+    return False
 
 
 def _is_major_jump(current_version: str | None, target_version: str) -> bool:

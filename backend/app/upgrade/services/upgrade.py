@@ -41,6 +41,7 @@ from app.upgrade.models.precheck import PrecheckRun
 from app.upgrade.models.precheck_set import PrecheckSet
 from app.upgrade.models.snapshot import Snapshot, SnapshotKind
 from app.upgrade.services import precheck as precheck_svc
+from app.core.concurrency import dispatch_lock
 from app.upgrade.services import snapshot as snapshot_svc
 from app.upgrade.services.precheck_classifier import classify, overall_severity
 
@@ -60,6 +61,20 @@ INSTALL_JOB_POLL_S = 20
 # later". That's not a real failure — wait and retry a few times.
 DOWNLOAD_RETRY_ATTEMPTS = 3
 DOWNLOAD_RETRY_WAIT_S = 60
+
+# A software install can transiently fail when the device is already mid-install
+# (a leftover install from a prior attempt, or — the real culprit — a duplicate
+# drive_pair dispatch racing the first): PAN-OS returns "A software install is in
+# progress. Please try again later." Wait + retry, same as downloads.
+INSTALL_RETRY_ATTEMPTS = 3
+INSTALL_RETRY_WAIT_S = 60
+
+# Per-(job, pair) dispatch-lock TTL. The lock makes a duplicate drive_pair
+# dispatch a no-op while one is actively driving the pair. Held only for a
+# single drive segment (drive_pair returns — releasing it — at each gate park),
+# so 30 min comfortably covers an install/reboot/HA-resume segment between gates
+# while bounding how long a hard-killed holder blocks redelivery recovery.
+_PAIR_LOCK_TTL_S = 30 * 60
 
 # pre_stage_mode values that mean "stage, don't upgrade now". Prechecks run for
 # information in these modes but must NOT gate (you're only downloading an
@@ -145,6 +160,32 @@ def _resolve_checks_for_job(db: Session, job: UpgradeJob) -> list[str] | None:
 
 
 def drive_pair(job_id: int, ha_pair_key: str) -> None:
+    """Public entry — drive one HA pair / standalone, guarded by a per-pair
+    dispatch lock.
+
+    A duplicate dispatch for a ``(job, ha_pair_key)`` that's already being
+    driven is a NO-OP, not a second concurrent drive that races the first. That
+    race is what aborted pairs in job 10: an operator clicked "Proceed to
+    install" on both HA members (and again when nothing visibly happened), each
+    click re-dispatched the pair, and the duplicate re-classified a mid-upgrade
+    pair → "HA roles unclear" / install collision. The lock is non-blocking
+    (the duplicate returns immediately) and TTL-expiring (a crashed holder can't
+    wedge the pair; acks_late handles worker-loss redelivery once the TTL
+    clears).
+    """
+    with dispatch_lock(
+        f"upgrade:drive_pair:{job_id}:{ha_pair_key}", ttl=_PAIR_LOCK_TTL_S
+    ) as acquired:
+        if not acquired:
+            log.info(
+                "drive_pair(%s, %s): already being driven; skipping duplicate dispatch",
+                job_id, ha_pair_key,
+            )
+            return
+        _drive_pair_inner(job_id, ha_pair_key)
+
+
+def _drive_pair_inner(job_id: int, ha_pair_key: str) -> None:
     """Run the upgrade for one HA pair (2 tasks) or one standalone (1 task).
 
     Owns its own DB session — Celery tasks should not share the FastAPI
@@ -409,7 +450,7 @@ def _drive_solo(db: Session, job: UpgradeJob, task: DeviceUpgradeTask) -> None:
 
 def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask]) -> None:
     # Identify which task is on the passive member (we upgrade that one first).
-    passive, active = _classify_pair(tasks)
+    passive, active = _classify_pair(db, tasks)
     if passive is None or active is None:
         # If HA roles are unclear (both UNKNOWN, both ACTIVE, etc.) we refuse.
         for t in tasks:
@@ -557,11 +598,53 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
 
 
 def _classify_pair(
+    db: Session,
     tasks: list[DeviceUpgradeTask],
 ) -> tuple[DeviceUpgradeTask | None, DeviceUpgradeTask | None]:
+    """Determine which task is the passive (upgrade-first) member and which is
+    the active. The assignment is fixed for the life of the pair upgrade, so we
+    PERSIST it on the first successful classify and reuse it thereafter.
+
+    Why persist: live `device.ha_role` is only reliable when the pair is in a
+    settled state. Mid-upgrade a member is suspended/installing/rebooting and
+    reports its role as "unknown" — re-reading live roles on a re-entry then
+    fails to find a passive+active and aborts the whole pair ("Could not
+    determine HA roles"). That's exactly what killed homegateway in job 10 when
+    a duplicate dispatch re-classified it mid-install. Reusing the persisted
+    assignment makes re-entry (Retry, worker-redelivery, the proceed gates)
+    role-stable. Note the assignment is who-upgrades-first, which stays fixed
+    even though the live roles swap at failover.
+    """
+    # Prefer the persisted assignment if both members carry one.
+    persisted_passive = next(
+        (t for t in tasks if (t.progress or {}).get("ha_member") == "passive"), None
+    )
+    persisted_active = next(
+        (t for t in tasks if (t.progress or {}).get("ha_member") == "active"), None
+    )
+    if persisted_passive is not None and persisted_active is not None:
+        return persisted_passive, persisted_active
+
+    # First classify from live HA roles, and persist it so future re-entries
+    # don't depend on a transient live read.
     passive = next((t for t in tasks if t.device.ha_role == HARole.PASSIVE), None)
     active = next((t for t in tasks if t.device.ha_role == HARole.ACTIVE), None)
+    if passive is not None and active is not None:
+        _persist_member_role(db, passive, "passive")
+        _persist_member_role(db, active, "active")
     return passive, active
+
+
+def _persist_member_role(db: Session, task: DeviceUpgradeTask, role: str) -> None:
+    """Record this task's fixed pair role ("passive"/"active") on its progress so
+    re-entry classification is stable. Dict-copy + reassign (the column is plain
+    JSON — see _mark_phase_done for the rationale)."""
+    progress = dict(task.progress or {})
+    if progress.get("ha_member") == role:
+        return
+    progress["ha_member"] = role
+    task.progress = progress
+    db.commit()
 
 
 # ---------- phase functions ----------
@@ -802,6 +885,58 @@ def _download_image_with_retry(
         raise last_exc
 
 
+def _is_transient_install_error(exc: BaseException) -> bool:
+    """True for install errors that clear on their own — chiefly PAN-OS's
+    "A software install is in progress. Please try again later" (a leftover
+    install, or a duplicate drive_pair racing the first). Worth a wait + retry
+    rather than failing the device."""
+    m = str(exc).lower()
+    return (
+        "a software install is in progress" in m
+        or "install is in progress" in m
+        or "try again later" in m
+    )
+
+
+def _install_with_retry(
+    db: Session, task: DeviceUpgradeTask, device: Device, version: str
+) -> None:
+    """Request the software install and wait for the job — retrying the
+    transient "a software install is in progress" error with a wait between
+    attempts. Raises the last exception on permanent failure or once attempts
+    are exhausted (the caller surfaces it). Rebuilds the client per attempt so a
+    dropped connection during the wait doesn't poison the retry."""
+    last_exc: Exception | None = None
+    for attempt in range(1, INSTALL_RETRY_ATTEMPTS + 1):
+        try:
+            client = _client_for(db, device)
+            _set_substep(db, task, "installing")
+            install_job = client.request_software_install(version)
+            if not install_job:
+                raise RuntimeError("install request returned no job id")
+            ok = _wait_for_install_job(client, install_job, task=task, db=db)
+            if not ok:
+                log.info(
+                    "Install job %s did not FIN cleanly; proceeding to restart anyway",
+                    install_job,
+                )
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < INSTALL_RETRY_ATTEMPTS and _is_transient_install_error(exc):
+                _record(
+                    db, task,
+                    f"Install of {version} attempt {attempt}/{INSTALL_RETRY_ATTEMPTS} hit a "
+                    f"transient error ({exc}); the device is busy with another install — "
+                    f"retrying in {INSTALL_RETRY_WAIT_S}s",
+                )
+                time.sleep(INSTALL_RETRY_WAIT_S)
+                continue
+            raise
+    if last_exc is not None:  # pragma: no cover - loop always returns or raises
+        raise last_exc
+
+
 def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device) -> bool:
     """Download the target image if not already present. Reuses the stage flow
     so the user-visible Stage badge is set on the device too."""
@@ -954,14 +1089,7 @@ def _phase_install_and_wait(
         # image is already on the boot partition, only the reboot is pending.
         if not _phase_already_done(task, "software_installed"):
             try:
-                client = _client_for(db, device)
-                _set_substep(db, task, "installing")
-                install_job = client.request_software_install(job.target_version)
-                if not install_job:
-                    raise RuntimeError("install request returned no job id")
-                ok = _wait_for_install_job(client, install_job, task=task, db=db)
-                if not ok:
-                    log.info("Install job %s did not FIN cleanly; proceeding to restart anyway", install_job)
+                _install_with_retry(db, task, device, job.target_version)
                 _record(db, task, "Install complete")
             except Exception as exc:  # noqa: BLE001
                 _record(db, task, f"Install failed: {exc}", phase=TaskPhase.FAILED)

@@ -162,6 +162,7 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
   return (
     <div className="flex items-center gap-2">
       <JobStateBadge state={job.state} />
+      <AwaitingInputPill job={job} />
       {job.state === "pending" && (
         <Button
           variant="primary"
@@ -194,6 +195,32 @@ function JobLifecycleActions({ job }: { job: UpgradeJobDetail }) {
         </Button>
       )}
     </div>
+  );
+}
+
+/**
+ * Amber "Awaiting your input" pill shown next to a RUNNING job's state badge
+ * when one or more devices are parked at a gate the operator hasn't actioned
+ * yet. Addresses "the job says Running but it's actually waiting on me." If
+ * every parked task already has a pending token (operator clicked, worker just
+ * hasn't caught up), the job is working through the queue — not awaiting — so
+ * the pill hides.
+ */
+function AwaitingInputPill({ job }: { job: UpgradeJobDetail }) {
+  if (job.state !== "running") return null;
+  const gated = job.tasks.filter(
+    (t) =>
+      PARKED_CONFIRM.includes(t.phase) || PARKED_OVERRIDE.includes(t.phase),
+  );
+  const waiting = gated.filter((t) => !t.confirmation_token);
+  if (waiting.length === 0) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded border border-amber-700/60 bg-amber-900/40 px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-amber-200"
+      title={`${waiting.length} device(s) parked waiting for your Proceed / Confirm / Override.`}
+    >
+      Awaiting your input
+    </span>
   );
 }
 
@@ -352,6 +379,7 @@ function TaskList({
               pairKey={key}
               isPairLead={idx === 0 && pair.length > 1}
               isPaired={pair.length > 1}
+              pairTasks={pair}
               jobState={jobState}
             />
           )),
@@ -366,12 +394,14 @@ function TaskRow({
   pairKey,
   isPairLead,
   isPaired,
+  pairTasks,
   jobState,
 }: {
   task: UpgradeTask;
   pairKey: string;
   isPairLead: boolean;
   isPaired: boolean;
+  pairTasks: UpgradeTask[];
   jobState: JobState;
 }) {
   // Auto-expand parked rows + failed rows — operator needs to see
@@ -430,7 +460,13 @@ function TaskRow({
           {relTime(t.updated_at)}
         </td>
         <td className="px-4 py-2">
-          <TaskActionButtons task={t} jobState={jobState} />
+          <TaskActionButtons
+            task={t}
+            jobState={jobState}
+            pairTasks={pairTasks}
+            isPairLead={isPairLead}
+            isPaired={isPaired}
+          />
         </td>
       </tr>
       {expanded && (
@@ -846,9 +882,15 @@ const TERMINAL_JOB_STATES: JobState[] = [
 function TaskActionButtons({
   task,
   jobState,
+  pairTasks,
+  isPairLead = false,
+  isPaired = false,
 }: {
   task: UpgradeTask;
   jobState: JobState;
+  pairTasks?: UpgradeTask[];
+  isPairLead?: boolean;
+  isPaired?: boolean;
 }) {
   // Hooks declared BEFORE the conditional return so the rules-of-hooks
   // invariant holds: every render call hits the same hook sequence.
@@ -881,6 +923,17 @@ function TaskActionButtons({
     mutationFn: () => api.retryUpgradeTask(task.id),
     onSuccess: invalidate,
   });
+
+  // "Pending" = the operator already clicked a gate action; the route set
+  // task.confirmation_token and re-dispatched drive_pair, but the worker
+  // hasn't consumed it yet (queued behind the concurrency limit, or mid-step).
+  // This is DURABLE server state (survives a page refresh), so the button must
+  // NOT look clickable — a clickable-looking button with no visible effect is
+  // exactly what made operators click into the void. For an HA pair the hold
+  // gate is satisfied by EITHER member's token, so a token on either member
+  // means the whole pair is proceeding.
+  const members = pairTasks ?? [task];
+  const pairPending = members.some((m) => !!m.confirmation_token);
 
   // A FAILED task is retryable even on a FAILED or COMPLETED_WITH_ERRORS job:
   // retry resumes from the last completed marker AND un-terminals the job
@@ -921,13 +974,51 @@ function TaskActionButtons({
     );
   }
 
-  if (PARKED_CONFIRM.includes(task.phase)) {
-    const idleLabel =
-      task.phase === "awaiting_install_confirm"
-        ? "Proceed to install"
-        : task.phase === "awaiting_reboot_confirm"
-          ? "Reboot now"
-          : "Confirm";
+  // Install hold gate. This parks BOTH members of a pair, and proceeding runs
+  // the standard passive→active HA flow for the whole pair — so we surface ONE
+  // button (on the pair lead) instead of one per member, which read as "do I
+  // have to click both?". Once clicked, the durable pending state replaces it
+  // so it can't be re-clicked.
+  if (task.phase === "awaiting_install_confirm") {
+    if (pairPending) return <PendingAction label="Proceeding…" />;
+    if (isPaired) {
+      // Only the genuine both-parked-at-the-gate state offers Proceed. Once the
+      // pair has proceeded, the passive moves on while the active still reads
+      // AWAITING_INSTALL_CONFIRM until its turn — show "waiting", never a
+      // clickable button (a stray click there would leave an unconsumed token
+      // that could auto-advance a LATER gate).
+      const bothAtGate = members.every(
+        (m) => m.phase === "awaiting_install_confirm",
+      );
+      if (!bothAtGate) {
+        return (
+          <span className="text-[11px] text-zinc-500 italic">
+            waiting for partner…
+          </span>
+        );
+      }
+      if (!isPairLead) {
+        return (
+          <span className="text-[11px] text-zinc-500 italic">
+            proceeds with pair ↑
+          </span>
+        );
+      }
+      return (
+        <Button
+          variant="primary"
+          onClick={() => confirmM.mutate()}
+          disabled={confirmM.isPending}
+          title="Proceeds the whole HA pair through install (passive first, then failover, then active)."
+        >
+          <BusyLabel
+            busy={confirmM.isPending}
+            busyLabel="Proceeding…"
+            idleLabel="Proceed to install (pair)"
+          />
+        </Button>
+      );
+    }
     return (
       <Button
         variant="primary"
@@ -936,13 +1027,38 @@ function TaskActionButtons({
       >
         <BusyLabel
           busy={confirmM.isPending}
-          busyLabel="Working…"
+          busyLabel="Proceeding…"
+          idleLabel="Proceed to install"
+        />
+      </Button>
+    );
+  }
+
+  // Other confirm gates (reboot / failover / primary-upgrade) are per-member —
+  // only the member at the gate is parked. Show the durable pending state once
+  // the operator's click has set this task's token.
+  if (PARKED_CONFIRM.includes(task.phase)) {
+    if (task.confirmation_token) {
+      return <PendingAction label={pendingLabel(task.phase)} />;
+    }
+    const idleLabel =
+      task.phase === "awaiting_reboot_confirm" ? "Reboot now" : "Confirm";
+    return (
+      <Button
+        variant="primary"
+        onClick={() => confirmM.mutate()}
+        disabled={confirmM.isPending}
+      >
+        <BusyLabel
+          busy={confirmM.isPending}
+          busyLabel={pendingLabel(task.phase)}
           idleLabel={idleLabel}
         />
       </Button>
     );
   }
   if (PARKED_OVERRIDE.includes(task.phase)) {
+    if (task.confirmation_token) return <PendingAction label="Queued…" />;
     // Three operator choices at a check-failure gate. Re-run goes
     // first (left) because it's the lowest-risk path — "I fixed it,
     // verify again." Override is the deliberate-bypass red button.
@@ -986,6 +1102,30 @@ function TaskActionButtons({
     );
   }
   return <span className="text-xs text-zinc-600">—</span>;
+}
+
+// Durable "your click registered — it's queued/working" indicator. Driven by
+// task.confirmation_token (set by the confirm/override routes, cleared by the
+// orchestrator when it consumes the token), so it reflects real server state
+// and survives a page refresh — unlike a mutation's transient isPending. This
+// is the antidote to "I clicked and nothing happened, so I kept clicking."
+function PendingAction({ label }: { label: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded border border-blue-800/50 bg-blue-950/40 px-2 py-1 text-[11px] text-blue-200"
+      title="Registered — waiting for a free worker slot, or already in progress. No need to click again."
+    >
+      <Spinner className="text-blue-300" />
+      {label}
+    </span>
+  );
+}
+
+function pendingLabel(phase: TaskPhase): string {
+  if (phase === "awaiting_reboot_confirm") return "Reboot queued…";
+  if (phase === "awaiting_install_confirm") return "Proceeding…";
+  if (phase === "awaiting_failover_confirm") return "Failover queued…";
+  return "Queued…";
 }
 
 function TaskPhaseBadge({ phase }: { phase: TaskPhase }) {

@@ -210,6 +210,11 @@ def _drive_pair_inner(job_id: int, ha_pair_key: str) -> None:
             return
 
         if _job_terminal(db, job):
+            # If the job ended (especially ABORTED) with a member we left
+            # suspended, restore HA before bailing — never leave a cluster
+            # degraded on a single node. (The abort route re-dispatches each
+            # pair so this cleanup runs.)
+            _heal_suspended_members(db, job, tasks)
             return
 
         # Reconcile each task's phase markers against the device's CURRENT
@@ -234,6 +239,12 @@ def _drive_pair_inner(job_id: int, ha_pair_key: str) -> None:
         # (you can't half-upgrade an HA pair) so the partner doesn't sit
         # non-terminal forever and the job can reach a terminal state.
         _fail_pair_if_partial(db, tasks)
+        # Restore HA on any member we suspended if the pair failed OR the job was
+        # aborted out from under this drive — a failed/aborted upgrade must not
+        # leave the cluster degraded on a single node.
+        db.refresh(job)
+        if job.state == JobState.ABORTED or any(t.phase == TaskPhase.FAILED for t in tasks):
+            _heal_suspended_members(db, job, tasks)
         # Recompute the job state. Only flips terminal once EVERY task across
         # the job is terminal (COMPLETED / COMPLETED_WITH_ERRORS / FAILED) —
         # other pairs in flight or parked keep it RUNNING.
@@ -252,16 +263,21 @@ def _drive_pair_inner(job_id: int, ha_pair_key: str) -> None:
         # bare driver crash used to freeze tasks mid-phase with no way forward.
         # Best-effort — cleanup must never mask the original error.
         try:
-            for t in (
+            crash_tasks = (
                 db.query(DeviceUpgradeTask)
                 .filter(
                     DeviceUpgradeTask.job_id == job_id,
                     DeviceUpgradeTask.ha_pair_key == ha_pair_key,
                 )
                 .all()
-            ):
+            )
+            for t in crash_tasks:
                 if t.phase not in (TaskPhase.DONE, TaskPhase.FAILED):
                     _record(db, t, msg, phase=TaskPhase.FAILED)
+            # A crash mid-upgrade must not leave the cluster degraded — restore
+            # HA on any member we'd suspended.
+            crash_job = db.get(UpgradeJob, job_id)
+            _heal_suspended_members(db, crash_job, crash_tasks)
         except Exception:  # noqa: BLE001
             log.exception("post-crash task cleanup failed for job=%s", job_id)
         # The loop above already failed this pair's in-flight tasks (atomic pair
@@ -452,7 +468,13 @@ def _drive_ha_pair(db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask])
     # Identify which task is on the passive member (we upgrade that one first).
     passive, active = _classify_pair(db, tasks)
     if passive is None or active is None:
-        # If HA roles are unclear (both UNKNOWN, both ACTIVE, etc.) we refuse.
+        # Roles unclear. Common cause: a member is stuck 'suspended' from an
+        # earlier interrupted upgrade (a member reads role "unknown" while
+        # suspended). Try to heal it (resume → re-probe) and re-classify before
+        # giving up — this self-recovers a pair an aborted job left degraded.
+        if _heal_suspended_for_classify(db, job, tasks):
+            passive, active = _classify_pair(db, tasks)
+    if passive is None or active is None:
         for t in tasks:
             _record(db, t, "Could not determine HA roles for the pair; aborting", phase=TaskPhase.FAILED)
         _fail_job(db, job.id, "HA roles unclear")
@@ -645,6 +667,96 @@ def _persist_member_role(db: Session, task: DeviceUpgradeTask, role: str) -> Non
     progress["ha_member"] = role
     task.progress = progress
     db.commit()
+
+
+# ---------- HA heal (don't leave a cluster degraded on failure) ----------
+
+
+def _resume_suspended_member(
+    db: Session, task: DeviceUpgradeTask, device: Device
+) -> bool:
+    """Resume one HA member that is currently 'suspended' and confirm it left
+    that state. Returns True if the member is not (or no longer) suspended,
+    False if a resume couldn't be confirmed. Never raises — healing is
+    best-effort and must not mask the original failure."""
+    try:
+        db.refresh(device)
+        if device.ha_peer_id is None:
+            return True  # standalone — nothing to resume
+        if (device.ha_state or "").lower().strip() != "suspended":
+            return True  # already healthy
+        if not _ha_op_with_retry(
+            db, task, device, "HA resume (restore cluster)", lambda c: c.resume_ha()
+        ):
+            _record(
+                db, task,
+                "Could not resume HA (command failed); resume manually: "
+                "`request high-availability state functional`.",
+            )
+            return False
+        if not _verify_resume_took_effect(db, task, device):
+            _record(
+                db, task,
+                "HA resume issued but the member stayed suspended; resume "
+                "manually: `request high-availability state functional`.",
+            )
+            return False
+        _record(db, task, "HA resumed — member rejoined the cluster (redundancy restored).")
+        return True
+    except Exception as exc:  # noqa: BLE001 — heal is best-effort
+        log.warning("HA resume (restore) errored for task %s: %s", task.id, exc)
+        try:
+            _record(db, task, f"HA resume errored ({exc}); resume manually if the member stays suspended.")
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def _heal_suspended_members(
+    db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask]
+) -> None:
+    """Restore HA after a pair's upgrade ENDS without completing (phase failure,
+    crash, or abort). We suspend the passive to install it; a failure between
+    that suspend and the normal resume would otherwise leave the member
+    'suspended' — the cluster running on a single node with no redundancy, and
+    unclassifiable for the next job (the job-10 → job-11 trap). Resume any such
+    member, best-effort. Members already resumed in the normal flow
+    (ha_resume_complete) are skipped."""
+    for t in tasks:
+        if _phase_already_done(t, "ha_resume_complete"):
+            continue
+        _resume_suspended_member(db, t, t.device)
+
+
+def _heal_suspended_for_classify(
+    db: Session, job: UpgradeJob, tasks: list[DeviceUpgradeTask]
+) -> bool:
+    """A pair failed to classify (no clean passive+active). If that's because a
+    member is stuck 'suspended' — left by an earlier interrupted upgrade —
+    resume it so the pair becomes classifiable, then re-probe so the caller's
+    re-classify reads settled roles. Returns True if a resume was attempted."""
+    attempted = False
+    for t in tasks:
+        db.refresh(t.device)
+        if t.device.ha_peer_id is None:
+            continue
+        if (t.device.ha_state or "").lower().strip() != "suspended":
+            continue
+        _record(
+            db, t,
+            "HA member is suspended — likely left by an earlier interrupted "
+            "upgrade. Resuming to restore the cluster before classifying.",
+        )
+        if _resume_suspended_member(db, t, t.device):
+            attempted = True
+    if attempted:
+        for t in tasks:
+            try:
+                precheck_svc.probe_device(db, t.device, client=_client_for(db, t.device))
+                db.refresh(t.device)
+            except Exception as exc:  # noqa: BLE001
+                log.info("post-resume re-probe failed for %s: %s", t.device.name, exc)
+    return attempted
 
 
 # ---------- phase functions ----------

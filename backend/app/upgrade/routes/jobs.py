@@ -467,6 +467,11 @@ def abort_job(
     in flight will stop advancing on their next iteration without
     needing inter-process signal plumbing.
 
+    Then re-dispatches each pair so the orchestrator's entry check runs
+    HA-heal: any member we'd suspended for an in-flight install is
+    resumed, so pulling the cord never strands a cluster degraded on a
+    single node (the job-10 -> job-11 trap).
+
     Refuses on already-terminal jobs (COMPLETED / FAILED / ABORTED) —
     nothing to abort.
     """
@@ -489,6 +494,13 @@ def abort_job(
         _audit_log(t, f"Job aborted by {user.username}")
     db.commit()
     db.refresh(job)
+    # Re-dispatch each pair so the orchestrator's entry check sees ABORTED and
+    # runs HA-heal: resume any member we suspended for an in-flight upgrade, so
+    # aborting never strands a cluster degraded on a single node. drive_pair is
+    # idempotent (per-pair lock + reconcile) — a re-dispatch for a pair already
+    # parked/idle just heals + bails.
+    for key in {t.ha_pair_key for t in job.tasks}:
+        drive_pair_task.delay(job_id, key)
     return _job_to_detail(job)
 
 

@@ -295,3 +295,26 @@ def test_drive_pair_task_is_registered_by_name():
         f"upgrade.drive_pair not registered. Available: "
         f"{[n for n in celery.tasks if not n.startswith('celery.')]}"
     )
+
+
+def test_drive_pair_survives_worker_loss():
+    """drive_pair must ack LATE + reject-on-worker-lost so a worker restart /
+    kill redelivers it (resume from markers) instead of orphaning the pair. The
+    broker visibility timeout must exceed the hard time limit, or a long but
+    healthy run would be redelivered to a second worker and double-drive the
+    pair."""
+    from app.upgrade.tasks import (
+        UPGRADE_TASK_HARD_TIME_LIMIT_S,
+        drive_pair_task,
+    )
+    from app.workers.celery_app import celery
+
+    assert drive_pair_task.acks_late is True
+    assert drive_pair_task.reject_on_worker_lost is True
+
+    vis = celery.conf.broker_transport_options.get("visibility_timeout")
+    assert vis is not None and vis > UPGRADE_TASK_HARD_TIME_LIMIT_S, (
+        f"visibility_timeout ({vis}) must exceed the hard time limit "
+        f"({UPGRADE_TASK_HARD_TIME_LIMIT_S}) to avoid double-delivery of a "
+        "long-running drive_pair"
+    )

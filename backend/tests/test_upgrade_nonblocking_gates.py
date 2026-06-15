@@ -291,59 +291,105 @@ def test_postcheck_pass_advances(postcheck_io):
 
 
 # ---------- reboot gate inside _phase_install_and_wait ----------
+#
+# Issue #185 converted the install + reboot WAITS to the same park-and-re-poll
+# pattern as the gates: the install command is issued once and its PAN-OS job is
+# polled to FIN across re-dispatches; the reboot is issued once and readiness is
+# confirmed (reachable AND on target, N consecutive ticks) across re-dispatches.
+# So these tests now (a) give the fake client get_job_status (FIN/OK so the
+# install job completes promptly) and a get_system_info that reports the target
+# version, and (b) drive the phase through its re-dispatches via a small loop —
+# every PARKED return re-dispatches drive_pair (here a recorder), exactly as the
+# countdown re-dispatch does live. The reboot-gate (confirm) behaviour they pin
+# is unchanged; only the surrounding non-blocking waits are new.
 
 
 class _FakeInstallClient:
-    def __init__(self):
+    def __init__(self, target="12.1.7"):
         self.installs = 0
         self.restarts = 0
+        self.target = target
+        self.job_status_calls = 0
+        self.sysinfo_calls = 0
 
     def request_software_install(self, version):
         self.installs += 1
         return "job-123"
 
+    def get_job_status(self, job_id):
+        # Install job FINs OK immediately — the wait converges on the first poll.
+        self.job_status_calls += 1
+        return {"status": "FIN", "progress": "100", "result": "OK"}
+
     def restart_system(self):
         self.restarts += 1
 
-    def wait_for_ready(self, **kw):
-        return None
-
     def get_system_info(self):
-        return {"sw-version": "12.1.7"}
+        # Reachable and already on target — each readiness tick counts toward the
+        # consecutive-success streak so the reboot converges after a few ticks.
+        self.sysinfo_calls += 1
+        return SimpleNamespace(sw_version=self.target, ha_state=None)
 
 
 @pytest.fixture
 def install_io(monkeypatch):
     client = _FakeInstallClient()
     monkeypatch.setattr(upgrade, "_client_for", lambda db, d: client)
-    monkeypatch.setattr(upgrade, "_wait_for_install_job", lambda *a, **k: True)
     monkeypatch.setattr(upgrade, "_is_already_at_target", lambda d, v: False)
     # Post-reboot install verification (#186) is out of scope for these
     # reboot-gate tests — their scenario is a successful install — so stub it to
     # "applied". The verify logic itself is covered by test_upgrade_verify_install.
     monkeypatch.setattr(upgrade, "_verify_install_applied", lambda *a, **k: True)
+    # Parks re-dispatch drive_pair; record instead of hitting a broker.
+    dispatches = []
+    monkeypatch.setattr(
+        upgrade.drive_pair_task, "apply_async",
+        lambda args=(), **kw: dispatches.append((args, kw)),
+    )
+    client.dispatches = dispatches  # expose for assertions
     from app.upgrade.services import precheck as real_precheck  # noqa: PLC0415
     monkeypatch.setattr(real_precheck, "probe_device", lambda *a, **k: None)
     return client
 
 
 def _install_job(**over):
-    base = dict(id=1, target_version="12.1.7", auto_reboot_after_install=False)
+    base = dict(
+        id=1, job_id=1, ha_pair_key="pair-1",
+        target_version="12.1.7", auto_reboot_after_install=False,
+    )
     base.update(over)
     return SimpleNamespace(**base)
 
 
+def _drive_until_settled(job, task, *, max_ticks=20):
+    """Re-invoke _phase_install_and_wait the way the countdown re-dispatch does,
+    until it stops parking (returns True, or False with no fresh park). Returns
+    the final bool. Mirrors the live park → re-dispatch → re-enter loop so the
+    non-blocking install/reboot waits run to completion in a unit test."""
+    last = None
+    for _ in range(max_ticks):
+        # task.job_id / ha_pair_key are threaded through to the re-dispatch.
+        task.job_id = job.job_id
+        task.ha_pair_key = job.ha_pair_key
+        last = upgrade._phase_install_and_wait(
+            MagicMock(), job, task, task.device,
+            started_phase=TaskPhase.UPGRADE_PRIMARY,
+        )
+        if last is True:
+            return True
+        if task.phase in (TaskPhase.AWAITING_REBOOT_CONFIRM, TaskPhase.FAILED):
+            return last  # parked at the operator gate / failed — stop driving
+    return last
+
+
 def test_reboot_gate_parks_after_install(install_io):
-    """auto_reboot off: install happens, then we PARK before reboot — slot frees,
-    nothing has rebooted, and 'software_installed' is marked so resume won't
-    re-install."""
-    task = _task(phase=TaskPhase.PENDING)
-    out = upgrade._phase_install_and_wait(
-        MagicMock(), _install_job(), task, task.device,
-        started_phase=TaskPhase.UPGRADE_PRIMARY,
-    )
+    """auto_reboot off: the install job runs (issued once, polled to FIN), then we
+    PARK at the reboot confirm gate — nothing has rebooted yet and
+    'software_installed' is marked so a resume won't re-install."""
+    task = _task(phase=TaskPhase.PENDING, job_id=1, ha_pair_key="pair-1")
+    out = _drive_until_settled(_install_job(), task)
     assert out is False
-    assert install_io.installs == 1
+    assert install_io.installs == 1  # issued exactly once
     assert install_io.restarts == 0  # did NOT reboot
     assert task.phase == TaskPhase.AWAITING_REBOOT_CONFIRM
     assert "software_installed" in _completed(task)
@@ -351,34 +397,77 @@ def test_reboot_gate_parks_after_install(install_io):
     assert "install_complete" not in _completed(task)
 
 
+def test_install_issued_once_across_repolls(install_io):
+    """Idempotency: while the install job is still running (not FIN), re-entries
+    must NOT re-issue request_software_install — they only re-poll the persisted
+    job id."""
+    # get_job_status reports ACT (not FIN) so the wait keeps parking.
+    install_io.get_job_status = lambda job_id: {  # type: ignore[assignment]
+        "status": "ACT", "progress": "40", "result": "unknown",
+    }
+    job = _install_job()
+    task = _task(phase=TaskPhase.PENDING, job_id=1, ha_pair_key="pair-1")
+    for _ in range(4):
+        out = upgrade._phase_install_and_wait(
+            MagicMock(), job, task, task.device,
+            started_phase=TaskPhase.UPGRADE_PRIMARY,
+        )
+        assert out is False  # parked, re-polling
+    assert install_io.installs == 1  # issued ONCE despite 4 entries
+    assert task.progress["install_job_id"] == "job-123"
+    assert "software_installed" not in _completed(task)
+
+
 def test_reboot_gate_resume_skips_reinstall_then_reboots(install_io):
     """Re-dispatch after 'Reboot now': the software_installed marker means we do
-    NOT re-issue the install — we go straight to the reboot and finish."""
+    NOT re-issue the install — we restart once and converge once the device
+    reports the target version on enough consecutive readiness checks."""
     task = _task(
         phase=TaskPhase.AWAITING_REBOOT_CONFIRM,
         confirmation_token="tok",
         progress={"completed_phases": ["software_installed"]},
+        job_id=1, ha_pair_key="pair-1",
     )
-    out = upgrade._phase_install_and_wait(
-        MagicMock(), _install_job(), task, task.device,
-        started_phase=TaskPhase.UPGRADE_PRIMARY,
-    )
+    out = _drive_until_settled(_install_job(), task)
     assert out is True
     assert install_io.installs == 0  # NOT re-installed
-    assert install_io.restarts == 1  # rebooted on resume
+    assert install_io.restarts == 1  # rebooted exactly once
     assert "reboot_confirmed" in _completed(task)
     assert "install_complete" in _completed(task)
 
 
-def test_auto_reboot_skips_gate_entirely(install_io):
-    """With auto_reboot_after_install=True there's no pause: install → reboot →
-    done in one pass, no AWAITING_REBOOT_CONFIRM."""
-    task = _task(phase=TaskPhase.PENDING)
-    out = upgrade._phase_install_and_wait(
-        MagicMock(), _install_job(auto_reboot_after_install=True), task, task.device,
-        started_phase=TaskPhase.UPGRADE_PRIMARY,
+def test_reboot_issued_once_across_repolls(install_io):
+    """Idempotency: a re-entry must NEVER re-restart a device that's already
+    rebooting — restart_system is issued once behind the reboot_issued marker
+    while readiness is still being confirmed."""
+    # Device not yet back on target → readiness streak never completes → parks.
+    install_io.get_system_info = lambda: SimpleNamespace(  # type: ignore[assignment]
+        sw_version="11.2.7", ha_state=None
     )
+    task = _task(
+        phase=TaskPhase.UPGRADE_PRIMARY,
+        progress={"completed_phases": ["software_installed", "reboot_confirmed"]},
+        job_id=1, ha_pair_key="pair-1",
+    )
+    job = _install_job()
+    for _ in range(4):
+        out = upgrade._phase_install_and_wait(
+            MagicMock(), job, task, task.device,
+            started_phase=TaskPhase.UPGRADE_PRIMARY,
+        )
+        assert out is False  # parked, re-confirming readiness
+    assert install_io.restarts == 1  # restarted ONCE despite 4 entries
+    assert "reboot_issued" in _completed(task)
+    assert "install_complete" not in _completed(task)
+
+
+def test_auto_reboot_skips_gate_entirely(install_io):
+    """With auto_reboot_after_install=True there's no operator pause: install →
+    reboot → done across re-dispatches, never parking at AWAITING_REBOOT_CONFIRM."""
+    task = _task(phase=TaskPhase.PENDING, job_id=1, ha_pair_key="pair-1")
+    out = _drive_until_settled(_install_job(auto_reboot_after_install=True), task)
     assert out is True
     assert install_io.installs == 1
     assert install_io.restarts == 1
+    assert task.phase != TaskPhase.AWAITING_REBOOT_CONFIRM
     assert "install_complete" in _completed(task)

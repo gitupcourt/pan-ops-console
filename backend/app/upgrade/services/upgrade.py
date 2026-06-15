@@ -41,6 +41,7 @@ from app.upgrade.models.precheck import PrecheckRun
 from app.upgrade.models.precheck_set import PrecheckSet
 from app.upgrade.models.snapshot import Snapshot, SnapshotKind
 from app.upgrade.services import precheck as precheck_svc
+from app.upgrade.tasks import drive_pair_task
 from app.core.concurrency import dispatch_lock
 from app.upgrade.services import snapshot as snapshot_svc
 from app.upgrade.services.precheck_classifier import classify, overall_severity
@@ -50,6 +51,13 @@ log = logging.getLogger(__name__)
 # How long to wait for a device to come back from a reboot.
 REBOOT_TIMEOUT_S = 30 * 60
 REBOOT_POLL_S = 30
+# Consecutive healthy post-reboot checks (reachable AND on the target version)
+# required before declaring the device "up". Re-implements wait_for_ready's
+# consecutive-success confirmation (its default was 3) for the non-blocking,
+# park-between-checks reboot wait: a single flaky mgmt response mid-reboot (the
+# API answers briefly, then the box goes back down as subsystems init) must not
+# read as "up". The streak is persisted on task.progress across re-dispatches.
+REBOOT_READY_CONSECUTIVE = 3
 
 # How long to wait for an install JOB to FIN before assuming it's wedged.
 INSTALL_JOB_TIMEOUT_S = 30 * 60
@@ -75,6 +83,16 @@ INSTALL_RETRY_WAIT_S = 60
 # so 30 min comfortably covers an install/reboot/HA-resume segment between gates
 # while bounding how long a hard-killed holder blocks redelivery recovery.
 _PAIR_LOCK_TTL_S = 30 * 60
+
+# Re-dispatch delay for the NON-BLOCKING long waits (install-job FIN, reboot
+# readiness, image-download FIN, HA-resync to 'passive'). Like the confirm
+# gates, these waits no longer block the worker slot by polling in a loop:
+# _await_or_park checks the condition ONCE and, if not yet satisfied, parks the
+# task and re-dispatches drive_pair after this many seconds. Each re-dispatch
+# re-enters, re-checks, and either advances or re-parks. 30s keeps the timeline
+# responsive without hammering the device/Panorama proxy, and frees the slot for
+# other pairs the entire time (the whole point of issue #185).
+NONBLOCKING_POLL_S = 30
 
 # pre_stage_mode values that mean "stage, don't upgrade now". Prechecks run for
 # information in these modes but must NOT gate (you're only downloading an
@@ -400,6 +418,128 @@ def _confirm_gate(
         return True
     _record(db, task, parked_msg, phase=parking_phase)
     return False
+
+
+class _Wait(enum.Enum):
+    """Outcome of a single NON-BLOCKING long-wait check (`_await_or_park`).
+
+    The four long waits (install-job FIN, post-reboot readiness, image-download
+    FIN, HA-resync to 'passive') used to BLOCK the worker by polling in a
+    `while` loop — with worker --concurrency 2, two such waits stalled the whole
+    job (issue #185). They now mirror the confirm-gate park pattern: check the
+    condition ONCE per drive_pair entry and, if not yet satisfied, park + free
+    the slot, resuming on a self-scheduled re-dispatch.
+
+      - DONE:      the awaited condition is satisfied; the caller falls through.
+      - PARKED:    not satisfied yet, but still within the timeout — drive_pair
+                   has been re-dispatched (countdown). The caller must
+                   `return False` so the worker slot frees until then.
+      - TIMED_OUT: the persisted start exceeded timeout_s — the caller records
+                   FAILED + _fail_job and returns False.
+    """
+
+    DONE = "done"
+    PARKED = "parked"
+    TIMED_OUT = "timed_out"
+
+
+def _await_or_park(
+    db: Session,
+    task: DeviceUpgradeTask,
+    *,
+    marker: str,
+    timeout_s: int,
+    is_done,
+    poll_s: int = NONBLOCKING_POLL_S,
+) -> _Wait:
+    """Non-blocking replacement for a blocking poll loop — the shared primitive
+    behind the install/reboot/download/HA-resync waits.
+
+    Instead of sleeping in the worker until ``is_done()`` turns true (which held
+    a concurrency slot for the entire multi-minute wait), this checks ONCE and,
+    if not done, re-dispatches ``drive_pair`` after ``poll_s`` and returns PARKED
+    so the caller exits and frees the slot. Each re-dispatch re-enters and
+    re-checks — the wait makes progress across many short invocations rather than
+    one long block, so independent pairs run in parallel and no single drive_pair
+    invocation can trip the Celery soft/hard time limit.
+
+    The timeout must survive re-entries (each invocation is a fresh process with
+    no in-memory deadline), so we persist an ISO start timestamp at
+    ``progress["_wait_start::<marker>"]`` on the FIRST check and compare against
+    it on every subsequent one. The per-marker key lets several distinct waits
+    coexist on one task's progress over the life of the upgrade. Uses the
+    dict-copy + reassign + commit pattern (the ``progress`` column is plain JSON,
+    NOT MutableDict — see ``_mark_phase_done`` for why).
+
+    ``is_done`` is called exactly once and wrapped in try/except: a transient
+    error (Panorama still re-registering the just-rebooted device, HA daemon not
+    answering yet, a dropped socket) counts as "not done yet" and parks, rather
+    than aborting the upgrade — the same resilience the old poll loops had via
+    their per-iteration ``except: continue``.
+
+    Returns DONE / PARKED / TIMED_OUT (see ``_Wait``). The start marker is
+    cleared on the terminal outcomes (DONE / TIMED_OUT) so a later wait that
+    reuses the same marker starts a fresh clock.
+    """
+    start_key = f"_wait_start::{marker}"
+    progress = dict(task.progress or {})
+    start_iso = progress.get(start_key)
+    if start_iso is None:
+        # First check for this wait — stamp the clock so the timeout survives
+        # the re-dispatches that follow.
+        start_iso = _now_iso()
+        progress[start_key] = start_iso
+        task.progress = progress
+        db.commit()
+
+    # Check the condition exactly once. A transient failure is "not done yet".
+    try:
+        done = bool(is_done())
+    except Exception as exc:  # noqa: BLE001
+        log.info(
+            "_await_or_park(%s): is_done() raised (treating as not-done): %s",
+            marker, exc,
+        )
+        done = False
+
+    if done:
+        _clear_wait_start(db, task, start_key)
+        return _Wait.DONE
+
+    # Not done — has the persisted clock run out?
+    try:
+        start_dt = datetime.fromisoformat(start_iso)
+    except (TypeError, ValueError):
+        # Corrupt/missing timestamp — re-stamp NOW and treat this as the first
+        # tick rather than instantly timing out on garbage.
+        start_dt = datetime.now(timezone.utc)
+        progress = dict(task.progress or {})
+        progress[start_key] = start_dt.isoformat()
+        task.progress = progress
+        db.commit()
+    if (datetime.now(timezone.utc) - start_dt).total_seconds() >= timeout_s:
+        _clear_wait_start(db, task, start_key)
+        return _Wait.TIMED_OUT
+
+    # Still within the window — re-dispatch ourselves and park. apply_async with
+    # the (job_id, ha_pair_key) positional args keeps the same `upgrade` queue
+    # routing (task_routes on "upgrade.*"); the per-pair dispatch_lock releases
+    # when drive_pair returns (context-manager exit) and the countdown
+    # re-dispatch re-acquires it — no lock changes needed.
+    drive_pair_task.apply_async(
+        (task.job_id, task.ha_pair_key), countdown=poll_s
+    )
+    return _Wait.PARKED
+
+
+def _clear_wait_start(db: Session, task: DeviceUpgradeTask, start_key: str) -> None:
+    """Drop a persisted ``_await_or_park`` start timestamp. Idempotent — no-op if
+    the key isn't present. Dict-copy + reassign (plain-JSON column)."""
+    progress = dict(task.progress or {})
+    if start_key in progress:
+        progress.pop(start_key, None)
+        task.progress = progress
+        db.commit()
 
 
 def _resolve_override_action(
@@ -969,7 +1109,12 @@ def _download_image_with_retry(
     """Request a software download, wait for it, and verify it landed —
     retrying on transient "another download in progress" errors with a wait
     between attempts. Raises the last exception on permanent failure or once
-    the attempts are exhausted (the caller decides how to surface it)."""
+    the attempts are exhausted (the caller decides how to surface it).
+
+    SUPERSEDED in the live flow by the NON-BLOCKING `_download_step` (issue
+    #185): `_phase_ensure_image` no longer calls this. Retained because its
+    transient-retry semantics are pinned by test_upgrade_stage_resilience.py;
+    safe to delete here once that test is migrated to `_download_step`."""
     last_exc: Exception | None = None
     for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
         try:
@@ -1017,7 +1162,12 @@ def _install_with_retry(
     transient "a software install is in progress" error with a wait between
     attempts. Raises the last exception on permanent failure or once attempts
     are exhausted (the caller surfaces it). Rebuilds the client per attempt so a
-    dropped connection during the wait doesn't poison the retry."""
+    dropped connection during the wait doesn't poison the retry.
+
+    SUPERSEDED in the live flow by the NON-BLOCKING `_install_step` (issue #185):
+    `_phase_install_and_wait` no longer calls this. Retained because its
+    transient-retry semantics are pinned by test_upgrade_dispatch_idempotency.py;
+    safe to delete here once that test is migrated to `_install_step`."""
     last_exc: Exception | None = None
     for attempt in range(1, INSTALL_RETRY_ATTEMPTS + 1):
         try:
@@ -1083,6 +1233,13 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
     # (12.1's base is 12.1.2), so read it from the firewall's software list
     # (release-type == "Base") rather than guessing. Same-train maintenance
     # bumps (11.2.4 -> 11.2.11) skip this entirely — no wasted request.
+    #
+    # NON-BLOCKING (issue #185): the base and target downloads each go through
+    # _download_step, which issues once and polls the PAN-OS job across
+    # re-dispatches. On a PARKED result we return False to free the slot; the
+    # re-dispatch re-enters here and _download_step's is_version_downloaded
+    # short-circuit skips any download that already completed, so we resume at
+    # whichever image is still in flight.
     if _is_major_jump(device.current_version, job.target_version):
         try:
             software = client.list_software()
@@ -1091,11 +1248,7 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
             _record(db, task, f"Could not read software list for base-image check: {exc}")
         base = base_image_from_list(job.target_version, software)
         if base and base != job.target_version:
-            base_present = any(
-                e.get("version") == base and (e.get("downloaded") or e.get("current"))
-                for e in software
-            )
-            if base_present:
+            if client.is_version_downloaded(base):
                 _record(db, task, f"Base image {base} already present; no base download needed")
             else:
                 _record(
@@ -1103,12 +1256,20 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
                     f"Major-version jump to {job.target_version}: downloading base image "
                     f"{base} first (required before the maintenance release will install)",
                 )
-                try:
-                    _download_image_with_retry(client, base, task=task, db=db)
-                    _record(db, task, f"Base image {base} downloaded")
-                except Exception as exc:  # noqa: BLE001
-                    _record(db, task, f"Base image download failed: {exc}", phase=TaskPhase.FAILED)
-                    _fail_job(db, job.id, f"Base image {base} download failed for {device.name}")
+                r = _download_step(db, job, task, device, base, slot="base")
+                if r is _Wait.PARKED:
+                    return False
+                if r is _Wait.TIMED_OUT:
+                    # _download_step recorded FAILED + _fail_job on a permanent
+                    # failure; the job-timeout path lands here too.
+                    if task.phase != TaskPhase.FAILED:
+                        _record(
+                            db, task,
+                            f"Base image {base} download did not finish within "
+                            f"{INSTALL_JOB_TIMEOUT_S}s",
+                            phase=TaskPhase.FAILED,
+                        )
+                        _fail_job(db, job.id, f"Base image {base} download failed for {device.name}")
                     return False
         elif not base:
             _record(
@@ -1118,14 +1279,18 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
                 f"require it if needed)",
             )
 
-    # Inline download; same approach as the stage service but we don't create
-    # a separate DeviceStageRun here (the Job timeline carries the visibility).
-    # Retries transient "another download in progress" errors.
-    try:
-        _download_image_with_retry(client, job.target_version, task=task, db=db)
-    except Exception as exc:  # noqa: BLE001
-        _record(db, task, f"Image download failed: {exc}", phase=TaskPhase.FAILED)
-        _fail_job(db, job.id, f"Image download failed for {device.name}")
+    # Target image. Same non-blocking issue/poll split as the base above.
+    r = _download_step(db, job, task, device, job.target_version, slot="target")
+    if r is _Wait.PARKED:
+        return False
+    if r is _Wait.TIMED_OUT:
+        if task.phase != TaskPhase.FAILED:
+            _record(
+                db, task,
+                f"Image download did not finish within {INSTALL_JOB_TIMEOUT_S}s",
+                phase=TaskPhase.FAILED,
+            )
+            _fail_job(db, job.id, f"Image download failed for {device.name}")
         return False
 
     # Reflect on the Device for the staged badge.
@@ -1156,6 +1321,402 @@ def _phase_suspend_ha(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, dev
         return False
     _mark_phase_done(db, task, "suspend_ha")
     return True
+
+
+def _progress_get(task: DeviceUpgradeTask, key: str, default=None):
+    return (task.progress or {}).get(key, default)
+
+
+def _progress_set(db: Session, task: DeviceUpgradeTask, **kv) -> None:
+    """Set one or more identifier-named keys on task.progress (None value deletes
+    the key). For keys that aren't valid Python identifiers (the ``::``-namespaced
+    wait keys) use ``_progress_put``. Dict-copy + reassign + commit (plain-JSON
+    column — see _mark_phase_done)."""
+    _progress_put_many(db, task, kv)
+
+
+def _progress_put(db: Session, task: DeviceUpgradeTask, key: str, value) -> None:
+    """Single-key form of _progress_set that accepts ANY string key (e.g.
+    ``download_job_id::base``). None value deletes the key."""
+    _progress_put_many(db, task, {key: value})
+
+
+def _progress_put_many(db: Session, task: DeviceUpgradeTask, kv: dict) -> None:
+    progress = dict(task.progress or {})
+    changed = False
+    for key, value in kv.items():
+        if value is None:
+            if key in progress:
+                progress.pop(key, None)
+                changed = True
+        elif progress.get(key) != value:
+            progress[key] = value
+            changed = True
+    if changed:
+        task.progress = progress
+        db.commit()
+
+
+def _install_step(
+    db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
+) -> _Wait:
+    """NON-BLOCKING install: issue `request system software install` exactly ONCE
+    (behind the `install_issued` marker + persisted `install_job_id`), then poll
+    the PAN-OS job to FIN across re-dispatches instead of blocking in a loop.
+
+    Replaces the live use of the blocking `_install_with_retry` /
+    `_wait_for_install_job` (kept only for their isolated unit tests). The install
+    command itself returns quickly; the multi-minute part is the JOB completing,
+    which `_await_or_park` now polls one tick at a time so the worker slot frees.
+
+    Idempotency: on every re-entry, if `install_job_id` is already persisted we
+    NEVER re-issue — we only CHECK that job's status. We re-issue solely on the
+    deliberate transient-retry path (PAN-OS "a software install is in progress"),
+    which clears the handle + markers and re-dispatches, bounded by a persisted
+    `install_attempt` counter against INSTALL_RETRY_ATTEMPTS.
+
+    Returns DONE (software_installed marked), PARKED (re-dispatched — caller
+    returns False), or TIMED_OUT (caller fails the task).
+    """
+    # Phase 1: issue the install once. No persisted job id AND not yet issued →
+    # this is the first attempt (or a re-issue after a transient clear).
+    if _progress_get(task, "install_job_id") is None:
+        attempt = int(_progress_get(task, "install_attempt", 0)) + 1
+        _progress_set(db, task, install_attempt=attempt)
+        try:
+            client = _client_for(db, device)
+            _set_substep(db, task, "installing")
+            install_job = client.request_software_install(job.target_version)
+            if not install_job:
+                raise RuntimeError("install request returned no job id")
+        except Exception as exc:  # noqa: BLE001
+            # Transient "a software install is in progress" (a leftover install,
+            # or a duplicate dispatch racing us): wait + re-issue, exactly like
+            # the old blocking retry — but by parking (re-dispatch) rather than
+            # sleeping in the slot. Bounded by INSTALL_RETRY_ATTEMPTS.
+            if attempt < INSTALL_RETRY_ATTEMPTS and _is_transient_install_error(exc):
+                _record(
+                    db, task,
+                    f"Install of {job.target_version} attempt {attempt}/"
+                    f"{INSTALL_RETRY_ATTEMPTS} hit a transient error ({exc}); the "
+                    f"device is busy with another install — retrying in "
+                    f"{INSTALL_RETRY_WAIT_S}s",
+                )
+                # Nothing to clear (no job id was set); just re-dispatch.
+                drive_pair_task.apply_async(
+                    (task.job_id, task.ha_pair_key), countdown=INSTALL_RETRY_WAIT_S
+                )
+                return _Wait.PARKED
+            # Permanent failure, or transient but out of attempts: fail the task.
+            _record(db, task, f"Install failed: {exc}", phase=TaskPhase.FAILED)
+            _fail_job(db, job.id, f"Install failed for {device.name}")
+            return _Wait.TIMED_OUT
+        # Issued cleanly — persist the handle so re-entries poll (never re-issue).
+        _progress_set(db, task, install_job_id=install_job)
+        _mark_phase_done(db, task, "install_issued")
+        _record(db, task, f"Install requested (PAN-OS job {install_job}); awaiting completion")
+
+    # Phase 2: poll the persisted job to FIN, one tick per re-dispatch.
+    job_id = _progress_get(task, "install_job_id")
+
+    def _install_finished() -> bool:
+        status = _client_for(db, device).get_job_status(job_id)
+        _set_job_progress(db, task, "install_progress", status.get("progress"))
+        if status.get("status") != "FIN":
+            return False
+        # FIN. Like the old _install_with_retry: a non-OK result is NOT fatal
+        # here — the device still reboots, and the post-reboot
+        # _verify_install_applied (#186) is the real backstop against a
+        # non-upgrade. Persist the result so the DONE branch below can log it.
+        _progress_set(db, task, install_result=status.get("result") or "unknown")
+        return True
+
+    res = _await_or_park(
+        db, task,
+        marker="install_job",
+        timeout_s=INSTALL_JOB_TIMEOUT_S,
+        is_done=_install_finished,
+    )
+    if res is _Wait.DONE:
+        result = _progress_get(task, "install_result")
+        if result == "OK":
+            _record(db, task, "Install complete")
+        else:
+            log.info(
+                "Install job %s did not FIN cleanly (result=%s); proceeding to restart anyway",
+                job_id, result,
+            )
+            _record(
+                db, task,
+                f"Install job finished with result '{result or 'unknown'}'; "
+                "proceeding to reboot (post-reboot version is verified before completion)",
+            )
+        # Clear the issue handle/marker + scratch so a future install (e.g. the
+        # partner, or a reconcile that cleared software_installed) re-issues
+        # cleanly rather than polling this now-finished job id.
+        _progress_set(db, task, install_job_id=None, install_attempt=None, install_result=None)
+        _unmark_phase(db, task, "install_issued")
+        _mark_phase_done(db, task, "software_installed")
+    return res
+
+
+def _reboot_step(
+    db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
+) -> _Wait:
+    """NON-BLOCKING reboot: issue `request restart system` exactly ONCE (behind
+    the `reboot_issued` marker), then confirm the device is back on the target
+    version across re-dispatches instead of blocking in `wait_for_ready`.
+
+    A re-entry must NEVER re-restart a device that's already rebooting — that's
+    what the `reboot_issued` marker guards. We replace the blocking
+    `client.wait_for_ready(...)` (which required N consecutive OK probes before
+    declaring the mgmt plane stable) with a single-shot readiness check per
+    re-dispatch PLUS a consecutive-success counter persisted on progress
+    (`reboot_ok_streak`): the device must answer get_system_info AND report the
+    target version on REBOOT_READY_CONSECUTIVE successive ticks before we call it
+    up. Re-implementing the streak is what stops a flaky mgmt response mid-reboot
+    (the API briefly answers, then the box goes back down as other subsystems
+    init) from being misread as "up".
+
+    Returns DONE (device confirmed up on target), PARKED, or TIMED_OUT.
+    """
+    if not _phase_already_done(task, "reboot_issued"):
+        try:
+            client = _client_for(db, device)
+            _set_substep(db, task, "rebooting")
+            _record(db, task, "Issuing system restart")
+            client.restart_system()
+        except Exception as exc:  # noqa: BLE001
+            _record(db, task, f"Reboot request failed: {exc}", phase=TaskPhase.FAILED)
+            _fail_job(db, job.id, f"Reboot request failed for {device.name}")
+            return _Wait.TIMED_OUT
+        _mark_phase_done(db, task, "reboot_issued")
+        _progress_set(db, task, reboot_ok_streak=0)
+        _record(
+            db, task,
+            f"Waiting for device to come back online on {job.target_version} "
+            f"(up to {REBOOT_TIMEOUT_S}s, needs {REBOOT_READY_CONSECUTIVE} "
+            f"consecutive healthy checks)",
+        )
+
+    _set_substep(db, task, "rebooting")
+
+    def _reboot_ready() -> bool:
+        # One readiness probe. Reachable AND running the target version.
+        # Rebuild the client each tick — the socket was torn down by the reboot.
+        info = _client_for(db, device).get_system_info()
+        version = (getattr(info, "sw_version", None) or "").strip()
+        on_target = version != "" and version == (job.target_version or "").strip()
+        streak = int(_progress_get(task, "reboot_ok_streak", 0))
+        if on_target:
+            streak += 1
+        else:
+            # Any miss (unreachable raises; reachable-but-wrong-version lands
+            # here) resets the streak — the device must be consistently up on the
+            # new version, not flapping or still on the old image mid-reboot.
+            streak = 0
+        _progress_set(db, task, reboot_ok_streak=streak)
+        return streak >= REBOOT_READY_CONSECUTIVE
+
+    res = _await_or_park(
+        db, task,
+        marker="reboot_ready",
+        timeout_s=REBOOT_TIMEOUT_S,
+        is_done=_reboot_ready,
+    )
+    if res is _Wait.DONE:
+        _record(db, task, "Device mgmt plane is stable")
+        _progress_set(db, task, reboot_ok_streak=None)
+    return res
+
+
+def _download_step(
+    db: Session,
+    job: UpgradeJob,
+    task: DeviceUpgradeTask,
+    device: Device,
+    version: str,
+    *,
+    slot: str,
+) -> _Wait:
+    """NON-BLOCKING image download: issue `request system software download`
+    exactly ONCE (behind per-``slot`` handles) and poll the PAN-OS job to FIN
+    across re-dispatches, instead of blocking ~5 min in _wait_for_download_job.
+
+    ``slot`` namespaces the persisted handles so a major-version jump can stage
+    the BASE image (slot="base") and the TARGET image (slot="target")
+    independently — a re-entry resumes whichever is in flight without colliding.
+
+    Idempotency: the authoritative "already done" check is
+    ``client.is_version_downloaded(version)`` (run first on every entry). With a
+    job in flight we only CHECK its status — never re-issue — except on the
+    deliberate transient-retry path ("another download in progress"), bounded by
+    a persisted per-slot attempt counter against DOWNLOAD_RETRY_ATTEMPTS.
+
+    Returns DONE (image present), PARKED (re-dispatched — caller returns False),
+    or TIMED_OUT (the step recorded FAILED + _fail_job; caller returns False).
+    """
+    job_key = f"download_job_id::{slot}"
+    attempt_key = f"download_attempt::{slot}"
+    issued_marker = f"download_issued::{slot}"
+
+    def _present() -> bool:
+        try:
+            return _client_for(db, device).is_version_downloaded(version)
+        except Exception as exc:  # noqa: BLE001
+            log.info("download presence check for %s failed: %s", version, exc)
+            return False
+
+    # Authoritative short-circuit: if the image is already on the box, this
+    # download is done regardless of any stale handles — clear them and finish.
+    if _present():
+        _progress_put(db, task, job_key, None)
+        _unmark_phase(db, task, issued_marker)
+        return _Wait.DONE
+
+    progress_pct_key = "download_progress"
+
+    # Phase 1: issue the download once (no persisted job id for this slot).
+    if _progress_get(task, job_key) is None:
+        attempt = int(_progress_get(task, attempt_key, 0)) + 1
+        _progress_put(db, task, attempt_key, attempt)
+        try:
+            dl_job = _client_for(db, device).request_software_download(version)
+            if not dl_job:
+                raise RuntimeError("download request returned no job id")
+        except Exception as exc:  # noqa: BLE001
+            if attempt < DOWNLOAD_RETRY_ATTEMPTS and _is_transient_download_error(exc):
+                _record(
+                    db, task,
+                    f"Download of {version} attempt {attempt}/{DOWNLOAD_RETRY_ATTEMPTS} "
+                    f"hit a transient error ({exc}); the device is busy with another "
+                    f"download — retrying in {DOWNLOAD_RETRY_WAIT_S}s",
+                )
+                drive_pair_task.apply_async(
+                    (task.job_id, task.ha_pair_key), countdown=DOWNLOAD_RETRY_WAIT_S
+                )
+                return _Wait.PARKED
+            _record(db, task, f"Image download failed: {exc}", phase=TaskPhase.FAILED)
+            _fail_job(db, job.id, f"Image download failed for {device.name}")
+            return _Wait.TIMED_OUT
+        _progress_put(db, task, job_key, dl_job)
+        _mark_phase_done(db, task, issued_marker)
+        _record(db, task, f"Download of {version} requested (PAN-OS job {dl_job}); awaiting completion")
+
+    # Phase 2: poll the persisted job to FIN, one tick per re-dispatch.
+    job_id = _progress_get(task, job_key)
+
+    def _download_finished() -> bool:
+        status = _client_for(db, device).get_job_status(job_id)
+        _set_job_progress(db, task, progress_pct_key, status.get("progress"))
+        return status.get("status") == "FIN"
+
+    res = _await_or_park(
+        db, task,
+        marker=f"download_job::{slot}",
+        timeout_s=INSTALL_JOB_TIMEOUT_S,  # generous; reused for downloads (as before)
+        is_done=_download_finished,
+    )
+    if res is _Wait.DONE:
+        # Job FIN — verify the image actually landed in the software list. If it
+        # didn't, drop the handle so the next entry re-issues (bounded by the
+        # attempt counter), mirroring the old retry loop's re-request behavior.
+        if _present():
+            _progress_put(db, task, job_key, None)
+            _unmark_phase(db, task, issued_marker)
+            _record(db, task, f"Image {version} downloaded")
+            return _Wait.DONE
+        attempt = int(_progress_get(task, attempt_key, 0))
+        _progress_put(db, task, job_key, None)
+        _unmark_phase(db, task, issued_marker)
+        if attempt < DOWNLOAD_RETRY_ATTEMPTS:
+            _record(
+                db, task,
+                f"Download job for {version} finished but the software list does not "
+                f"show it (attempt {attempt}/{DOWNLOAD_RETRY_ATTEMPTS}); re-requesting",
+            )
+            drive_pair_task.apply_async(
+                (task.job_id, task.ha_pair_key), countdown=DOWNLOAD_RETRY_WAIT_S
+            )
+            return _Wait.PARKED
+        _record(
+            db, task,
+            f"Download of {version} did not land after {DOWNLOAD_RETRY_ATTEMPTS} attempts",
+            phase=TaskPhase.FAILED,
+        )
+        _fail_job(db, job.id, f"Image download failed for {device.name}")
+        return _Wait.TIMED_OUT
+    return res
+
+
+# Acceptable HA end-states for the upgraded member to have rejoined the cluster:
+# either is safe to then suspend the OTHER peer for failover. (Same set the old
+# blocking _wait_for_passive used.)
+_PASSIVE_SAFE_STATES = frozenset({"passive", "active-secondary"})
+
+
+def _passive_step(
+    db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
+) -> _Wait:
+    """NON-BLOCKING HA-resync wait: single-shot check of the upgraded member's HA
+    state per re-dispatch, instead of blocking ~minutes in _wait_for_passive.
+
+    The pair flow must NOT advance to failover/primary-upgrade with this device
+    only half-rejoined, so after resume we wait until it reports a safe rejoined
+    state (`passive` / `active-secondary`). Not safe yet → park; safe → DONE.
+
+    Mirrors _wait_for_passive's observability — records each distinct state seen
+    and keeps device.ha_state fresh — and, on TIMED_OUT, stashes the SAME
+    `wait_for_passive_diagnostics` block on progress so _format_passive_timeout_message
+    renders the rich failure message unchanged. State history accumulates across
+    re-dispatches in progress (`_passive_states_seen`) since each invocation is a
+    fresh process.
+    """
+    def _is_passive() -> bool:
+        info = _client_for(db, device).get_system_info()
+        state = (getattr(info, "ha_state", None) or "").lower().strip()
+        last = _progress_get(task, "_passive_last_state")
+        if state != last:
+            _record(db, task, f"HA state observed: '{state or 'unknown'}'")
+            seen = list(_progress_get(task, "_passive_states_seen", []))
+            seen.append(state or "unknown")
+            _progress_put_many(
+                db, task,
+                {"_passive_last_state": state, "_passive_states_seen": seen},
+            )
+            # Keep the device row fresh so other watchers see progress.
+            device.ha_state = getattr(info, "ha_state", None)
+            db.commit()
+        return state in _PASSIVE_SAFE_STATES
+
+    res = _await_or_park(
+        db, task,
+        marker="wait_for_passive",
+        timeout_s=HA_PASSIVE_TIMEOUT_S,
+        is_done=_is_passive,
+        poll_s=HA_PASSIVE_POLL_S,
+    )
+    if res is _Wait.TIMED_OUT:
+        # Stash diagnostics in the SAME shape _wait_for_passive used so
+        # _format_passive_timeout_message keeps working untouched.
+        states_seen = list(_progress_get(task, "_passive_states_seen", []))
+        progress = dict(task.progress or {})
+        progress["wait_for_passive_diagnostics"] = {
+            "last_state": _progress_get(task, "_passive_last_state") or "unknown",
+            "states_seen": states_seen,
+            "polls": len(states_seen),
+            "timeout_s": HA_PASSIVE_TIMEOUT_S,
+        }
+        # Clear the per-run scratch keys now that the diagnostics are captured.
+        progress.pop("_passive_last_state", None)
+        progress.pop("_passive_states_seen", None)
+        task.progress = progress
+        db.commit()
+    elif res is _Wait.DONE:
+        _progress_put_many(
+            db, task, {"_passive_last_state": None, "_passive_states_seen": None}
+        )
+    return res
 
 
 def _phase_install_and_wait(
@@ -1195,19 +1756,30 @@ def _phase_install_and_wait(
 
     if install_needed:
         _set_phase(db, task, started_phase)
-        # Step 1+2: install. Guarded by its own "software_installed" marker so
-        # that parking at the reboot gate below (which RETURNS and frees the
-        # worker slot) doesn't re-issue the install on the re-dispatch — the
-        # image is already on the boot partition, only the reboot is pending.
+        # Step 1+2: install — NON-BLOCKING (issue #185). Guarded by its own
+        # "software_installed" marker so that parking (at the reboot gate, or
+        # while the install job runs) doesn't re-issue the install on a
+        # re-dispatch. _install_step issues `request software install` exactly
+        # once (persisting install_job_id) and polls the PAN-OS job to FIN one
+        # tick per re-dispatch — the worker slot frees the whole time instead of
+        # blocking ~5 min in _wait_for_install_job.
         if not _phase_already_done(task, "software_installed"):
-            try:
-                _install_with_retry(db, task, device, job.target_version)
-                _record(db, task, "Install complete")
-            except Exception as exc:  # noqa: BLE001
-                _record(db, task, f"Install failed: {exc}", phase=TaskPhase.FAILED)
-                _fail_job(db, job.id, f"Install failed for {device.name}")
+            r = _install_step(db, job, task, device)
+            if r is _Wait.PARKED:
+                return False  # re-dispatched; free the slot until then
+            if r is _Wait.TIMED_OUT:
+                # _install_step already recorded FAILED + _fail_job on permanent
+                # failure / exhausted retries. The install JOB exceeding its own
+                # timeout falls here too — surface it explicitly.
+                if task.phase != TaskPhase.FAILED:
+                    _record(
+                        db, task,
+                        f"Install job did not finish within {INSTALL_JOB_TIMEOUT_S}s",
+                        phase=TaskPhase.FAILED,
+                    )
+                    _fail_job(db, job.id, f"Install job timed out for {device.name}")
                 return False
-            _mark_phase_done(db, task, "software_installed")
+            # DONE — software_installed is marked; fall through to the reboot.
 
         # Step 3: optional pause before reboot. Default behavior — the operator
         # explicitly clicks Reboot now. Non-blocking: _confirm_gate parks at
@@ -1226,24 +1798,24 @@ def _phase_install_and_wait(
                 return False
             _set_phase(db, task, started_phase)
 
-        # Step 4+5: restart and wait for mgmt plane. The "rebooting"
-        # sub-step covers the whole down→up window (often ~10 min) so the
-        # badge isn't frozen on the bare phase label the entire time.
-        try:
-            client = _client_for(db, device)
-            _set_substep(db, task, "rebooting")
-            _record(db, task, "Issuing system restart")
-            client.restart_system()
-            _record(
-                db, task,
-                f"Waiting for device to come back online "
-                f"(up to {REBOOT_TIMEOUT_S}s, with consecutive-success confirmation)",
-            )
-            client.wait_for_ready(timeout_s=REBOOT_TIMEOUT_S, poll_interval_s=REBOOT_POLL_S)
-            _record(db, task, "Device mgmt plane is stable")
-        except Exception as exc:  # noqa: BLE001
-            _record(db, task, f"Reboot/wait failed: {exc}", phase=TaskPhase.FAILED)
-            _fail_job(db, job.id, f"Reboot/wait failed for {device.name}")
+        # Step 4+5: restart and wait for the mgmt plane — NON-BLOCKING (issue
+        # #185). _reboot_step issues `restart system` exactly once (behind the
+        # reboot_issued marker — a re-entry must NEVER re-restart) and confirms
+        # readiness (reachable AND on target, N consecutive ticks) one tick per
+        # re-dispatch, instead of blocking ~10 min in wait_for_ready.
+        r = _reboot_step(db, job, task, device)
+        if r is _Wait.PARKED:
+            return False
+        if r is _Wait.TIMED_OUT:
+            if task.phase != TaskPhase.FAILED:
+                _record(
+                    db, task,
+                    f"Device did not come back online within {REBOOT_TIMEOUT_S}s "
+                    f"after reboot (need {REBOOT_READY_CONSECUTIVE} consecutive "
+                    f"healthy checks on {job.target_version})",
+                    phase=TaskPhase.FAILED,
+                )
+                _fail_job(db, job.id, f"Reboot/wait failed for {device.name}")
             return False
 
         try:
@@ -1255,10 +1827,16 @@ def _phase_install_and_wait(
 
         # Guard against a silent non-upgrade (issue #186): the device must be
         # RUNNING the target now, or we fail it (retryable) instead of marking
-        # it done and marching on as if it upgraded.
+        # it done and marching on as if it upgraded. _reboot_step already
+        # confirmed the target version via consecutive healthy checks, but the
+        # probe above refreshes the row this reads — keep the guard as the
+        # explicit backstop (and for the install-already-done re-entry path).
         if not _verify_install_applied(db, job, task, device):
             return False
 
+        # Reboot is fully confirmed — drop its issue marker so a future
+        # install_complete clear (reconcile) re-runs the reboot cleanly.
+        _unmark_phase(db, task, "reboot_issued")
         _mark_phase_done(db, task, "install_complete")
     elif _phase_already_done(task, "install_complete"):
         _record(db, task, "Install + reboot already completed in a prior run; skipping")
@@ -1276,51 +1854,69 @@ def _phase_install_and_wait(
     # when the state is already passive. So even when this block re-runs
     # against a healthy device, it's cheap and safe.
     if device.ha_peer_id is not None and not _phase_already_done(task, "ha_resume_complete"):
-        _set_substep(db, task, "resuming_ha")
-        _record(
-            db, task,
-            "Waiting for HA subsystem readiness before issuing resume"
-            f" (up to {HA_SUBSYS_TIMEOUT_S}s)",
-        )
-        if not _wait_for_ha_subsystem_ready(db, task, device):
+        # Issue-once guard for the resume itself. wait_for_passive below is
+        # NON-BLOCKING (issue #185) and parks between checks; on each re-dispatch
+        # we re-enter this whole block, so without this marker we'd re-run the
+        # subsystem-ready wait AND re-issue resume_ha every 30s while waiting for
+        # 'passive'. The subsystem-ready + resume + verify steps stay BLOCKING
+        # (seconds-to-low-minutes, and intentionally not converted — see #185),
+        # so we run them exactly once behind "ha_resumed" and then only re-poll
+        # the passive state on subsequent entries. Reconcile clears ha_resumed
+        # alongside ha_resume_complete so a Retry that genuinely needs to
+        # re-resume (device fell back to suspended) does re-issue.
+        if not _phase_already_done(task, "ha_resumed"):
+            _set_substep(db, task, "resuming_ha")
             _record(
                 db, task,
-                f"HA subsystem never became ready in {HA_SUBSYS_TIMEOUT_S}s",
-                phase=TaskPhase.FAILED,
+                "Waiting for HA subsystem readiness before issuing resume"
+                f" (up to {HA_SUBSYS_TIMEOUT_S}s)",
             )
-            _fail_job(db, job.id, f"HA subsystem stuck on {device.name}")
-            return False
+            if not _wait_for_ha_subsystem_ready(db, task, device):
+                _record(
+                    db, task,
+                    f"HA subsystem never became ready in {HA_SUBSYS_TIMEOUT_S}s",
+                    phase=TaskPhase.FAILED,
+                )
+                _fail_job(db, job.id, f"HA subsystem stuck on {device.name}")
+                return False
 
-        _record(db, task, "Issuing HA resume")
-        if not _ha_op_with_retry(db, task, device, "HA resume", lambda c: c.resume_ha()):
-            _record(db, task, "HA resume exhausted retries", phase=TaskPhase.FAILED)
-            _fail_job(db, job.id, f"HA resume failed for {device.name}")
-            return False
+            _record(db, task, "Issuing HA resume")
+            if not _ha_op_with_retry(db, task, device, "HA resume", lambda c: c.resume_ha()):
+                _record(db, task, "HA resume exhausted retries", phase=TaskPhase.FAILED)
+                _fail_job(db, job.id, f"HA resume failed for {device.name}")
+                return False
 
-        # ---- Post-resume verification ----
-        # The resume_ha API call frequently returns success even when
-        # PAN-OS's HA daemon ignores it (e.g. content version mismatch
-        # with the peer, hold-down timer not elapsed, peer still rebooting).
-        # If we go straight to wait_for_passive after that silent failure,
-        # we burn the full 10-minute timeout watching 'suspended' before
-        # giving up. Re-issue resume_ha up to 3 times, 30s apart, until
-        # the state moves off 'suspended' — or surface a clean failure.
-        if not _verify_resume_took_effect(db, task, device):
-            _record(
-                db, task,
-                "HA resume returned success but the device stayed suspended "
-                "after repeated re-issues — the HA daemon is rejecting the "
-                "command. Common causes: content-version mismatch with the "
-                "peer, HA hold-down timer, or the peer is still rebooting. "
-                "Run `show high-availability state` on the device.",
-                phase=TaskPhase.FAILED,
-            )
-            _fail_job(db, job.id, f"HA resume was silently ignored on {device.name}")
-            return False
+            # ---- Post-resume verification ----
+            # The resume_ha API call frequently returns success even when
+            # PAN-OS's HA daemon ignores it (e.g. content version mismatch
+            # with the peer, hold-down timer not elapsed, peer still rebooting).
+            # If we go straight to wait_for_passive after that silent failure,
+            # we burn the full 10-minute timeout watching 'suspended' before
+            # giving up. Re-issue resume_ha up to 3 times, 30s apart, until
+            # the state moves off 'suspended' — or surface a clean failure.
+            if not _verify_resume_took_effect(db, task, device):
+                _record(
+                    db, task,
+                    "HA resume returned success but the device stayed suspended "
+                    "after repeated re-issues — the HA daemon is rejecting the "
+                    "command. Common causes: content-version mismatch with the "
+                    "peer, HA hold-down timer, or the peer is still rebooting. "
+                    "Run `show high-availability state` on the device.",
+                    phase=TaskPhase.FAILED,
+                )
+                _fail_job(db, job.id, f"HA resume was silently ignored on {device.name}")
+                return False
+            _mark_phase_done(db, task, "ha_resumed")
 
+        # Wait for the upgraded member to rejoin as 'passive' — NON-BLOCKING.
+        # _passive_step checks the HA state once per re-dispatch and parks until
+        # it settles, instead of blocking ~minutes in _wait_for_passive.
         _set_substep(db, task, "waiting_for_passive")
         _record(db, task, "Waiting for HA state to settle to 'passive'")
-        if not _wait_for_passive(_client_for(db, device), db, task, device):
+        r = _passive_step(db, job, task, device)
+        if r is _Wait.PARKED:
+            return False
+        if r is _Wait.TIMED_OUT:
             _record(
                 db, task,
                 _format_passive_timeout_message(db, task, device),
@@ -1329,6 +1925,9 @@ def _phase_install_and_wait(
             _fail_job(db, job.id, f"HA never reached 'passive' for {device.name}")
             return False
         _record(db, task, "HA state confirmed 'passive'")
+        # Resume fully confirmed — drop the inner issue marker so a reconcile
+        # that clears ha_resume_complete also forces a fresh resume on retry.
+        _unmark_phase(db, task, "ha_resumed")
         _mark_phase_done(db, task, "ha_resume_complete")
     elif device.ha_peer_id is not None:
         _record(db, task, "HA resume already completed in a prior run; skipping")
@@ -1689,6 +2288,30 @@ def _unmark_phase(db: Session, task: DeviceUpgradeTask, marker: str) -> None:
         db.commit()
 
 
+def _clear_install_reboot_handles(db: Session, task: DeviceUpgradeTask) -> None:
+    """Drop ALL non-blocking install+reboot scratch state so a reconcile-driven
+    retry re-issues cleanly instead of polling a dead PAN-OS job id or skipping
+    the restart on a stale marker. Covers the issue-once markers
+    (``install_issued`` / ``reboot_issued``) and the persisted handles/counters
+    (``install_job_id`` / ``install_attempt`` / ``reboot_ok_streak``) plus the
+    matching ``_await_or_park`` start clocks. Idempotent."""
+    for marker in ("install_issued", "reboot_issued"):
+        _unmark_phase(db, task, marker)
+    _progress_set(
+        db, task,
+        install_job_id=None,
+        install_attempt=None,
+        reboot_ok_streak=None,
+    )
+    _progress_put_many(
+        db, task,
+        {
+            "_wait_start::install_job": None,
+            "_wait_start::reboot_ready": None,
+        },
+    )
+
+
 def reconcile_markers_with_device_state(
     db: Session, job: UpgradeJob, task: DeviceUpgradeTask, device: Device
 ) -> list[str]:
@@ -1750,6 +2373,10 @@ def reconcile_markers_with_device_state(
         # image was there.
         if not _phase_already_done(task, "ensure_image"):
             _mark_phase_done(db, task, "ensure_image")
+        # Any in-flight non-blocking install/reboot handles are moot now that the
+        # device is confirmed at target — drop them so they can't mislead a later
+        # entry into polling a stale PAN-OS job.
+        _clear_install_reboot_handles(db, task)
         corrections.append("install_complete (device is at target version)")
     # Inverse: marker says install done but device is on old version → lie.
     # Only trust the probe (don't clear if we couldn't get fresh state).
@@ -1759,6 +2386,11 @@ def reconcile_markers_with_device_state(
         # the device isn't actually at target, the install didn't stick either —
         # clear it so a retry re-installs rather than only re-issuing the reboot.
         _unmark_phase(db, task, "software_installed")
+        # The non-blocking install/reboot are issue-once behind their own markers
+        # + persisted PAN-OS job ids; clear ALL of that so a retry genuinely
+        # re-issues the install and reboot rather than polling a dead job id or
+        # skipping the restart on a stale reboot_issued marker.
+        _clear_install_reboot_handles(db, task)
         corrections.append(
             f"-install_complete (marker was set but device is on "
             f"{device.current_version}, not {job.target_version})"
@@ -1780,6 +2412,10 @@ def reconcile_markers_with_device_state(
             and _phase_already_done(task, "ha_resume_complete")
         ):
             _unmark_phase(db, task, "ha_resume_complete")
+            # The inner issue-once guard for the resume itself — clear it so a
+            # retry actually re-runs the subsystem-ready wait + resume + verify
+            # rather than skipping straight to re-polling the (still-bad) state.
+            _unmark_phase(db, task, "ha_resumed")
             corrections.append(
                 f"-ha_resume_complete (marker was set but HA state is '{ha_state}')"
             )
@@ -1825,6 +2461,8 @@ def _wait_for_download_job(
     task: DeviceUpgradeTask | None = None,
     db: Session | None = None,
 ) -> bool:
+    # SUPERSEDED by the non-blocking poll inside `_download_step` (issue #185);
+    # retained only as a dependency of the test-retained `_download_image_with_retry`.
     deadline = time.monotonic() + INSTALL_JOB_TIMEOUT_S  # generous; reused for downloads too
     while time.monotonic() < deadline:
         time.sleep(INSTALL_JOB_POLL_S)
@@ -1988,6 +2626,11 @@ def _wait_for_passive(
     """Poll the device's HA state until it's 'passive' (or another acceptable
     rejoined state) or we time out. Updates device.ha_state on each poll so
     the UI reflects progress. Returns True on success.
+
+    SUPERSEDED in the live flow by the NON-BLOCKING `_passive_step` (issue #185):
+    the HA-resume block no longer calls this. Retained for now as a reference for
+    the diagnostics shape (_passive_step stashes the identical block) and any
+    out-of-tree callers; no in-tree caller remains.
 
     Acceptable end states: 'passive', 'active-secondary'. A pair can converge
     in either depending on its config, but BOTH mean the device has rejoined
@@ -2179,6 +2822,9 @@ def _wait_for_install_job(
     """Poll an install job. Returns True if we observed FIN with result OK,
     False otherwise. While polling, write the percentage onto task.progress
     so the UI can render a progress bar.
+
+    SUPERSEDED by the non-blocking poll inside `_install_step` (issue #185);
+    retained only as a dependency of the test-retained `_install_with_retry`.
     """
     deadline = time.monotonic() + INSTALL_JOB_TIMEOUT_S
     consecutive_errors = 0

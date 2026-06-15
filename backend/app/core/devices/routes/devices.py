@@ -33,7 +33,12 @@ def _to_read(d: Device) -> DeviceRead:
             "ip_address": d.ip_address,
             "serial": d.serial,
             "model": d.model,
-            "sw_version": d.sw_version,
+            # Prefer current_version (the upgrader-era column the orchestrator
+            # and version-distribution endpoint read); sw_version is the
+            # deprecated capacity-era duplicate that's being phased out. Falling
+            # back keeps it populated for any device only the legacy poller has
+            # touched.
+            "sw_version": d.current_version or d.sw_version,
             "source": d.source,
             "panorama_id": d.panorama_id,
             "has_api_key": d.encrypted_api_key is not None,

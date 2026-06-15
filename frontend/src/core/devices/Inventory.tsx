@@ -344,6 +344,7 @@ type SortKey =
   | "host"
   | "serial"
   | "model"
+  | "version"
   | "group"
   | "template"
   | "polling"
@@ -361,6 +362,8 @@ function sortValue(d: Device, key: SortKey): string | number {
       return (d.serial || "~").toLowerCase(); // "~" sorts after alnum
     case "model":
       return (d.model || "~").toLowerCase();
+    case "version":
+      return (d.sw_version || "~").toLowerCase();
     case "group":
       return (d.device_group || "~").toLowerCase();
     case "template":
@@ -839,6 +842,7 @@ function DevicesSection() {
               <SortHeader label="Host" sortKey="host" activeKey={sortKey} dir={sortDir} onClick={toggleSort} />
               <SortHeader label="Serial" sortKey="serial" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden xl:table-cell" />
               <SortHeader label="Model" sortKey="model" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden sm:table-cell" />
+              <SortHeader label="PAN-OS" sortKey="version" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden md:table-cell" />
               <SortHeader label="Group" sortKey="group" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden lg:table-cell" />
               <SortHeader label="Template" sortKey="template" activeKey={sortKey} dir={sortDir} onClick={toggleSort} className="hidden xl:table-cell" />
               <th className="text-left px-4 py-2 font-medium hidden lg:table-cell">Access</th>
@@ -850,7 +854,7 @@ function DevicesSection() {
           <tbody>
             {orderedDevs.length === 0 && (
               <tr>
-                <td colSpan={11} className="px-4 py-6 text-center text-xs text-zinc-500">
+                <td colSpan={12} className="px-4 py-6 text-center text-xs text-zinc-500">
                   No devices match the current search / filters.
                 </td>
               </tr>
@@ -909,6 +913,9 @@ function DevicesSection() {
                     {d.serial ?? "—"}
                   </td>
                   <td className="px-4 py-2 text-zinc-400 hidden sm:table-cell">{d.model ?? "—"}</td>
+                  <td className="px-4 py-2 text-zinc-300 text-xs font-mono hidden md:table-cell">
+                    {d.sw_version ?? "—"}
+                  </td>
                   <td
                     className="px-4 py-2 text-zinc-400 text-xs max-w-[10rem] truncate hidden lg:table-cell"
                     title={d.device_group ?? ""}
@@ -990,10 +997,11 @@ function DevicesSection() {
                 </tr>
                 {detailFor === d.id && (
                   <tr className="bg-zinc-950/40 xl:hidden">
-                    <td colSpan={11} className="px-4 pl-10 py-3">
+                    <td colSpan={12} className="px-4 pl-10 py-3">
                       <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-2 text-xs">
                         <DetailKV label="Serial" value={d.serial} mono />
                         <DetailKV label="Model" value={d.model} />
+                        <DetailKV label="PAN-OS" value={d.sw_version} mono />
                         <DetailKV label="Device group" value={d.device_group} />
                         <DetailKV label="Template stack" value={d.template_stack} />
                         <DetailKV
@@ -1024,14 +1032,14 @@ function DevicesSection() {
                 )}
                 {capacityFor === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={11} className="p-0">
+                    <td colSpan={12} className="p-0">
                       <CapacityPanel deviceId={d.id} onClose={() => setCapacityFor(null)} />
                     </td>
                   </tr>
                 )}
                 {testResult?.id === d.id && (
                   <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
-                    <td colSpan={11} className="px-4 py-2">
+                    <td colSpan={12} className="px-4 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <pre className={`text-xs whitespace-pre-wrap ${testResult.ok ? "text-emerald-300" : "text-rose-300"}`}>
                           {testResult.text}
@@ -1045,7 +1053,7 @@ function DevicesSection() {
                 )}
                 {editing === d.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={11} className="p-0">
+                    <td colSpan={12} className="p-0">
                       <DeviceForm panos={panosQ.data ?? []} initial={d} onDone={() => setEditing(null)} />
                     </td>
                   </tr>

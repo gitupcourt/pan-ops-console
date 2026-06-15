@@ -32,6 +32,7 @@ def _to_read(pano: Panorama) -> PanoramaRead:
             "last_sync_at": pano.last_sync_at,
             "last_reachability_at": pano.last_reachability_at,
             "last_reachability_error": pano.last_reachability_error,
+            "sw_version": pano.sw_version,
         }
     )
 
@@ -102,6 +103,10 @@ def test_panorama(pano_id: int, db: Session = Depends(get_db)):
         info = client.test_connection()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # Persist the Panorama's running version so the Inventory table reflects it
+    # immediately, without waiting for the next scheduled sync.
+    pano.sw_version = info.get("sw_version")
+    db.commit()
     return {"ok": True, "info": info}
 
 

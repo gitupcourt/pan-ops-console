@@ -1,6 +1,6 @@
 # Dev-only deps. NOT installed into the production image. CI installs
 # these alongside requirements.txt before running tests.
-pytest==9.0.3
+pytest==9.1.0
 # pytest-asyncio removed: the suite has no async tests / fixtures / asyncio
 # markers (Starlette's TestClient is sync), so it was an unused dependency —
 # and it was the only thing pinning pytest <9. Re-add it if async tests land.

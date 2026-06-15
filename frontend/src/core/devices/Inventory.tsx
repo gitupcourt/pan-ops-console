@@ -186,6 +186,7 @@ function PanoramasSection() {
             <tr>
               <th className="text-left px-4 py-2 font-medium">Name</th>
               <th className="text-left px-4 py-2 font-medium">Hostname</th>
+              <th className="text-left px-4 py-2 font-medium">PAN-OS</th>
               <th className="text-left px-4 py-2 font-medium">Reachable</th>
               <th className="text-left px-4 py-2 font-medium">Last sync</th>
               <th className="px-4 py-2"></th>
@@ -197,6 +198,7 @@ function PanoramasSection() {
                 <tr className="border-b border-zinc-800/50 align-top">
                   <td className="px-4 py-2 text-zinc-100">{p.name}</td>
                   <td className="px-4 py-2 text-zinc-400">{p.hostname}</td>
+                  <td className="px-4 py-2 text-zinc-300 text-xs font-mono">{p.sw_version ?? "—"}</td>
                   <td className="px-4 py-2 text-xs">
                     {p.reachable ? (
                       <span className="text-emerald-400">yes</span>
@@ -226,7 +228,7 @@ function PanoramasSection() {
                 </tr>
                 {testResult?.id === p.id && (
                   <tr className="border-b border-zinc-800/50 bg-zinc-950/60">
-                    <td colSpan={5} className="px-4 py-2">
+                    <td colSpan={6} className="px-4 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <pre className={`text-xs whitespace-pre-wrap ${testResult.ok ? "text-emerald-300" : "text-rose-300"}`}>
                           {testResult.text}
@@ -240,14 +242,14 @@ function PanoramasSection() {
                 )}
                 {editing === p.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={5} className="p-0">
+                    <td colSpan={6} className="p-0">
                       <PanoramaForm initial={p} onDone={() => setEditing(null)} />
                     </td>
                   </tr>
                 )}
                 {importingFor === p.id && (
                   <tr className="bg-zinc-950/60">
-                    <td colSpan={5} className="p-0">
+                    <td colSpan={6} className="p-0">
                       <ImportPicker panoramaId={p.id} onDone={() => setImportingFor(null)} />
                     </td>
                   </tr>

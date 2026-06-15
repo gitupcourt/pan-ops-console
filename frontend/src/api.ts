@@ -96,6 +96,7 @@ export type Panorama = {
   last_sync_at: string | null;
   last_reachability_at: string | null;
   last_reachability_error: string | null;
+  sw_version: string | null;
 };
 
 export type PanoramaInput = {

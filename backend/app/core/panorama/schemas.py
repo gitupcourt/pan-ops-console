@@ -26,6 +26,7 @@ class PanoramaRead(BaseModel):
     last_sync_at: datetime | None
     last_reachability_at: datetime | None
     last_reachability_error: str | None
+    sw_version: str | None
 
     model_config = {"from_attributes": True}
 

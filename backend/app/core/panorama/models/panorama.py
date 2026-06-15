@@ -55,3 +55,8 @@ class Panorama(Base):
         DateTime(timezone=True), nullable=True
     )
     last_reachability_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # The Panorama's OWN running PAN-OS version, captured from `show system
+    # info` whenever we reach it (scheduled sync + Test connection). Surfaced on
+    # the Inventory → Panoramas table. Nullable until the first successful reach.
+    sw_version: Mapped[str | None] = mapped_column(String(64), nullable=True)

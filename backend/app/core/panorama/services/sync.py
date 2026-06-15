@@ -57,6 +57,15 @@ def sync_panorama(
     pano.reachable = True
     pano.last_reachability_at = datetime.now(timezone.utc)
     pano.last_reachability_error = None
+    # Capture the Panorama's own PAN-OS version for the Inventory table.
+    # Best-effort: `show system info` is a separate cheap op from the device
+    # list we already pulled, and a hiccup here must not fail the sync.
+    try:
+        _ver = client.test_connection().get("sw_version")
+        if isinstance(_ver, str) and _ver:
+            pano.sw_version = _ver
+    except Exception:  # noqa: BLE001
+        pass
 
     serials = [m.serial for m in managed]
     existing = {

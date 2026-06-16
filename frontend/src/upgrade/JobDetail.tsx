@@ -38,6 +38,15 @@ export default function JobDetail() {
     queryKey: ["upgrade-job", id],
     queryFn: () => api.getUpgradeJob(id),
     enabled: !Number.isNaN(id),
+    // This is a LIVE status view, so override the app-wide query defaults
+    // (main.tsx: refetchOnWindowFocus=false, staleTime=30s). Without these,
+    // tabbing away during an upgrade pauses the poll (react-query stops
+    // refetchInterval on a hidden tab) and returning never refetches — the page
+    // freezes on the last-seen phase (e.g. "Rebooting") even after the job has
+    // completed, until a manual reload. Keep polling in the background and
+    // refetch on focus so the displayed phase always reflects reality.
+    refetchOnWindowFocus: true,
+    refetchIntervalInBackground: true,
     refetchInterval: (q) => {
       const state = q.state.data?.state;
       if (!state) return 5000;

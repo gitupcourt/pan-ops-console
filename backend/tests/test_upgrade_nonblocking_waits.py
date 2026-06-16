@@ -305,6 +305,46 @@ def test_install_step_failed_result_fails_fast_without_reboot(captured_dispatch,
     assert failed and "content version 8000 is too old" in failed[0].lower()
 
 
+def test_install_step_fails_fast_when_job_vanishes(captured_dispatch, monkeypatch):
+    """If the install JOB we issued goes missing — get_job_status returns
+    "unknown" (job not found) for INSTALL_GONE_LIMIT consecutive polls — the
+    device likely crashed/restarted during the install. Fail fast with that
+    reason instead of polling a phantom job until the 30-min timeout (job 17: a
+    bad install took down a box's mgmt plane, leaving us polling a vanished job)."""
+    records: list = []
+
+    def _rec(db, task, msg, phase=None, **k):
+        records.append(msg)
+        if phase is not None:
+            task.phase = phase
+
+    failed: list = []
+    monkeypatch.setattr(upgrade, "_record", _rec)
+    monkeypatch.setattr(upgrade, "_set_substep", lambda *a, **k: None)
+    monkeypatch.setattr(upgrade, "_fail_job", lambda db, jid, reason: failed.append(reason))
+    client = _InstallPollClient(status="unknown")  # job is never found after issue
+    monkeypatch.setattr(upgrade, "_client_for", lambda db, d: client)
+    task = _task(
+        progress={},
+        device=SimpleNamespace(name="fw1", ha_peer_id=None, current_version="11.2.0"),
+    )
+
+    out = _Wait.PARKED
+    ticks = 0
+    while out is _Wait.PARKED and ticks < 12:
+        out = upgrade._install_step(MagicMock(), _job(target_version="12.1.4-h2"), task, task.device)
+        ticks += 1
+
+    assert out is _Wait.TIMED_OUT
+    assert client.installs == 1                          # issued once, never re-issued
+    assert "software_installed" not in _completed(task)  # nothing marked installed
+    assert task.phase == TaskPhase.FAILED
+    assert ticks <= upgrade.INSTALL_GONE_LIMIT + 3       # fast, not the 30-min timeout
+    joined = " ".join(records).lower()
+    assert "no longer present" in joined and "crash" in joined  # accurate reason
+    assert failed and "vanished" in failed[0].lower()
+
+
 # ---------- reboot: restart issued once, readiness streak ----------
 
 

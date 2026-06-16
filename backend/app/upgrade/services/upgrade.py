@@ -88,6 +88,17 @@ DOWNLOAD_RETRY_WAIT_S = 60
 INSTALL_RETRY_ATTEMPTS = 3
 INSTALL_RETRY_WAIT_S = 60
 
+# Consecutive polls where the install JOB we issued is GONE — get_job_status
+# raises (mgmt plane unreachable) or returns status "unknown" (job not found) —
+# before we conclude the install didn't survive and fail FAST. The install JOB
+# does NOT reboot the box (that's a separate step), so during this wait the mgmt
+# plane should stay up and the job stay queryable; a persistently-missing job
+# means the device crashed/restarted unexpectedly (observed job 17: a bad install
+# took down a box's mgmt plane, leaving us polling a job id that no longer
+# exists). Guarded by a streak so a brief blip right after issuing doesn't trip
+# it. At NONBLOCKING_POLL_S (30s) cadence this is ~3 min, vs the 30-min timeout.
+INSTALL_GONE_LIMIT = 6
+
 # Per-(job, pair) dispatch-lock TTL. The lock makes a duplicate drive_pair
 # dispatch a no-op while one is actively driving the pair. Held only for a
 # single drive segment (drive_pair returns — releasing it — at each gate park),
@@ -1447,8 +1458,43 @@ def _install_step(
     # Phase 2: poll the persisted job to FIN, one tick per re-dispatch.
     job_id = _progress_get(task, "install_job_id")
 
+    # Fast, accurate failure: the install job we issued has gone missing for too
+    # many consecutive polls (get_job_status kept raising or returning "unknown").
+    # The install JOB doesn't reboot the box, so a persistently-absent job means
+    # the device crashed/restarted unexpectedly during the install — fail now with
+    # that reason instead of polling a phantom job until INSTALL_JOB_TIMEOUT_S.
+    if int(_progress_get(task, "install_gone_streak", 0)) >= INSTALL_GONE_LIMIT:
+        _progress_set(
+            db, task,
+            install_job_id=None, install_attempt=None,
+            install_result=None, install_details=None, install_gone_streak=None,
+        )
+        _unmark_phase(db, task, "install_issued")
+        _record(
+            db, task,
+            f"Install job {job_id} is no longer present on {device.name} after we "
+            f"issued it — the device likely crashed or restarted unexpectedly during "
+            f"the install. Check the device; it stays on {device.current_version}.",
+            phase=TaskPhase.FAILED,
+        )
+        _fail_job(db, job.id, f"Install job vanished on {device.name} (device may have crashed)")
+        return _Wait.TIMED_OUT
+
     def _install_finished() -> bool:
-        status = _client_for(db, device).get_job_status(job_id)
+        try:
+            status = _client_for(db, device).get_job_status(job_id)
+        except Exception:  # noqa: BLE001
+            # Mgmt plane unreachable. During an install JOB (no reboot yet) the box
+            # should stay up — a persistent miss means it crashed/restarted. Count
+            # it; the re-entry guard fails fast once the misses pile up.
+            _progress_set(db, task, install_gone_streak=int(_progress_get(task, "install_gone_streak", 0)) + 1)
+            return False
+        if (status.get("status") or "").lower() == "unknown":
+            # The job id we issued is no longer on the device — it vanished.
+            _progress_set(db, task, install_gone_streak=int(_progress_get(task, "install_gone_streak", 0)) + 1)
+            return False
+        # A real status read — the job is present. Reset the gone counter.
+        _progress_set(db, task, install_gone_streak=0)
         _set_job_progress(db, task, "install_progress", status.get("progress"))
         if status.get("status") != "FIN":
             return False
@@ -1482,7 +1528,7 @@ def _install_step(
             _progress_set(
                 db, task,
                 install_job_id=None, install_attempt=None,
-                install_result=None, install_details=None,
+                install_result=None, install_details=None, install_gone_streak=None,
             )
             _unmark_phase(db, task, "install_issued")
             _record(
@@ -1497,7 +1543,7 @@ def _install_step(
         # Clear the issue handle/marker + scratch so a future install (e.g. the
         # partner, or a reconcile that cleared software_installed) re-issues
         # cleanly rather than polling this now-finished job id.
-        _progress_set(db, task, install_job_id=None, install_attempt=None, install_result=None, install_details=None)
+        _progress_set(db, task, install_job_id=None, install_attempt=None, install_result=None, install_details=None, install_gone_streak=None)
         _unmark_phase(db, task, "install_issued")
         _mark_phase_done(db, task, "software_installed")
     return res

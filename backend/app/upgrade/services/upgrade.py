@@ -59,6 +59,17 @@ REBOOT_POLL_S = 30
 # read as "up". The streak is persisted on task.progress across re-dispatches.
 REBOOT_READY_CONSECUTIVE = 3
 
+# Consecutive post-reboot checks where the device is REACHABLE but on a
+# NON-target version, AFTER it has been seen to go offline (i.e. it really did
+# reboot), before we conclude the new image did not boot and fail FAST — instead
+# of waiting out the full REBOOT_TIMEOUT_S for a version that will never appear
+# (job 16: a failed install rebooted onto the old image, and the wait sat for the
+# whole 30-min timeout reporting "did not come back online" even though the box
+# was up the entire time). Guarded by "went offline first" so a device that
+# simply hasn't rebooted yet — still reachable on the old version, never went
+# down — is NOT mistaken for a failed upgrade.
+REBOOT_WRONG_VERSION_LIMIT = 6
+
 # How long to wait for an install JOB to FIN before assuming it's wedged.
 INSTALL_JOB_TIMEOUT_S = 30 * 60
 INSTALL_JOB_POLL_S = 20
@@ -1495,18 +1506,22 @@ def _reboot_step(
     version across re-dispatches instead of blocking in `wait_for_ready`.
 
     A re-entry must NEVER re-restart a device that's already rebooting — that's
-    what the `reboot_issued` marker guards. We replace the blocking
-    `client.wait_for_ready(...)` (which required N consecutive OK probes before
-    declaring the mgmt plane stable) with a single-shot readiness check per
-    re-dispatch PLUS a consecutive-success counter persisted on progress
-    (`reboot_ok_streak`): the device must answer get_system_info AND report the
-    target version on REBOOT_READY_CONSECUTIVE successive ticks before we call it
-    up. Re-implementing the streak is what stops a flaky mgmt response mid-reboot
-    (the API briefly answers, then the box goes back down as other subsystems
-    init) from being misread as "up".
+    what the `reboot_issued` marker guards. The device must answer get_system_info
+    AND report the target version on REBOOT_READY_CONSECUTIVE successive ticks
+    before we call it up (a flaky mgmt response mid-reboot must not read as "up").
+
+    Accurate + fast failure (job 16): we also track whether the box actually went
+    OFFLINE and the last version we saw it running. That lets us tell "came back
+    on the OLD image — the upgrade didn't apply" apart from "never came back" —
+    and, once it's been reachable on a non-target version for
+    REBOOT_WRONG_VERSION_LIMIT checks after going offline, fail FAST with the real
+    reason instead of waiting out REBOOT_TIMEOUT_S reporting "did not come back
+    online" while the box is, in fact, up.
 
     Returns DONE (device confirmed up on target), PARKED, or TIMED_OUT.
     """
+    target = (job.target_version or "").strip()
+
     if not _phase_already_done(task, "reboot_issued"):
         try:
             client = _client_for(db, device)
@@ -1518,32 +1533,78 @@ def _reboot_step(
             _fail_job(db, job.id, f"Reboot request failed for {device.name}")
             return _Wait.TIMED_OUT
         _mark_phase_done(db, task, "reboot_issued")
-        _progress_set(db, task, reboot_ok_streak=0)
+        _progress_set(
+            db, task,
+            reboot_ok_streak=0, reboot_wrong_streak=0,
+            reboot_went_down=False, reboot_last_version=None,
+        )
         _record(
             db, task,
-            f"Waiting for device to come back online on {job.target_version} "
+            f"Waiting for device to come back online on {target} "
             f"(up to {REBOOT_TIMEOUT_S}s, needs {REBOOT_READY_CONSECUTIVE} "
             f"consecutive healthy checks)",
         )
 
+    def _clear_reboot_scratch() -> None:
+        _progress_set(
+            db, task,
+            reboot_ok_streak=None, reboot_wrong_streak=None,
+            reboot_went_down=None, reboot_last_version=None,
+        )
+
+    # Fast, accurate failure on re-entry: the box went offline (really rebooted)
+    # and has since been reachable on a NON-target version long enough that the
+    # new image clearly didn't boot. Fail now with the real reason rather than
+    # waiting out the timeout for a version that will never appear.
+    if (bool(_progress_get(task, "reboot_went_down"))
+            and int(_progress_get(task, "reboot_wrong_streak", 0)) >= REBOOT_WRONG_VERSION_LIMIT):
+        seen = _progress_get(task, "reboot_last_version") or "an older version"
+        _record(
+            db, task,
+            f"Device rebooted and came back online on {seen}, not {target} — the "
+            f"upgrade did not apply (the new image was not booted). Failing now "
+            f"instead of waiting for a version that won't appear.",
+            phase=TaskPhase.FAILED,
+        )
+        _fail_job(db, job.id, f"Upgrade did not apply on {device.name} (still on {seen})")
+        _clear_reboot_scratch()
+        return _Wait.TIMED_OUT
+
     _set_substep(db, task, "rebooting")
 
     def _reboot_ready() -> bool:
-        # One readiness probe. Reachable AND running the target version.
-        # Rebuild the client each tick — the socket was torn down by the reboot.
-        info = _client_for(db, device).get_system_info()
+        # One readiness probe per tick. Rebuild the client each tick — the socket
+        # was torn down by the reboot.
+        try:
+            info = _client_for(db, device).get_system_info()
+        except Exception:  # noqa: BLE001
+            # Unreachable: the box is offline — i.e. it genuinely rebooted. Record
+            # that (so a later reachable-but-wrong-version read is distinguishable
+            # from "never rebooted") and reset both streaks while it's down.
+            _progress_set(db, task, reboot_went_down=True, reboot_ok_streak=0, reboot_wrong_streak=0)
+            return False
         version = (getattr(info, "sw_version", None) or "").strip()
-        on_target = version != "" and version == (job.target_version or "").strip()
-        streak = int(_progress_get(task, "reboot_ok_streak", 0))
-        if on_target:
-            streak += 1
-        else:
-            # Any miss (unreachable raises; reachable-but-wrong-version lands
-            # here) resets the streak — the device must be consistently up on the
-            # new version, not flapping or still on the old image mid-reboot.
-            streak = 0
-        _progress_set(db, task, reboot_ok_streak=streak)
-        return streak >= REBOOT_READY_CONSECUTIVE
+        _progress_set(db, task, reboot_last_version=version or "unknown")
+        if version != "" and version == target:
+            streak = int(_progress_get(task, "reboot_ok_streak", 0)) + 1
+            _progress_set(db, task, reboot_ok_streak=streak, reboot_wrong_streak=0)
+            return streak >= REBOOT_READY_CONSECUTIVE
+        # Reachable but NOT on the target version.
+        _progress_set(db, task, reboot_ok_streak=0)
+        if bool(_progress_get(task, "reboot_went_down")):
+            # It went offline and came back on the wrong image — count it, and
+            # note ONCE so the timeline shows the box is actually up (not stuck
+            # "rebooting"). The re-entry guard above fails it once the streak hits
+            # the limit.
+            wrong = int(_progress_get(task, "reboot_wrong_streak", 0)) + 1
+            _progress_set(db, task, reboot_wrong_streak=wrong)
+            if wrong == 1:
+                _record(
+                    db, task,
+                    f"Device is back online but running {version or 'an older version'}, "
+                    f"not {target} — checking whether the new image booted.",
+                )
+        return False
 
     res = _await_or_park(
         db, task,
@@ -1552,8 +1613,30 @@ def _reboot_step(
         is_done=_reboot_ready,
     )
     if res is _Wait.DONE:
-        _record(db, task, "Device mgmt plane is stable")
-        _progress_set(db, task, reboot_ok_streak=None)
+        _record(db, task, f"Device is back online on {target}")
+        _clear_reboot_scratch()
+        return res
+    if res is _Wait.TIMED_OUT:
+        # Hit REBOOT_TIMEOUT_S. Report WHY accurately instead of a blanket "did
+        # not come back online" (which is wrong when it came back on the old
+        # image). _phase_install_and_wait skips its generic message because we
+        # set FAILED here.
+        seen = _progress_get(task, "reboot_last_version")
+        went_down = bool(_progress_get(task, "reboot_went_down"))
+        if seen and seen not in ("", "unknown") and seen != target:
+            msg = (f"Device came back online on {seen}, not {target}, within "
+                   f"{REBOOT_TIMEOUT_S}s — the upgrade did not apply.")
+        elif not went_down:
+            msg = (f"Device stayed reachable on {seen or 'its current version'} and never "
+                   f"appeared to go offline within {REBOOT_TIMEOUT_S}s — the reboot may not "
+                   f"have taken effect.")
+        else:
+            msg = (f"Device did not come back online within {REBOOT_TIMEOUT_S}s after the "
+                   f"reboot (no mgmt-plane response).")
+        if task.phase != TaskPhase.FAILED:
+            _record(db, task, msg, phase=TaskPhase.FAILED)
+            _fail_job(db, job.id, f"Reboot/wait failed for {device.name}")
+        _clear_reboot_scratch()
     return res
 
 

@@ -320,6 +320,25 @@ class _RebootClient:
         return SimpleNamespace(sw_version=self.version, ha_state=None)
 
 
+class _RebootWrongVersionClient:
+    """Goes unreachable once (it really rebooted), then comes back on the OLD
+    version forever — i.e. the new image did not boot (failed upgrade)."""
+
+    def __init__(self, *, old="11.2.7-h15"):
+        self.restarts = 0
+        self.probes = 0
+        self.old = old
+
+    def restart_system(self):
+        self.restarts += 1
+
+    def get_system_info(self):
+        self.probes += 1
+        if self.probes == 1:
+            raise ConnectionError("mgmt plane unreachable (rebooting)")
+        return SimpleNamespace(sw_version=self.old, ha_state="passive")
+
+
 def test_reboot_step_needs_consecutive_successes(captured_dispatch, monkeypatch):
     """The reboot wait requires REBOOT_READY_CONSECUTIVE consecutive healthy
     checks (reachable AND on target) before declaring the device up — a single
@@ -360,6 +379,45 @@ def test_reboot_step_wrong_version_resets_streak(captured_dispatch, monkeypatch)
     assert out is _Wait.PARKED
     assert client.restarts == 0  # already issued
     assert task.progress["reboot_ok_streak"] == 0  # reset by the wrong version
+
+
+def test_reboot_step_came_back_on_old_version_fails_fast(captured_dispatch, monkeypatch):
+    """Job-16 regression: a box that reboots onto the OLD image (failed upgrade)
+    must fail FAST with an accurate reason once it's stably back on the wrong
+    version — not sit through the full REBOOT_TIMEOUT_S reporting 'did not come
+    back online' while the box is, in fact, up."""
+    records: list = []
+
+    def _rec(db, task, msg, phase=None, **k):
+        records.append(msg)
+        if phase is not None:
+            task.phase = phase
+
+    failed: list = []
+    monkeypatch.setattr(upgrade, "_record", _rec)
+    monkeypatch.setattr(upgrade, "_set_substep", lambda *a, **k: None)
+    monkeypatch.setattr(upgrade, "_fail_job", lambda db, jid, reason: failed.append(reason))
+    client = _RebootWrongVersionClient(old="11.2.7-h15")
+    monkeypatch.setattr(upgrade, "_client_for", lambda db, d: client)
+    task = _task(progress={})
+    job = _job(target_version="12.1.4-h2")
+
+    out = _Wait.PARKED
+    ticks = 0
+    while out is _Wait.PARKED and ticks < 15:
+        out = upgrade._reboot_step(MagicMock(), job, task, task.device)
+        ticks += 1
+
+    assert out is _Wait.TIMED_OUT
+    assert client.restarts == 1                  # restart issued exactly once
+    assert task.phase == TaskPhase.FAILED
+    # Failed FAST: went-offline tick + a short wrong-version streak + the fail
+    # entry — nowhere near the 30-min timeout's worth of 30s polls.
+    assert ticks <= upgrade.REBOOT_WRONG_VERSION_LIMIT + 3
+    joined = " ".join(records).lower()
+    assert "did not apply" in joined         # accurate reason, not "did not come back"
+    assert "11.2.7-h15" in joined            # names the version it actually booted
+    assert failed and "11.2.7-h15" in failed[0]
 
 
 # ---------- wait_for_passive: single-shot HA-state check ----------

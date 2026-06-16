@@ -1593,7 +1593,18 @@ def _download_step(
         attempt = int(_progress_get(task, attempt_key, 0)) + 1
         _progress_put(db, task, attempt_key, attempt)
         try:
-            dl_job = _client_for(db, device).request_software_download(version)
+            client = _client_for(db, device)
+            # "Check Now" first: refresh the device's software catalog from the
+            # update server BEFORE requesting the download. Without it PAN-OS
+            # returns a download job that FINs at 0% with a FAILURE result even
+            # for a version already listed in `software info` — confirmed on a
+            # live firewall: a manual download failed until Check Now, after which
+            # the identical download succeeded. Best-effort: check_software_updates
+            # swallows its own errors, and if the catalog is genuinely unreachable
+            # the download below now fails with a real, surfaced reason (see the
+            # job-result handling on completion) instead of a 0% mystery.
+            client.check_software_updates()
+            dl_job = client.request_software_download(version)
             if not dl_job:
                 raise RuntimeError("download request returned no job id")
         except Exception as exc:  # noqa: BLE001
@@ -1618,8 +1629,12 @@ def _download_step(
     # Phase 2: poll the persisted job to FIN, one tick per re-dispatch.
     job_id = _progress_get(task, job_key)
 
+    last_status: dict = {}
+
     def _download_finished() -> bool:
         status = _client_for(db, device).get_job_status(job_id)
+        last_status.clear()
+        last_status.update(status)
         _set_job_progress(db, task, progress_pct_key, status.get("progress"))
         return status.get("status") == "FIN"
 
@@ -1630,17 +1645,37 @@ def _download_step(
         is_done=_download_finished,
     )
     if res is _Wait.DONE:
-        # Job FIN — verify the image actually landed in the software list. If it
-        # didn't, drop the handle so the next entry re-issues (bounded by the
-        # attempt counter), mirroring the old retry loop's re-request behavior.
+        # Job FIN — but FIN means "the job stopped running", NOT "the download
+        # succeeded". Verify the image actually landed in the software list.
         if _present():
             _progress_put(db, task, job_key, None)
             _unmark_phase(db, task, issued_marker)
             _record(db, task, f"Image {version} downloaded")
             return _Wait.DONE
-        attempt = int(_progress_get(task, attempt_key, 0))
+
+        # FIN but the image isn't present. Read the job's RESULT before reacting:
+        # a download job that finished with a FAILURE will not fix itself on a
+        # re-request, and PAN-OS's actual reason is in its `details`. Surface that
+        # verbatim and fail fast — no blind retries, and NO reflexive "it's disk"
+        # guess (the real causes here were a stale catalog the device hadn't
+        # refreshed, or a version not actually fetchable from the update server).
+        result = (last_status.get("result") or "").strip().upper()
+        details = (last_status.get("details") or "").strip()
         _progress_put(db, task, job_key, None)
         _unmark_phase(db, task, issued_marker)
+        if result not in ("OK", "SUCCESS", "", "UNKNOWN"):
+            reason = details or f"PAN-OS reported download job result={result}"
+            _record(
+                db, task,
+                f"Download of {version} failed: {reason}",
+                phase=TaskPhase.FAILED,
+            )
+            _fail_job(db, job.id, f"Image download failed for {device.name}: {reason}")
+            return _Wait.TIMED_OUT
+
+        # No explicit failure (result OK/unknown) yet the image still isn't listed
+        # — rare (catalog lag). Keep the bounded re-request the old loop did.
+        attempt = int(_progress_get(task, attempt_key, 0))
         if attempt < DOWNLOAD_RETRY_ATTEMPTS:
             _record(
                 db, task,
@@ -1651,11 +1686,12 @@ def _download_step(
                 (task.job_id, task.ha_pair_key), countdown=DOWNLOAD_RETRY_WAIT_S
             )
             return _Wait.PARKED
+        tail = f" Last PAN-OS detail: {details}" if details else ""
         _record(
             db, task,
             f"Download of {version} did not land after {DOWNLOAD_RETRY_ATTEMPTS} attempts "
-            f"(download finished but the image never appeared on the device). Most likely "
-            f"the device is low on disk — free space (or run disk cleanup) and retry.",
+            f"(the job reported success but the image never appeared in the software "
+            f"list).{tail}",
             phase=TaskPhase.FAILED,
         )
         _fail_job(db, job.id, f"Image download failed for {device.name}")

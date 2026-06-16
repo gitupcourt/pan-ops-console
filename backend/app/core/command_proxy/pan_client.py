@@ -679,6 +679,30 @@ class PanDeviceClient:
                 return True
         return False
 
+    def check_software_updates(self) -> None:
+        """`request system software check` on its own — force the device to
+        refresh its software catalog from updates.paloaltonetworks.com (the GUI
+        "Check Now" / CLI `request system software check`).
+
+        REQUIRED before a download: PAN-OS won't actually fetch a version whose
+        download metadata it hasn't refreshed — `request system software download
+        <ver>` returns a job that FINs at 0% with a failure result even though the
+        version already appears in `software info`. (Confirmed on a live firewall:
+        a manual download of a maintenance release failed until "Check Now", after
+        which the identical download succeeded.)
+
+        Best-effort: the check reaches the update server, which may be slow
+        (5-30s) or unreachable (lab / no egress). A failure here must NOT abort
+        the caller — the subsequent download surfaces its own (now-real) error.
+        """
+        try:
+            self._proxy.op(
+                "<request><system><software><check></check></software></system></request>",
+                cmd_xml=False,
+            )
+        except PanDeviceError as exc:
+            log.info("software-catalog refresh (check) failed, continuing: %s", exc)
+
     def request_software_download(self, version: str) -> str:
         """Kick off `request system software download version X.Y.Z`. Returns the job id."""
         cmd = f"<request><system><software><download><version>{version}</version></download></software></system></request>"

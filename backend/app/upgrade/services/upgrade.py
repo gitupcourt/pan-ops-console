@@ -870,12 +870,17 @@ def _heal_suspended_members(
     crash, or abort). We suspend the passive to install it; a failure between
     that suspend and the normal resume would otherwise leave the member
     'suspended' — the cluster running on a single node with no redundancy, and
-    unclassifiable for the next job (the job-10 → job-11 trap). Resume any such
-    member, best-effort. Members already resumed in the normal flow
-    (ha_resume_complete) are skipped."""
+    unclassifiable for the next job (the job-10 → job-11 trap).
+
+    Resume any member that is ACTUALLY suspended, trusting the device's live HA
+    state — do NOT skip on the ha_resume_complete marker. reconcile sets that
+    marker at entry whenever the pair starts in a healthy HA state, but THIS
+    upgrade then suspends the member to install it; a stale "ha_resume_complete"
+    would make us skip the very member we need to release (observed job 17: a
+    failed install left the secondary suspended because the heal skipped it on
+    the entry-time marker). _resume_suspended_member is already a no-op on a
+    member that isn't suspended, so calling it unconditionally is safe."""
     for t in tasks:
-        if _phase_already_done(t, "ha_resume_complete"):
-            continue
         _resume_suspended_member(db, t, t.device)
 
 

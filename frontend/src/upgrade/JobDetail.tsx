@@ -38,6 +38,15 @@ export default function JobDetail() {
     queryKey: ["upgrade-job", id],
     queryFn: () => api.getUpgradeJob(id),
     enabled: !Number.isNaN(id),
+    // This is a LIVE status view, so override the app-wide query defaults
+    // (main.tsx: refetchOnWindowFocus=false, staleTime=30s). Without these,
+    // tabbing away during an upgrade pauses the poll (react-query stops
+    // refetchInterval on a hidden tab) and returning never refetches — the page
+    // freezes on the last-seen phase (e.g. "Rebooting") even after the job has
+    // completed, until a manual reload. Keep polling in the background and
+    // refetch on focus so the displayed phase always reflects reality.
+    refetchOnWindowFocus: true,
+    refetchIntervalInBackground: true,
     refetchInterval: (q) => {
       const state = q.state.data?.state;
       if (!state) return 5000;
@@ -1175,7 +1184,10 @@ const SUBSTEP_LABELS: Record<string, string> = {
  */
 function PhaseSubstep({ task: t }: { task: UpgradeTask }) {
   const substep = readSubstep(t.progress);
-  const pct = readPhasePercent(t.phase, t.progress);
+  const pct = readPhasePercent(t.phase, substep, t.progress);
+  // For a no-percentage wait (reboot, HA sync) show elapsed time so the row
+  // visibly ticks instead of looking frozen on a stale number.
+  const waited = substep ? readSubstepElapsed(substep, t.progress) : null;
 
   if (!substep && pct == null) return null;
 
@@ -1190,6 +1202,7 @@ function PhaseSubstep({ task: t }: { task: UpgradeTask }) {
       {pct != null && (
         <span className="font-mono text-blue-300">{pct}%</span>
       )}
+      {waited && <span className="font-mono text-zinc-500">{waited}</span>}
     </span>
   );
 }
@@ -1199,18 +1212,23 @@ function readSubstep(progress: Record<string, unknown> | null): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
-// install_progress applies to the UPGRADE_* phases; download_progress to
-// DOWNLOADING_IMAGE. Returns the relevant percent for the current phase,
-// or null when there's nothing meaningful to show.
+// download_progress applies while DOWNLOADING_IMAGE; install_progress only
+// while actually INSTALLING (the install runs inside the UPGRADE_* phase, which
+// ALSO covers the reboot/verify sub-steps — so gate on the substep, or the stale
+// install % rides along next to "rebooting" and looks frozen, e.g. the spurious
+// "Rebooting 78%"). Returns the relevant percent, or null when there's nothing
+// meaningful to show.
 function readPhasePercent(
   phase: TaskPhase,
+  substep: string | null,
   progress: Record<string, unknown> | null,
 ): number | null {
   if (!progress) return null;
   const key =
     phase === "downloading_image"
       ? "download_progress"
-      : phase === "upgrade_secondary" || phase === "upgrade_primary"
+      : (phase === "upgrade_secondary" || phase === "upgrade_primary") &&
+          substep === "installing"
         ? "install_progress"
         : null;
   if (!key) return null;
@@ -1218,6 +1236,39 @@ function readPhasePercent(
   if (typeof v !== "number" || Number.isNaN(v)) return null;
   if (v < 0 || v > 100) return null;
   return v;
+}
+
+// Sub-steps that are a no-percentage WAIT (the device is off doing something we
+// can only poll for). Map each to the orchestrator's persisted wait clock so the
+// row can show ticking elapsed time instead of a frozen label — a slow box (e.g.
+// a sluggish mgmt plane after reboot) then reads as "still working, Nm" rather
+// than "stuck". Keys are the `_wait_start::<marker>` entries _await_or_park writes.
+const SUBSTEP_WAIT_CLOCK: Record<string, string> = {
+  rebooting: "_wait_start::reboot_ready",
+  waiting_for_passive: "_wait_start::wait_for_passive",
+};
+
+function readSubstepElapsed(
+  substep: string,
+  progress: Record<string, unknown> | null,
+): string | null {
+  const key = SUBSTEP_WAIT_CLOCK[substep];
+  if (!key || !progress) return null;
+  const iso = progress[key];
+  return typeof iso === "string" ? elapsedSince(iso) : null;
+}
+
+// Bare elapsed duration since an ISO timestamp ("45s", "6m", "1h 3m") — no
+// "ago" suffix; used for live "how long have we been in this step" indicators.
+function elapsedSince(iso: string): string | null {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return null;
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
 }
 
 function relTime(iso: string): string {

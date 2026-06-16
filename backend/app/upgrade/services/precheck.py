@@ -28,6 +28,7 @@ from app.core.command_proxy.builder import build_client_with_fallback
 from app.core.command_proxy.pan_client import (
     DEFAULT_READINESS_CHECKS,
     PanDeviceClient,
+    retry_on_transient,
 )
 from app.core.devices.models.device import Device
 from app.core.devices.services.ha import map_ha_role
@@ -138,7 +139,13 @@ def run_precheck_for_device(
         log.warning("Pre-precheck probe failed for device %s: %s", device.id, exc)
 
     try:
-        raw_results = client.run_readiness_checks(check_names)
+        # Readiness checks are read-only — safe to retry on a transient timeout
+        # (a momentarily-busy/slow mgmt plane, e.g. right after a reboot) instead
+        # of failing the whole precheck on the first blip.
+        raw_results = retry_on_transient(
+            lambda: client.run_readiness_checks(check_names),
+            label=f"readiness checks for {device.name}",
+        )
     except Exception as exc:  # noqa: BLE001
         return _persist_failed_run(
             db, device, user_id, bulk_run_id, f"Pre-checks failed: {exc}"

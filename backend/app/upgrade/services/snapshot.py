@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 from panos_upgrade_assurance.snapshot_compare import SnapshotCompare
 from sqlalchemy.orm import Session
 
+from app.core.command_proxy.pan_client import retry_on_transient
 from app.upgrade.models.snapshot import Snapshot, SnapshotDiff, SnapshotKind
 
 if TYPE_CHECKING:
@@ -84,7 +85,14 @@ def capture(
     areas = areas or DEFAULT_AREAS
 
     try:
-        data = client.take_snapshot(snapshots=areas)
+        # Read-only — retry a transient timeout (a busy/slow mgmt plane, e.g. the
+        # post-reboot snapshot on a device that's still settling) rather than
+        # persisting an empty snapshot that then breaks the compare ("Cannot
+        # compare snapshot when either side is None").
+        data = retry_on_transient(
+            lambda: client.take_snapshot(snapshots=areas),
+            label=f"snapshot capture for {device.name}",
+        )
         error: str | None = None
     except Exception as exc:  # noqa: BLE001
         log.warning("Snapshot capture failed for %s: %s", device.name, exc)

@@ -26,6 +26,7 @@ phase-4a design contract).
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
@@ -204,6 +205,17 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
             "has a network path to the mgmt IP. "
             f"Original error: {msg}"
         )
+    if "read operation timed out" in msg.lower() or "read timed out" in msg.lower():
+        # We CONNECTED but the device didn't answer in time — a slow/busy/
+        # overloaded mgmt plane (e.g. still coming up after a reboot), NOT a
+        # reachability problem. Distinct from a connect timeout below.
+        return (
+            f"{context}: The device accepted the connection but didn't respond "
+            "in time — its management plane is likely slow, overloaded, or still "
+            "coming up (common right after a reboot). This is retried "
+            "automatically; if it persists, give the device a moment and retry. "
+            f"Original error: {msg}"
+        )
     if "timed out" in msg.lower() or "timeout" in msg.lower():
         return (
             f"{context}: Timed out connecting to the device. The mgmt IP "
@@ -270,6 +282,58 @@ def _friendly_check_error(exc: BaseException, *, context: str = "Readiness check
             f"Original error: {msg}"
         )
     return f"{context} failed: {msg}"
+
+
+# Transient device errors worth RETRYING a read-only op on. A momentarily-busy or
+# slow management plane — common right after a reboot, under load, or while a big
+# commit runs — drops or times out a request that would succeed seconds later.
+# Read timeouts, dropped/reset connections, and "disconnected" all qualify.
+# Deliberately EXCLUDES permanent failures (connection refused = HTTPS off / wrong
+# IP; DNS failures) — retrying those just delays a real, actionable error.
+_TRANSIENT_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "remotedisconnected",
+    "remote end closed",
+    "target disconnected",
+    "temporarily unavailable",
+)
+
+
+def is_transient_device_error(exc: BaseException) -> bool:
+    """True when ``exc`` looks like a transient blip worth retrying rather than a
+    permanent misconfiguration. See ``_TRANSIENT_ERROR_MARKERS``."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT_ERROR_MARKERS)
+
+
+def retry_on_transient(fn, *, attempts: int = 3, wait_s: float = 4.0, label: str = "device op"):
+    """Run ``fn()``, retrying on a TRANSIENT device error up to ``attempts`` times
+    with a fixed backoff; returns ``fn()``'s result.
+
+    Re-raises immediately on a non-transient error (no point retrying a permanent
+    one) and re-raises the last error once transient attempts are exhausted.
+
+    READ-ONLY callers only — never wrap a device WRITE: a timed-out write may have
+    actually landed on the device, and a retry would double-apply it. (Writes have
+    their own purpose-built, idempotent retry paths in the orchestrator.)
+    """
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if not is_transient_device_error(exc) or attempt >= attempts:
+                raise
+            last = exc
+            log.info(
+                "%s: transient error on attempt %d/%d (%s); retrying in %.0fs",
+                label, attempt, attempts, exc, wait_s,
+            )
+            time.sleep(wait_s)
+    raise last  # pragma: no cover - loop always returns or raises above
 
 
 # Default per-call timeout (seconds) when a caller doesn't pass one. The

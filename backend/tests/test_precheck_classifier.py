@@ -13,6 +13,7 @@ Rules under test:
   - _classify_expired_licenses — TP-only expiry + ATP licensed → pass
   - _classify_dynamic_updates  — wildfire-real-time-only → pass
   - _classify_content_version  — failure is WARN, not FAIL
+  - _classify_free_disk_space  — low disk is WARN (advisory), never a blocker
   - overall_severity         — worst-of aggregation
   - unknown check name       — passthrough fallback
 """
@@ -187,6 +188,40 @@ def test_content_version_stale_is_warn_not_fail(device):
         "content_version", {"state": False, "reason": "stale by 1 release"}, device
     )
     assert sev == Severity.WARN
+
+
+# ---------- Free disk space ----------
+
+
+def test_free_disk_space_sufficient_passes(device):
+    sev, _ = classify(
+        "free_disk_space", {"state": True, "reason": "Enough free space"}, device
+    )
+    assert sev == Severity.PASS
+
+
+def test_free_disk_space_low_is_warn_not_fail(device):
+    """Operator ask: low disk is advisory, never a hard blocker. pan-os-upgrade-
+    assurance fails against a conservative fixed minimum that ignores the actual
+    base+target image sizes, so it false-positives on devices that DO have room
+    for both. A failing check must classify WARN (not FAIL) so the orchestrator —
+    which parks the job only on overall FAIL — proceeds to the download, where the
+    accurate per-image disk gate lives."""
+    sev, reason = classify(
+        "free_disk_space",
+        {"state": False, "reason": "Not enough free disk space available"},
+        device,
+    )
+    assert sev == Severity.WARN
+    assert "Not enough free disk space" in reason  # library detail preserved
+    assert "advisory" in reason.lower()
+
+
+def test_free_disk_space_low_does_not_escalate_overall_to_fail(device):
+    """A run whose only non-pass check is low disk aggregates to WARN, so it won't
+    park the job at the precheck override gate (which fires only on overall FAIL)."""
+    disk, _ = classify("free_disk_space", {"state": False, "reason": "low"}, device)
+    assert overall_severity([Severity.PASS, disk, Severity.SKIP]) == Severity.WARN
 
 
 # ---------- Default / fallback ----------

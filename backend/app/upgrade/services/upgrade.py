@@ -1243,6 +1243,18 @@ def _phase_ensure_image(db: Session, job: UpgradeJob, task: DeviceUpgradeTask, d
     if _is_major_jump(device.current_version, job.target_version):
         try:
             software = client.list_software()
+            # #175 made list_software() local-only by default (check_updates=False).
+            # On a FRESH major jump the device has no image from the target train
+            # yet, so the base image isn't in the local list and
+            # base_image_from_list() returns None — which silently skips the base
+            # download, and the maintenance release then downloads but never
+            # "lands" (PAN-OS won't surface it until its train's base is present).
+            # Re-query WITH the update-server list so the base (and its
+            # release_type marker) is discoverable. Local-first keeps this cheap
+            # once the base is downloaded (the train shows up locally and we skip
+            # the update-server round-trip on subsequent poll re-entries).
+            if base_image_from_list(job.target_version, software) is None:
+                software = client.list_software(check_updates=True)
         except Exception as exc:  # noqa: BLE001
             software = []
             _record(db, task, f"Could not read software list for base-image check: {exc}")
@@ -1641,7 +1653,9 @@ def _download_step(
             return _Wait.PARKED
         _record(
             db, task,
-            f"Download of {version} did not land after {DOWNLOAD_RETRY_ATTEMPTS} attempts",
+            f"Download of {version} did not land after {DOWNLOAD_RETRY_ATTEMPTS} attempts "
+            f"(download finished but the image never appeared on the device). Most likely "
+            f"the device is low on disk — free space (or run disk cleanup) and retry.",
             phase=TaskPhase.FAILED,
         )
         _fail_job(db, job.id, f"Image download failed for {device.name}")

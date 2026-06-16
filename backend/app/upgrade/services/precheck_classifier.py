@@ -113,6 +113,33 @@ def _classify_content_version(raw: dict, device: "Device") -> tuple[Severity, st
     return (Severity.WARN, raw["reason"])
 
 
+def _classify_free_disk_space(raw: dict, device: "Device") -> tuple[Severity, str]:
+    """Low disk is advisory, not a hard upgrade-blocker.
+
+    pan-os-upgrade-assurance checks free space against a conservative fixed
+    minimum (~3.65 GB — the typical base-image size). It does NOT account for the
+    actual size of the base + target images this job will pull, so it routinely
+    fails devices that in fact have room for both (operator: "there is enough
+    space for both the base and chosen image ... it really is a warning and not a
+    blocker"). Blocking the whole job on that heuristic is wrong.
+
+    The ACCURATE disk gate lives downstream, where the real answer is known: the
+    image-download step verifies the image actually landed on the device and
+    fails that device cleanly — with failure isolation — if disk truly runs out,
+    and one-click disk cleanup can reclaim space. So a failed free_disk_space
+    check is a WARN the operator should see, not a FAIL that needs an override.
+    """
+    if raw["state"]:
+        return (Severity.PASS, raw["reason"] or "Sufficient free disk space")
+    detail = (raw["reason"] or "Low free disk space").rstrip(". ")
+    return (
+        Severity.WARN,
+        f"{detail} — advisory: this is a conservative fixed threshold, not a "
+        "per-image calculation. The download step verifies the image lands and "
+        "fails cleanly if space truly runs out; free space or run disk cleanup if needed.",
+    )
+
+
 # ---------- dispatch ----------
 
 _RULES: dict[str, Callable[[dict, "Device"], tuple[Severity, str]]] = {
@@ -121,6 +148,7 @@ _RULES: dict[str, Callable[[dict, "Device"], tuple[Severity, str]]] = {
     "expired_licenses": _classify_expired_licenses,
     "dynamic_updates": _classify_dynamic_updates,
     "content_version": _classify_content_version,
+    "free_disk_space": _classify_free_disk_space,
 }
 
 

@@ -449,8 +449,10 @@ function TaskRow({
           </div>
           {t.error && (
             <div
-              className="text-[10px] text-rose-400 mt-0.5 max-w-md truncate"
-              title={t.error}
+              className={`text-[10px] text-rose-400 mt-0.5 max-w-md ${
+                expanded ? "whitespace-pre-wrap break-words" : "truncate"
+              }`}
+              title={expanded ? undefined : t.error}
             >
               {t.error}
             </div>

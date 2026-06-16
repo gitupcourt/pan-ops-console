@@ -118,15 +118,22 @@ def test_resume_never_raises(monkeypatch):
 # ---------- _heal_suspended_members (Layer 1) ----------
 
 
-def test_heal_skips_members_already_resumed(monkeypatch):
+def test_heal_resumes_suspended_member_despite_stale_marker(monkeypatch):
+    """The heal trusts live HA state, NOT the ha_resume_complete marker. reconcile
+    sets that marker at entry when the pair starts healthy, but THIS upgrade then
+    suspends the member to install it — so a stale marker must not make us skip
+    releasing it (job-17 regression: a failed install left the secondary
+    suspended). _resume_suspended_member is a no-op on a member that isn't
+    suspended (see test_resume_skips_already_healthy), so calling it for every
+    task is safe."""
     resumed = []
     monkeypatch.setattr(
-        upgrade, "_resume_suspended_member", lambda db, t, d: resumed.append(t) or True
+        upgrade, "_resume_suspended_member", lambda db, t, d: resumed.append(t.id) or True
     )
-    done = _task(_device(), progress={"completed_phases": ["ha_resume_complete"]}, tid=1)
+    marked = _task(_device(), progress={"completed_phases": ["ha_resume_complete"]}, tid=1)
     pending = _task(_device(), tid=2)
-    upgrade._heal_suspended_members(MagicMock(), SimpleNamespace(), [done, pending])
-    assert resumed == [pending]  # the normally-resumed member is left alone
+    upgrade._heal_suspended_members(MagicMock(), SimpleNamespace(), [marked, pending])
+    assert resumed == [1, 2]  # BOTH attempted — the stale marker no longer skips
 
 
 def test_heal_resumes_each_unfinished_member(monkeypatch):

@@ -1436,11 +1436,14 @@ def _install_step(
         _set_job_progress(db, task, "install_progress", status.get("progress"))
         if status.get("status") != "FIN":
             return False
-        # FIN. Like the old _install_with_retry: a non-OK result is NOT fatal
-        # here — the device still reboots, and the post-reboot
-        # _verify_install_applied (#186) is the real backstop against a
-        # non-upgrade. Persist the result so the DONE branch below can log it.
-        _progress_set(db, task, install_result=status.get("result") or "unknown")
+        # FIN means the job stopped running, NOT that it succeeded. Persist the
+        # result + details so the DONE branch can tell a real install from a
+        # failed one.
+        _progress_set(
+            db, task,
+            install_result=status.get("result") or "unknown",
+            install_details=(status.get("details") or "").strip(),
+        )
         return True
 
     res = _await_or_park(
@@ -1450,23 +1453,35 @@ def _install_step(
         is_done=_install_finished,
     )
     if res is _Wait.DONE:
-        result = _progress_get(task, "install_result")
-        if result == "OK":
-            _record(db, task, "Install complete")
-        else:
-            log.info(
-                "Install job %s did not FIN cleanly (result=%s); proceeding to restart anyway",
-                job_id, result,
+        result = (_progress_get(task, "install_result") or "").strip().upper()
+        details = (_progress_get(task, "install_details") or "").strip()
+        # Only an explicitly-OK install earns a reboot. A FAILED install must NOT
+        # reboot the device: restarting a box whose install didn't take is
+        # pointless AND disruptive — and for an HA pair we've already suspended
+        # this member, so a needless reboot extends the outage for nothing. Fail
+        # fast with PAN-OS's real reason. (#186's post-reboot verify remains the
+        # backstop for the rarer install-reported-OK-but-didn't-apply case.)
+        if result not in ("OK", "SUCCESS"):
+            reason = details or f"PAN-OS reported install job result={result or 'unknown'}"
+            _progress_set(
+                db, task,
+                install_job_id=None, install_attempt=None,
+                install_result=None, install_details=None,
             )
+            _unmark_phase(db, task, "install_issued")
             _record(
                 db, task,
-                f"Install job finished with result '{result or 'unknown'}'; "
-                "proceeding to reboot (post-reboot version is verified before completion)",
+                f"Install of {job.target_version} failed: {reason}. Not rebooting "
+                f"{device.name} (it stays on {device.current_version}).",
+                phase=TaskPhase.FAILED,
             )
+            _fail_job(db, job.id, f"Install failed for {device.name}: {reason}")
+            return _Wait.TIMED_OUT
+        _record(db, task, "Install complete")
         # Clear the issue handle/marker + scratch so a future install (e.g. the
         # partner, or a reconcile that cleared software_installed) re-issues
         # cleanly rather than polling this now-finished job id.
-        _progress_set(db, task, install_job_id=None, install_attempt=None, install_result=None)
+        _progress_set(db, task, install_job_id=None, install_attempt=None, install_result=None, install_details=None)
         _unmark_phase(db, task, "install_issued")
         _mark_phase_done(db, task, "software_installed")
     return res

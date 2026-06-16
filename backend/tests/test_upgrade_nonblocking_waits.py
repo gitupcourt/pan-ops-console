@@ -169,17 +169,21 @@ class _InstallPollClient:
     status. Used to prove a re-entry with install_job_id set re-polls instead of
     re-issuing."""
 
-    def __init__(self, *, status="ACT", result="unknown"):
+    def __init__(self, *, status="ACT", result="unknown", details=""):
         self.installs = 0
         self._status = status
         self._result = result
+        self._details = details
 
     def request_software_install(self, version):
         self.installs += 1
         return "instjob-1"
 
     def get_job_status(self, job_id):
-        return {"status": self._status, "progress": "50", "result": self._result}
+        return {
+            "status": self._status, "progress": "50",
+            "result": self._result, "details": self._details,
+        }
 
 
 def _job(**over):
@@ -269,6 +273,36 @@ def test_install_step_permanent_error_fails(monkeypatch):
     assert out is _Wait.TIMED_OUT
     assert task.phase == TaskPhase.FAILED
     assert failed and failed[0][0] == 12
+
+
+def test_install_step_failed_result_fails_fast_without_reboot(captured_dispatch, monkeypatch):
+    """A FIN'd install job whose RESULT is a failure must NOT mark
+    software_installed — so the caller (_phase_install_and_wait) never proceeds
+    to reboot a box whose install didn't take. It fails fast with PAN-OS's real
+    reason. Regression: the old code logged 'proceeding to restart anyway' and
+    rebooted a suspended HA member after a failed install."""
+    client = _InstallPollClient(
+        status="FIN", result="FAIL",
+        details="Failed to install 12.1.7. Content version 8000 is too old.",
+    )
+    monkeypatch.setattr(upgrade, "_client_for", lambda db, d: client)
+    monkeypatch.setattr(upgrade, "_set_substep", lambda *a, **k: None)
+    failed: list = []
+    monkeypatch.setattr(upgrade, "_fail_job", lambda db, jid, reason: failed.append(reason))
+    task = _task(
+        progress={},
+        device=SimpleNamespace(name="fw1", ha_peer_id=None, current_version="11.2.7-h15"),
+    )
+
+    out = upgrade._install_step(MagicMock(), _job(), task, task.device)
+
+    assert out is _Wait.TIMED_OUT
+    assert client.installs == 1                           # issued once, not retried
+    assert "software_installed" not in _completed(task)   # caller will NOT reboot
+    assert task.phase == TaskPhase.FAILED
+    assert captured_dispatch == []                        # failed fast, not parked
+    # PAN-OS's real reason is surfaced, not a guess.
+    assert failed and "content version 8000 is too old" in failed[0].lower()
 
 
 # ---------- reboot: restart issued once, readiness streak ----------

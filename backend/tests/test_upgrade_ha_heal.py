@@ -64,9 +64,26 @@ def test_resume_skips_standalone(monkeypatch):
 def test_resume_skips_already_healthy(monkeypatch):
     calls = []
     monkeypatch.setattr(upgrade, "_ha_op_with_retry", lambda *a, **k: calls.append(a) or True)
-    dev = _device(ha_state="passive")  # not suspended — nothing to heal
+    dev = _device(ha_state="passive")  # not suspended, and WE didn't suspend it
     assert upgrade._resume_suspended_member(MagicMock(), _task(dev), dev) is True
     assert calls == []
+
+
+def test_resume_acts_on_suspend_marker_despite_stale_cache(monkeypatch):
+    """Resume a member WE suspended even when the cached ha_state is stale.
+    suspend_ha doesn't refresh our cache, and a fast install-fail reaches the heal
+    in the same drive cycle — so gating on the cache alone no-ops the very member
+    we need to release (job 19: the 8 GB install rejected in seconds and the
+    secondary stayed suspended). Gate on the suspend_ha marker instead; resume_ha
+    is a no-op if the device is in fact already functional, and the live verify
+    confirms either way."""
+    calls = []
+    monkeypatch.setattr(upgrade, "_ha_op_with_retry", lambda *a, **k: calls.append(a) or True)
+    monkeypatch.setattr(upgrade, "_verify_resume_took_effect", lambda *a, **k: True)
+    dev = _device(ha_state="passive")  # cache still shows the pre-suspend state…
+    task = _task(dev, progress={"completed_phases": ["suspend_ha"]})  # …but WE suspended it
+    assert upgrade._resume_suspended_member(MagicMock(), task, dev) is True
+    assert calls  # resume WAS attempted despite the stale 'passive' cache
 
 
 def test_resume_returns_false_when_command_fails(monkeypatch):

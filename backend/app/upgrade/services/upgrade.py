@@ -845,8 +845,18 @@ def _resume_suspended_member(
         db.refresh(device)
         if device.ha_peer_id is None:
             return True  # standalone — nothing to resume
-        if (device.ha_state or "").lower().strip() != "suspended":
-            return True  # already healthy
+        # Resume if WE suspended this member for this job (the suspend_ha marker)
+        # OR it currently reads suspended. Do NOT rely on the cached ha_state
+        # alone: suspend_ha doesn't refresh it, and a fast install-fail reaches
+        # the heal in the SAME drive cycle — before any probe marks 'suspended' —
+        # so a cache-only check no-ops the very member we need to release (job 19:
+        # the 8 GB install rejected in seconds and the secondary stayed suspended).
+        # resume_ha is a no-op on an already-functional member and
+        # _verify_resume_took_effect probes live, so acting on the marker is safe.
+        we_suspended = _phase_already_done(task, "suspend_ha")
+        cached_suspended = (device.ha_state or "").lower().strip() == "suspended"
+        if not we_suspended and not cached_suspended:
+            return True  # we didn't suspend it and it isn't suspended — leave it
         if not _ha_op_with_retry(
             db, task, device, "HA resume (restore cluster)", lambda c: c.resume_ha()
         ):

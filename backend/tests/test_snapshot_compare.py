@@ -72,6 +72,42 @@ class _FakeCompare:
         return {area: {"passed": True} for area in (reports or [])}
 
 
+class _PartialFakeCompare:
+    """SnapshotCompare stand-in that RAISES for one area — mimics e.g. `routes`
+    on an Advanced-Routing-Mode device, whose capture errors to a null snapshot
+    so the real library raises 'Cannot compare snapshot when either side is
+    None'. All other areas compare clean."""
+
+    def __init__(self, left_data, right_data):
+        pass
+
+    def compare_snapshots(self, reports=None):
+        (area,) = reports  # compare() now calls one area at a time
+        if area == "routes":
+            raise ValueError("Cannot compare snapshot when either side is None")
+        return {area: {"passed": True}}
+
+
+def test_compare_skips_uncomparable_area(client, db, monkeypatch):
+    """A single area the library can't compare (routes in Advanced Routing Mode)
+    must NOT sink the whole diff. compare() goes area-by-area, skips the bad one,
+    reports the rest, and records the skip under `_skipped`."""
+    monkeypatch.setattr(snapshot_svc, "SnapshotCompare", _PartialFakeCompare)
+
+    dev = _seed_device(db, name="fw-arm")
+    data = {"nics": {}, "routes": {}, "arp_table": {}, "license": {}}
+    pre = _snap(db, dev, SnapshotKind.PRE_UPGRADE, data)
+    post = _snap(db, dev, SnapshotKind.POST_UPGRADE, data, version="12.1.4-h2")
+
+    diff = snapshot_svc.compare(db, pre, post)
+
+    assert diff is not None
+    assert "_error" not in diff.report                 # the diff SURVIVED
+    assert diff.report.get("_skipped") == ["routes"]   # the bad area is recorded
+    assert {"nics", "arp_table", "license"} <= set(diff.report)  # the rest compared
+    assert diff.all_passed is True
+
+
 def test_compare_passes_only_overlapping_areas(client, db, monkeypatch):
     """The core regression: compare() must scope the library call to the
     areas present in BOTH snapshots — never None (which would pull in

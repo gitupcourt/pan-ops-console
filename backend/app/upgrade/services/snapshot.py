@@ -155,18 +155,33 @@ def compare(
         )
         return None
 
-    try:
-        report = SnapshotCompare(left.data, right.data).compare_snapshots(
-            reports=areas_to_compare
+    # Compare areas ONE AT A TIME so a single un-comparable area doesn't sink the
+    # whole diff. A device-specific capture gap surfaces as one area the library
+    # can't process — e.g. in Advanced Routing Mode the legacy route snapshot is
+    # deprecated, so `routes` captures as an error with a null snapshot and
+    # SnapshotCompare raises "Cannot compare snapshot when either side is None".
+    # Skip just that area and report the rest, rather than losing the entire diff.
+    sc = SnapshotCompare(left.data, right.data)
+    report: dict = {}
+    skipped: list[str] = []
+    for area in areas_to_compare:
+        try:
+            report.update(sc.compare_snapshots(reports=[area]))
+        except Exception as exc:  # noqa: BLE001
+            log.info("Snapshot diff: skipping area '%s' (%s)", area, exc)
+            skipped.append(area)
+
+    if not report:
+        # Nothing could be compared — persist the failure so the UI shows it.
+        log.warning(
+            "Snapshot compare produced no comparable areas (left=%s right=%s skipped=%s)",
+            left.id, right.id, skipped,
         )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Snapshot compare failed: %s", exc)
-        # Persist the failure so the UI doesn't silently miss the diff.
         diff = SnapshotDiff(
             left_snapshot_id=left.id,
             right_snapshot_id=right.id,
             task_id=task_id,
-            report={"_error": str(exc)[:1900]},
+            report={"_error": "No snapshot areas could be compared.", "_skipped": skipped},
             all_passed=False,
             failing_areas="(compare error)",
         )
@@ -174,6 +189,11 @@ def compare(
         db.commit()
         db.refresh(diff)
         return diff
+
+    # Record any areas we couldn't compare so the UI can say so instead of
+    # silently omitting them (e.g. routes on an Advanced-Routing-Mode device).
+    if skipped:
+        report["_skipped"] = skipped
 
     # The library report shape: {area: {"passed": bool, ...}}. Aggregate the
     # pass flag so list endpoints don't have to descend into the JSON.

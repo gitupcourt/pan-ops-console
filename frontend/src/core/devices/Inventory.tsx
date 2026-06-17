@@ -13,6 +13,7 @@ import {
 import { Button, Card, CardHeader, Empty, Field, Input, Select, TableScroll } from "../ui/ui";
 import { DeviceConnectionStatus } from "./DeviceConnectionStatus";
 import { DiskCleanupModal } from "./DiskCleanupModal";
+import { ReplaceSerialModal } from "./ReplaceSerialModal";
 
 export default function Inventory() {
   return (
@@ -610,6 +611,7 @@ function DevicesSection() {
   // Per-device disk-space cleanup dialog (null = closed). Holds the whole
   // device so the modal has the name without a re-lookup.
   const [cleanupFor, setCleanupFor] = useState<Device | null>(null);
+  const [replaceFor, setReplaceFor] = useState<Device | null>(null);
 
   const devs: Device[] = devsQ.data ?? [];
 
@@ -993,6 +995,10 @@ function DevicesSection() {
                             onClick: () => setCleanupFor(d),
                           },
                           {
+                            label: "Replace serial (RMA)",
+                            onClick: () => setReplaceFor(d),
+                          },
+                          {
                             label: "Delete",
                             onClick: () => {
                               if (
@@ -1086,6 +1092,14 @@ function DevicesSection() {
           deviceId={cleanupFor.id}
           deviceName={cleanupFor.name}
           onClose={() => setCleanupFor(null)}
+        />
+      )}
+      {replaceFor && (
+        <ReplaceSerialModal
+          device={replaceFor}
+          devices={devs}
+          onClose={() => setReplaceFor(null)}
+          onDone={() => qc.invalidateQueries({ queryKey: ["devices"] })}
         />
       )}
     </Card>

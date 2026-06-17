@@ -753,6 +753,14 @@ export const api = {
   deleteDevice: (id: number) =>
     j<void>(`/devices/${id}`, { method: "DELETE" }),
 
+  // RMA: re-point a device record to a new hardware serial, preserving its
+  // history and absorbing any device auto-imported under the new serial.
+  replaceDeviceSerial: (id: number, newSerial: string) =>
+    j<Device>(`/devices/${id}/replace-serial`, {
+      method: "POST",
+      body: JSON.stringify({ new_serial: newSerial }),
+    }),
+
   // Metrics
   listCatalog: () => j<MetricSpec[]>("/metrics/catalog"),
   getSeries: (deviceId: number, metric: string, hours = 24) =>

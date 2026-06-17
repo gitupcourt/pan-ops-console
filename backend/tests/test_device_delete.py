@@ -84,12 +84,13 @@ def test_delete_plain_device(client, db):
     """Baseline: a device with no references deletes and returns 204."""
     _signup(client)
     dev = _seed_standalone(db, name="fw-plain")
+    dev_id = dev.id
 
-    r = client.delete(f"/devices/{dev.id}")
+    r = client.delete(f"/devices/{dev_id}")
     assert r.status_code == 204, r.text
 
     db.expire_all()
-    assert db.get(Device, dev.id) is None
+    assert db.query(Device).filter_by(id=dev_id).count() == 0
 
 
 def test_delete_missing_device_404(client, db):
@@ -103,6 +104,7 @@ def test_delete_device_with_upgrade_history_cascades(client, db):
     task rows cascade out with it (migration 0017)."""
     _signup(client)
     dev = _seed_standalone(db, name="fw-old")
+    dev_id = dev.id
 
     # Creating a job seeds DeviceUpgradeTask rows referencing the device.
     r = client.post(
@@ -110,23 +112,24 @@ def test_delete_device_with_upgrade_history_cascades(client, db):
         json={
             "name": "history",
             "target_version": "11.1.4-h7",
-            "device_ids": [dev.id],
+            "device_ids": [dev_id],
             "device_pull_image": True,
         },
     )
     assert r.status_code == 201, r.text
+    db.expire_all()
     assert (
-        db.query(DeviceUpgradeTask).filter_by(device_id=dev.id).count() == 1
+        db.query(DeviceUpgradeTask).filter_by(device_id=dev_id).count() == 1
     )
 
-    r = client.delete(f"/devices/{dev.id}")
+    r = client.delete(f"/devices/{dev_id}")
     assert r.status_code == 204, r.text
 
     db.expire_all()
-    assert db.get(Device, dev.id) is None
+    assert db.query(Device).filter_by(id=dev_id).count() == 0
     # The task history cascaded out rather than blocking the delete.
     assert (
-        db.query(DeviceUpgradeTask).filter_by(device_id=dev.id).count() == 0
+        db.query(DeviceUpgradeTask).filter_by(device_id=dev_id).count() == 0
     )
 
 
@@ -135,12 +138,13 @@ def test_delete_ha_member_releases_peer(client, db):
     NO ACTION) instead of failing, and leaves the survivor intact."""
     _signup(client)
     a, b = _seed_ha_pair(db, name_a="fw-a", name_b="fw-b")
+    a_id, b_id = a.id, b.id
 
-    r = client.delete(f"/devices/{a.id}")
+    r = client.delete(f"/devices/{a_id}")
     assert r.status_code == 204, r.text
 
     db.expire_all()
-    assert db.get(Device, a.id) is None
-    survivor = db.get(Device, b.id)
+    assert db.query(Device).filter_by(id=a_id).count() == 0
+    survivor = db.query(Device).filter_by(id=b_id).first()
     assert survivor is not None
     assert survivor.ha_peer_id is None

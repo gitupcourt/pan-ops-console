@@ -140,20 +140,19 @@ def test_compare_passes_only_overlapping_areas(client, db, monkeypatch):
     diff = snapshot_svc.compare(db, pre, post)
 
     assert diff is not None
-    # Never None — that's the whole bug.
-    assert _FakeCompare.last_reports is not None
-    # Exactly the intersection, sorted, and crucially WITHOUT
-    # global_jumbo_frame or ip_sec_tunnels (each present on one side only)
-    # and WITHOUT session_stats (in COMPARE_EXCLUDE_AREAS — see the
-    # dedicated test below).
-    assert _FakeCompare.last_reports == [
+    assert "_error" not in diff.report
+    # compare() is scoped to the areas present in BOTH snapshots — never None
+    # (which would pull in global_jumbo_frame etc. and blow up), never the
+    # one-sided areas (global_jumbo_frame / ip_sec_tunnels), never session_stats
+    # (in COMPARE_EXCLUDE_AREAS). compare() now calls the library one area at a
+    # time, so assert on the resulting report rather than a single call's args.
+    assert set(diff.report) == {
         "arp_table",
         "content_version",
         "license",
         "nics",
         "routes",
-    ]
-    assert "_error" not in diff.report
+    }
     assert diff.all_passed is True
 
 
@@ -173,8 +172,9 @@ def test_compare_excludes_uncomparable_areas(client, db, monkeypatch):
     diff = snapshot_svc.compare(db, pre, post)
 
     assert diff is not None
-    assert _FakeCompare.last_reports == ["nics", "routes"]
-    # session_stats never reaches the library and never lands in the report.
+    # session_stats is excluded — only nics + routes are compared, and
+    # session_stats never lands in the report.
+    assert set(diff.report) == {"nics", "routes"}
     assert "session_stats" not in diff.report
 
 

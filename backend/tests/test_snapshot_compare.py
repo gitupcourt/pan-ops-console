@@ -72,6 +72,42 @@ class _FakeCompare:
         return {area: {"passed": True} for area in (reports or [])}
 
 
+class _PartialFakeCompare:
+    """SnapshotCompare stand-in that RAISES for one area — mimics e.g. `routes`
+    on an Advanced-Routing-Mode device, whose capture errors to a null snapshot
+    so the real library raises 'Cannot compare snapshot when either side is
+    None'. All other areas compare clean."""
+
+    def __init__(self, left_data, right_data):
+        pass
+
+    def compare_snapshots(self, reports=None):
+        (area,) = reports  # compare() now calls one area at a time
+        if area == "routes":
+            raise ValueError("Cannot compare snapshot when either side is None")
+        return {area: {"passed": True}}
+
+
+def test_compare_skips_uncomparable_area(client, db, monkeypatch):
+    """A single area the library can't compare (routes in Advanced Routing Mode)
+    must NOT sink the whole diff. compare() goes area-by-area, skips the bad one,
+    reports the rest, and records the skip under `_skipped`."""
+    monkeypatch.setattr(snapshot_svc, "SnapshotCompare", _PartialFakeCompare)
+
+    dev = _seed_device(db, name="fw-arm")
+    data = {"nics": {}, "routes": {}, "arp_table": {}, "license": {}}
+    pre = _snap(db, dev, SnapshotKind.PRE_UPGRADE, data)
+    post = _snap(db, dev, SnapshotKind.POST_UPGRADE, data, version="12.1.4-h2")
+
+    diff = snapshot_svc.compare(db, pre, post)
+
+    assert diff is not None
+    assert "_error" not in diff.report                 # the diff SURVIVED
+    assert diff.report.get("_skipped") == ["routes"]   # the bad area is recorded
+    assert {"nics", "arp_table", "license"} <= set(diff.report)  # the rest compared
+    assert diff.all_passed is True
+
+
 def test_compare_passes_only_overlapping_areas(client, db, monkeypatch):
     """The core regression: compare() must scope the library call to the
     areas present in BOTH snapshots — never None (which would pull in
@@ -104,20 +140,19 @@ def test_compare_passes_only_overlapping_areas(client, db, monkeypatch):
     diff = snapshot_svc.compare(db, pre, post)
 
     assert diff is not None
-    # Never None — that's the whole bug.
-    assert _FakeCompare.last_reports is not None
-    # Exactly the intersection, sorted, and crucially WITHOUT
-    # global_jumbo_frame or ip_sec_tunnels (each present on one side only)
-    # and WITHOUT session_stats (in COMPARE_EXCLUDE_AREAS — see the
-    # dedicated test below).
-    assert _FakeCompare.last_reports == [
+    assert "_error" not in diff.report
+    # compare() is scoped to the areas present in BOTH snapshots — never None
+    # (which would pull in global_jumbo_frame etc. and blow up), never the
+    # one-sided areas (global_jumbo_frame / ip_sec_tunnels), never session_stats
+    # (in COMPARE_EXCLUDE_AREAS). compare() now calls the library one area at a
+    # time, so assert on the resulting report rather than a single call's args.
+    assert set(diff.report) == {
         "arp_table",
         "content_version",
         "license",
         "nics",
         "routes",
-    ]
-    assert "_error" not in diff.report
+    }
     assert diff.all_passed is True
 
 
@@ -137,8 +172,9 @@ def test_compare_excludes_uncomparable_areas(client, db, monkeypatch):
     diff = snapshot_svc.compare(db, pre, post)
 
     assert diff is not None
-    assert _FakeCompare.last_reports == ["nics", "routes"]
-    # session_stats never reaches the library and never lands in the report.
+    # session_stats is excluded — only nics + routes are compared, and
+    # session_stats never lands in the report.
+    assert set(diff.report) == {"nics", "routes"}
     assert "session_stats" not in diff.report
 
 
@@ -190,6 +226,9 @@ def test_compare_persists_error_when_library_raises(client, db, monkeypatch):
 
     diff = snapshot_svc.compare(db, pre, post)
     assert diff is not None
-    assert diff.report.get("_error") == "boom"
+    # Every area failed → the persisted error includes the per-area reason
+    # (compare() now goes area-by-area, so the message is "<area>: <error>").
+    assert "boom" in diff.report.get("_error", "")
+    assert diff.report.get("_skipped") == ["nics"]
     assert diff.all_passed is False
     assert isinstance(db.get(SnapshotDiff, diff.id), SnapshotDiff)

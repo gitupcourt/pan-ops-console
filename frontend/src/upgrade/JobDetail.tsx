@@ -1554,13 +1554,25 @@ function DiffReport({ diff }: { diff: SnapshotDiff }) {
   // library — and `null.passed` would otherwise throw. Pre-ErrorBoundary
   // that blanked the entire console ("Compare diff → black screen"); we now
   // skip non-object bodies and note them instead of crashing.
-  const entries = Object.entries(report).filter(([k]) => k !== "_error");
+  // Areas the backend couldn't compare at all (e.g. routes on an
+  // Advanced-Routing-Mode device, whose capture errors to a null snapshot) come
+  // back under `_skipped` — fold them into the "Not compared" note rather than
+  // trying to render them as area reports.
+  const skipped = Array.isArray((report as Record<string, unknown>)._skipped)
+    ? ((report as Record<string, unknown>)._skipped as string[])
+    : [];
+  const entries = Object.entries(report).filter(
+    ([k]) => k !== "_error" && k !== "_skipped",
+  );
   const renderable = entries.filter(
     ([, a]) => a != null && typeof a === "object",
   ) as [string, SnapshotDiffAreaReport][];
-  const notComparable = entries
-    .filter(([, a]) => a == null || typeof a !== "object")
-    .map(([k]) => k);
+  const notComparable = [
+    ...entries
+      .filter(([, a]) => a == null || typeof a !== "object")
+      .map(([k]) => k),
+    ...skipped,
+  ];
 
   const failing = renderable.filter(([, a]) => !a.passed);
   const passing = renderable.filter(([, a]) => a.passed);
@@ -1610,8 +1622,9 @@ function DiffReport({ diff }: { diff: SnapshotDiff }) {
           <span className="font-mono text-zinc-300">
             {notComparable.join(", ")}
           </span>{" "}
-          — these areas don't produce a meaningful pre/post diff (e.g. session
-          counters, which reset across a reboot).
+          — either they don't produce a meaningful pre/post diff (e.g. session
+          counters reset across a reboot) or this device couldn't capture them
+          (e.g. routes in Advanced Routing Mode).
         </div>
       )}
 

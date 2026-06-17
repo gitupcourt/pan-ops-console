@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -264,8 +265,34 @@ def delete_device(device_id: int, db: Session = Depends(get_db)):
     device = db.get(Device, device_id)
     if device is None:
         raise HTTPException(status_code=404, detail="not found")
-    db.delete(device)
-    db.commit()
+
+    # Release any HA peer that still points at this device. `devices.ha_peer_id`
+    # is a self-referential FK with NO ACTION on delete, so a lingering pointer
+    # (the surviving member of a since-dissolved pair) would otherwise block the
+    # delete with an opaque IntegrityError. Nulling it is also the correct
+    # outcome — the peer is no longer paired with a device that's going away.
+    db.query(Device).filter(Device.ha_peer_id == device_id).update(
+        {Device.ha_peer_id: None}, synchronize_session=False
+    )
+
+    # The device's child rows (capacity samples, snapshots, prechecks, stage
+    # runs, alerts, and — as of migration 0017 — upgrade tasks) are all
+    # ON DELETE CASCADE, so they go with the device. Guard the commit anyway: if
+    # some future table adds a NO ACTION reference, the operator gets a clear
+    # 409 instead of the silent 500 that hid this very failure.
+    try:
+        db.delete(device)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Device can't be deleted — it's still referenced by other "
+                "records (e.g. an in-flight upgrade job). Resolve those and "
+                "try again."
+            ),
+        ) from exc
 
 
 @router.get("/version-distribution")

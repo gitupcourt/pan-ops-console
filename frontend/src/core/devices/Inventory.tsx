@@ -593,6 +593,11 @@ function DevicesSection() {
   const del = useMutation({
     mutationFn: api.deleteDevice,
     onSuccess: () => qc.invalidateQueries({ queryKey: ["devices"] }),
+    // Surface the failure inline instead of silently swallowing it — the
+    // backend returns a clear message (e.g. a 409 when the device is still
+    // referenced). Reuses the per-row result banner the Test action uses.
+    onError: (e: Error, id) =>
+      setTestResult({ id, ok: false, text: `Delete failed: ${e.message}` }),
   });
 
   // Per-device "Capacity" panel — fetches cfg.general.max-* on demand.
@@ -989,7 +994,16 @@ function DevicesSection() {
                           },
                           {
                             label: "Delete",
-                            onClick: () => del.mutate(d.id),
+                            onClick: () => {
+                              if (
+                                window.confirm(
+                                  `Delete ${d.name}? This removes the device and ` +
+                                    `its history (capacity samples, snapshots, ` +
+                                    `upgrade tasks). This cannot be undone.`,
+                                )
+                              )
+                                del.mutate(d.id);
+                            },
                             danger: true,
                           },
                         ]}

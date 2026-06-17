@@ -157,7 +157,11 @@ class DeviceUpgradeTask(Base):
         ForeignKey("upgrade_jobs.id"), index=True, nullable=False
     )
     device_id: Mapped[int] = mapped_column(
-        ForeignKey("devices.id"), index=True, nullable=False
+        # ON DELETE CASCADE to match the other device-scoped child tables
+        # (snapshots, precheck_runs, device_stage_runs). Deleting a device
+        # removes its upgrade-task history with it; the parent UpgradeJob and
+        # other devices' tasks are untouched. See migration 0017.
+        ForeignKey("devices.id", ondelete="CASCADE"), index=True, nullable=False
     )
 
     # Devices in the same HA pair share a key so the orchestrator can

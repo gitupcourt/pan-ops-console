@@ -42,6 +42,21 @@ class DeviceCreate(BaseModel):
     auth: AuthFromUserpass | AuthFromApiKey | None = Field(default=None, discriminator="mode")
 
 
+class SerialReplace(BaseModel):
+    """RMA: re-point an existing device record to a new hardware serial.
+
+    Keeps the record's identity, config, and history; swaps the serial and
+    absorbs any device that was auto-imported under the new serial.
+    """
+
+    new_serial: str = Field(min_length=1, max_length=64)
+
+    @field_validator("new_serial", mode="before")
+    @classmethod
+    def _strip(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
 class DeviceRead(BaseModel):
     id: int
     name: str

@@ -9,7 +9,14 @@ from app.config import get_settings
 from app.core.command_proxy.pan_client import PanDeviceClient
 from app.core.credentials import decrypt_key, encrypt_key, mint_key
 from app.core.devices.models.device import Device
-from app.core.devices.schemas import AuthFromApiKey, AuthFromUserpass, DeviceCreate, DeviceRead
+from app.core.devices.schemas import (
+    AuthFromApiKey,
+    AuthFromUserpass,
+    DeviceCreate,
+    DeviceRead,
+    SerialReplace,
+)
+from app.core.devices.services import rma
 from app.db import get_db
 
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -293,6 +300,37 @@ def delete_device(device_id: int, db: Session = Depends(get_db)):
                 "try again."
             ),
         ) from exc
+
+
+@router.post("/{device_id}/replace-serial", response_model=DeviceRead)
+def replace_device_serial(
+    device_id: int, body: SerialReplace, db: Session = Depends(get_db)
+) -> DeviceRead:
+    """RMA replace: re-point this device record to a new hardware serial.
+
+    Use when a firewall is RMA'd / factory-reset and comes back with a new
+    serial. Keeps this record's name, config, and full history; swaps the
+    serial; absorbs any device auto-imported under the new serial; and clears
+    the stored API key (the replacement hardware needs fresh auth — re-run
+    Test Connection afterward). See `services/rma.py`.
+    """
+    device = db.get(Device, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="not found")
+    try:
+        rma.replace_serial(db, device, body.new_serial)
+        db.commit()
+    except rma.SerialReplaceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Serial replace failed — that serial may already be in use.",
+        ) from exc
+    db.refresh(device)
+    return _to_read(device)
 
 
 @router.get("/version-distribution")

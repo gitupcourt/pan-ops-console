@@ -226,6 +226,9 @@ def test_compare_persists_error_when_library_raises(client, db, monkeypatch):
 
     diff = snapshot_svc.compare(db, pre, post)
     assert diff is not None
-    assert diff.report.get("_error") == "boom"
+    # Every area failed → the persisted error includes the per-area reason
+    # (compare() now goes area-by-area, so the message is "<area>: <error>").
+    assert "boom" in diff.report.get("_error", "")
+    assert diff.report.get("_skipped") == ["nics"]
     assert diff.all_passed is False
     assert isinstance(db.get(SnapshotDiff, diff.id), SnapshotDiff)

@@ -164,24 +164,28 @@ def compare(
     sc = SnapshotCompare(left.data, right.data)
     report: dict = {}
     skipped: list[str] = []
+    errors: list[str] = []
     for area in areas_to_compare:
         try:
             report.update(sc.compare_snapshots(reports=[area]))
         except Exception as exc:  # noqa: BLE001
             log.info("Snapshot diff: skipping area '%s' (%s)", area, exc)
             skipped.append(area)
+            errors.append(f"{area}: {exc}")
 
     if not report:
-        # Nothing could be compared — persist the failure so the UI shows it.
+        # Nothing could be compared — persist the failure WITH the per-area
+        # reasons so the UI surfaces it instead of silently missing the diff.
+        detail = "; ".join(errors) if errors else "no comparable areas"
         log.warning(
-            "Snapshot compare produced no comparable areas (left=%s right=%s skipped=%s)",
-            left.id, right.id, skipped,
+            "Snapshot compare produced no comparable areas (left=%s right=%s): %s",
+            left.id, right.id, detail,
         )
         diff = SnapshotDiff(
             left_snapshot_id=left.id,
             right_snapshot_id=right.id,
             task_id=task_id,
-            report={"_error": "No snapshot areas could be compared.", "_skipped": skipped},
+            report={"_error": detail[:1900], "_skipped": skipped},
             all_passed=False,
             failing_areas="(compare error)",
         )

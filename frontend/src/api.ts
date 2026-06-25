@@ -598,12 +598,15 @@ export type AlertRuleCreate = {
   metric: string | null;
   severity: AlertSeverity;
   threshold_pct: number;
+  // Consecutive breaching polls before the alert opens. 1 = instant.
+  sustained_samples?: number;
   enabled?: boolean;
 };
 
 export type AlertRuleUpdate = {
   name?: string;
   threshold_pct?: number;
+  sustained_samples?: number;
   enabled?: boolean;
 };
 
@@ -620,6 +623,7 @@ export type AlertRuleRead = {
   metric: string | null;
   severity: AlertSeverity;
   threshold_pct: number;
+  sustained_samples: number;
   enabled: boolean;
   created_at: string;
   updated_at: string;

@@ -271,6 +271,7 @@ metrics:
     category: system
     description: Dataplane CPU utilization (average across cores)
     status: verified
+    unit: percent
     # Average of per-core values from the 1-minute resource-monitor view.
     # Multi-DP devices have dp1/dp2/etc. — we report dp0 for now;
     # extend the XPath if you need a multi-DP rollup.
@@ -284,6 +285,7 @@ metrics:
     category: system
     description: Management plane CPU utilization (%)
     status: verified
+    unit: percent
     # `show system resources` returns `top` text. We capture the `id` (idle)
     # value and use the extractor's invert flag to report usage = 100 - idle.
     current:
@@ -298,6 +300,7 @@ metrics:
     category: system
     description: Management plane memory utilization (%)
     status: verified
+    unit: percent
     # `MiB Mem : 6959.1 total, 98.0 free, 2903.9 used, 3957.2 buff/cache`.
     # Capturing both `total` and `used` in one regex lets the extractor
     # turn this into a ratio percentage automatically.

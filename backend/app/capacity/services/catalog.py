@@ -182,6 +182,10 @@ class MetricSpec:
     # "verified" | "probable" | "needs_work" — surfaced in the UI so operators
     # know which metrics to trust at a glance. Does not affect polling.
     status: str = "probable"
+    # "percent" → `current` is already a 0-100 utilization figure (CPU, memory),
+    # so the poller treats the ceiling as 100 and derives pct == current. None →
+    # a raw count that needs a `max` source to become a percentage.
+    unit: str | None = None
 
 
 def _build_extractor(raw: dict[str, Any]) -> Extractor:
@@ -229,6 +233,7 @@ def load_catalog(path: str | Path | None = None) -> list[MetricSpec]:
                 pan_os_min=entry.get("pan_os_min"),
                 pan_os_max=entry.get("pan_os_max"),
                 status=entry.get("status", "probable"),
+                unit=entry.get("unit"),
             )
         )
     log.info("Loaded %d metrics from catalog %s", len(metrics), path)

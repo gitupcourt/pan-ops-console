@@ -296,6 +296,7 @@ function RulesCard({
               <th className="text-left px-4 py-2 font-medium">Scope</th>
               <th className="text-left px-4 py-2 font-medium">Severity</th>
               <th className="text-left px-4 py-2 font-medium">Threshold</th>
+              <th className="text-left px-4 py-2 font-medium">Sustained</th>
               <th className="text-left px-4 py-2 font-medium">Enabled</th>
               <th className="text-left px-4 py-2 font-medium w-20"></th>
             </tr>
@@ -316,6 +317,7 @@ function RuleRow({ rule: r }: { rule: AlertRuleRead }) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(r.name);
   const [draftThreshold, setDraftThreshold] = useState(r.threshold_pct);
+  const [draftSustained, setDraftSustained] = useState(r.sustained_samples);
 
   const onSuccess = () =>
     qc.invalidateQueries({ queryKey: ["alert-rules"] });
@@ -336,6 +338,8 @@ function RuleRow({ rule: r }: { rule: AlertRuleRead }) {
     const patch: AlertRuleUpdate = {};
     if (draftName !== r.name) patch.name = draftName;
     if (draftThreshold !== r.threshold_pct) patch.threshold_pct = draftThreshold;
+    if (draftSustained !== r.sustained_samples)
+      patch.sustained_samples = draftSustained;
     if (Object.keys(patch).length > 0) {
       updateMutation.mutate(patch, {
         onSuccess: () => {
@@ -351,6 +355,7 @@ function RuleRow({ rule: r }: { rule: AlertRuleRead }) {
   const cancel = () => {
     setDraftName(r.name);
     setDraftThreshold(r.threshold_pct);
+    setDraftSustained(r.sustained_samples);
     setEditing(false);
   };
 
@@ -402,6 +407,22 @@ function RuleRow({ rule: r }: { rule: AlertRuleRead }) {
           />
         ) : (
           `${r.threshold_pct}%`
+        )}
+      </td>
+      <td className="px-4 py-2 text-xs text-zinc-300 tabular-nums">
+        {editing ? (
+          <Input
+            type="number"
+            min={1}
+            max={20}
+            value={draftSustained}
+            onChange={(e) => setDraftSustained(Number(e.target.value))}
+            className="text-xs w-14"
+          />
+        ) : r.sustained_samples <= 1 ? (
+          <span className="text-zinc-500">instant</span>
+        ) : (
+          `${r.sustained_samples} polls`
         )}
       </td>
       <td className="px-4 py-2 text-xs">
@@ -463,6 +484,7 @@ function AddRuleForm({ onClose }: { onClose: () => void }) {
   const [metric, setMetric] = useState("");
   const [severity, setSeverity] = useState<AlertSeverity>("warning");
   const [threshold, setThreshold] = useState(80);
+  const [sustained, setSustained] = useState(1);
   const [error, setError] = useState<string | null>(null);
 
   const createMutation = useMutation({
@@ -489,6 +511,7 @@ function AddRuleForm({ onClose }: { onClose: () => void }) {
       metric: metric.trim() === "" ? null : metric.trim(),
       severity,
       threshold_pct: threshold,
+      sustained_samples: sustained,
       enabled: true,
     });
   };
@@ -533,6 +556,17 @@ function AddRuleForm({ onClose }: { onClose: () => void }) {
             max={100}
             value={threshold}
             onChange={(e) => setThreshold(Number(e.target.value))}
+            className="text-xs w-20"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+          Sustained polls <span className="text-zinc-600">(1 = instant)</span>
+          <Input
+            type="number"
+            min={1}
+            max={20}
+            value={sustained}
+            onChange={(e) => setSustained(Number(e.target.value))}
             className="text-xs w-20"
           />
         </label>

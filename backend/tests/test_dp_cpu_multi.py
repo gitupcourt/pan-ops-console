@@ -51,8 +51,8 @@ def test_catalog_dp_metrics_are_wired():
     cat = {m.name: m for m in load_catalog(_REAL_CATALOG)}
     dp, dp_max = cat["dp_cpu"], cat["dp_cpu_max"]
     # both wildcard the DP element so multi-DP boxes are covered
-    assert "data-processors/*" in dp.current.sources[0].xpath
-    assert "data-processors/*" in dp_max.current.sources[0].xpath
+    assert "data-processors/*" in dp.current.sources[0].extract.xpath
+    assert "data-processors/*" in dp_max.current.sources[0].extract.xpath
     assert dp.current.sources[0].extract.type == "xpath_avg"
     assert dp_max.current.sources[0].extract.type == "xpath_max"
     # both are percentages (no max source -> poller treats ceiling as 100)

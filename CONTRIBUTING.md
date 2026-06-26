@@ -5,39 +5,41 @@ This is a small project, so the bar is low: open an issue or a PR. The codebase 
 ## Local dev
 
 ```bash
-git clone https://github.com/gitupcourt/pan-capacity-analyzer.git
-cd pan-capacity-analyzer
-cp .env.example .env
+git clone https://github.com/gitupcourt/pan-ops-console.git
+cd pan-ops-console/deploy/compose
+cp .env.example .env          # set POSTGRES_PASSWORD
 python -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())" >> .env
 docker compose up --build
 ```
 
-For a tight inner loop (HMR on the frontend, `uvicorn --reload` on the backend), see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — section "3. From source".
+This stack runs Postgres, Redis, the API, a combined Celery worker, and the SPA — the API alone does nothing, since polling/alerts/upgrades run on Celery. For a tight inner loop (HMR on the frontend, `uvicorn --reload` on the backend), see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Adding a metric
 
 Most of the time you don't need to touch code — just edit [`catalog/metrics.yaml`](catalog/metrics.yaml). Each entry is a `(current, max)` pair of fetchers; supported extractor types are documented at the top of the file.
 
-If your metric needs a value transformation that isn't supported (e.g. you need to divide one xpath match by another), extend the `Extractor` class in `backend/app/services/catalog.py`. Keep new extractor types opt-in via a `type:` discriminator so existing entries don't break.
+If your metric needs a value transformation that isn't supported (e.g. you need to divide one xpath match by another), extend the `Extractor` class in `backend/app/capacity/services/catalog.py`. Keep new extractor types opt-in via a `type:` discriminator so existing entries don't break.
 
 ## Verifying a metric against a real firewall
 
-The poller's commands can be hand-tested via the backend container:
+The poller's commands can be hand-tested via the backend container. This uses the same proxy-first / direct-fallback client the poller does, so it works whether the device is reached through Panorama or directly:
 
 ```bash
 docker compose exec backend python -c "
+# register all mappers so a bare Device query doesn't trip the relationship resolver
+import app.core.panorama.models.panorama, app.core.devices.models.device  # noqa
+from sqlalchemy.orm import configure_mappers; configure_mappers()
 from app.db import SessionLocal
-from app.models import Device
-from app.services.auth import decrypt_key
-from app.services.pan_client import PanDeviceClient
+from app.core.command_proxy.builder import build_client_with_fallback
+from app.core.devices.models.device import Device
 from xml.etree import ElementTree as ET
 
-db = SessionLocal()
-d = db.query(Device).first()
-key = decrypt_key(d.encrypted_api_key)
-client = PanDeviceClient.direct(d.ip_address or d.hostname, key, verify_tls=d.verify_tls)
-r = client.op_xml('<show><system><info></info></system></show>')
-print(ET.tostring(r, encoding='unicode')[:800])
+with SessionLocal() as db:
+    d = db.query(Device).first()
+    client, route = build_client_with_fallback(db, d)
+    r = client.op_xml('<show><system><info></info></system></show>')
+    print('route:', route)
+    print(ET.tostring(r, encoding='unicode')[:800])
 "
 ```
 

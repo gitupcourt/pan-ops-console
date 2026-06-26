@@ -44,7 +44,8 @@ class Extractor:
       xpath_count   — count of XPath matches
       xpath_text    — float of the first XPath match's text
       xpath_avg     — average of numeric text across ALL XPath matches
-                      (used for per-DP-core CPU averaging)
+      xpath_max     — maximum of numeric text across ALL XPath matches
+                      (xpath_avg/xpath_max roll up per-DP-core CPU values)
       state_value   — value of a key from `show system state` output
                       (handles both decimal and hex)
       text_regex    — regex against the <result> text content; named group
@@ -101,6 +102,20 @@ class Extractor:
             if not vals:
                 return None
             return sum(vals) / len(vals)
+
+        if self.type == "xpath_max":
+            if not self.xpath:
+                return None
+            vals_max: list[float] = []
+            for el in root.findall(self.xpath):
+                if el.text and el.text.strip():
+                    try:
+                        vals_max.append(float(el.text.strip()))
+                    except ValueError:
+                        pass
+            if not vals_max:
+                return None
+            return max(vals_max)
 
         if self.type == "state_value":
             if not self.key:

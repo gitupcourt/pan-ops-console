@@ -1,0 +1,57 @@
+# Example Traefik ingress (k3s ships Traefik). One host serves the SPA; /api/* is
+# routed to the backend after stripping the prefix. For nginx-ingress or Gateway
+# API, write the equivalent (route /api -> backend with the prefix stripped).
+#
+# Before applying:
+#   - Replace pan-ops-console.example.com with your hostname (3 places).
+#   - Provide a TLS secret named pan-ops-console-tls (cert-manager, or
+#     `kubectl create secret tls pan-ops-console-tls --cert=... --key=...`).
+#   - The middleware annotation below assumes you apply into the "default"
+#     namespace. If you use another namespace, change the "default-" prefix to
+#     match (Traefik refs middlewares as <namespace>-<name>@kubernetescrd).
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: pan-ops-console-strip-api
+  labels: { app: pan-ops-console }
+spec:
+  stripPrefix:
+    prefixes: ["/api"]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pan-ops-console-api
+  labels: { app: pan-ops-console }
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: default-pan-ops-console-strip-api@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [pan-ops-console.example.com]
+      secretName: pan-ops-console-tls
+  rules:
+    - host: pan-ops-console.example.com
+      http:
+        paths:
+          - { path: /api, pathType: Prefix, backend: { service: { name: pan-ops-console-backend, port: { number: 8000 } } } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pan-ops-console-web
+  labels: { app: pan-ops-console }
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts: [pan-ops-console.example.com]
+      secretName: pan-ops-console-tls
+  rules:
+    - host: pan-ops-console.example.com
+      http:
+        paths:
+          - { path: /, pathType: Prefix, backend: { service: { name: pan-ops-console-frontend, port: { number: 80 } } } }

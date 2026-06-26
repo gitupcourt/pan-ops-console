@@ -1,0 +1,19 @@
+# The metric catalog drives what the poller fetches. The content here is a
+# PLACEHOLDER — generate the real one from the repo's catalog/metrics.yaml:
+#
+#   kubectl create configmap pan-ops-console-catalog \
+#     --from-file=metrics.yaml=catalog/metrics.yaml \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+# Re-run that whenever catalog/metrics.yaml changes, then restart the backend,
+# worker, and beat so they reload it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pan-ops-console-catalog
+  labels: { app: pan-ops-console }
+data:
+  metrics.yaml: |
+    # Placeholder — replace via the kubectl create configmap command above.
+    version: 1
+    metrics: []

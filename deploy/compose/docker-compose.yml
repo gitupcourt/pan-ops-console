@@ -1,0 +1,90 @@
+# Kick-the-tires deployment of pan-ops-console on a single machine.
+#
+# PostgreSQL + Redis + the app (API + a combined Celery worker/beat) + the SPA.
+# This is for evaluation on a PC or single server — NOT hardened for production.
+# For the production Kubernetes path and the differences, see docs/DEPLOYMENT.md.
+#
+# Quick start (from this directory):
+#   1. cp .env.example .env       # then set POSTGRES_PASSWORD + FERNET_KEY
+#   2. docker compose up --build
+#   3. open http://localhost:8080 and create the first admin when prompted
+
+name: pan-ops-console
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://panops:${POSTGRES_PASSWORD}@postgres:5432/panops
+  REDIS_URL: redis://redis:6379/0
+  FERNET_KEY: ${FERNET_KEY:?set FERNET_KEY in .env — see .env.example}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: panops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: panops
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panops -d panops"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # FastAPI API. Runs `alembic upgrade head` on startup (lifespan), so it owns
+  # schema creation/migration. Default image CMD is uvicorn on :8000.
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    environment:
+      <<: *app-env
+      SESSION_COOKIE_SECURE: "false"   # plain HTTP on localhost; set true behind TLS
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  # ONE worker runs every queue plus an embedded beat scheduler:
+  #   -Q celery,upgrade  -> capacity polling + Panorama sync (celery) AND upgrades (upgrade)
+  #   --beat             -> the dispatch + sync schedule ticks
+  # Production splits this into separate `worker` (-Q celery), `upgrade-worker`
+  # (-Q upgrade), and `beat` deployments — see docs/DEPLOYMENT.md. Do NOT scale
+  # this service past 1 replica (two embedded beats = double-scheduled polls).
+  worker:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    command: >
+      celery -A app.workers.celery_app:celery worker
+      --beat --schedule=/tmp/celerybeat-schedule
+      -Q celery,upgrade --loglevel=info
+    environment:
+      <<: *app-env
+    depends_on:
+      backend: { condition: service_started }
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  # SPA. The mounted web.conf serves the static app AND proxies /api -> backend.
+  # In Kubernetes the Ingress does the /api routing instead (web.conf is unused there).
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./web.conf:/etc/nginx/conf.d/app.conf:ro
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, NavLink, useSearchParams } from "react-router-dom";
 
 import { HeatmapCell } from "../api";
+import { relTime } from "../lib/relTime";
 
 /**
  * One (model, metric) tile on the capacity heat-map.
@@ -90,6 +91,12 @@ function HoverPopover({ cell }: { cell: HeatmapCell }) {
         </div>
         <div className="text-zinc-300">
           <span className="text-zinc-500">Devices:</span> {cell.device_count}
+          {cell.stale_count > 0 && (
+            <span className="text-amber-500/80">
+              {" "}
+              ({cell.stale_count} stale, not counted in color)
+            </span>
+          )}
         </div>
       </div>
 
@@ -105,26 +112,48 @@ function HoverPopover({ cell }: { cell: HeatmapCell }) {
           // this device specifically." The trend route is a phase-11
           // placeholder for now but the navigation is correct, so when
           // phase 11 lands the link starts working without UI changes.
+          // Stale devices (stopped reporting) are dimmed and show "last seen
+          // …" in place of the usage bar — the % they'd draw is a frozen,
+          // last-known value we don't want masquerading as live. Still a
+          // link: the trend chart shows exactly where the data went quiet.
           <NavLink
             key={d.device_id}
             to={`/capacity/trend/${d.device_id}/${encodeURIComponent(cell.metric)}`}
             className="flex items-center gap-2 px-1 -mx-1 rounded hover:bg-zinc-800/60"
           >
-            <div className="text-blue-400 w-24 truncate text-[11px]">
+            <div
+              className={`w-24 truncate text-[11px] ${
+                d.stale ? "text-zinc-500" : "text-blue-400"
+              }`}
+            >
               {d.device_name}
             </div>
-            <div className="text-zinc-300 tabular-nums text-[11px] w-12 text-right">
+            <div
+              className={`tabular-nums text-[11px] w-12 text-right ${
+                d.stale ? "text-zinc-600" : "text-zinc-300"
+              }`}
+            >
               {fmtCount(d.current)}
             </div>
-            <div className="text-zinc-400 tabular-nums text-[11px] w-12 text-right">
+            <div
+              className={`tabular-nums text-[11px] w-12 text-right ${
+                d.stale ? "text-zinc-600" : "text-zinc-400"
+              }`}
+            >
               {formatPct(d.pct)}
             </div>
-            <div className="flex-1 h-1 bg-zinc-800 rounded overflow-hidden">
-              <div
-                className="h-full rounded bg-rose-500"
-                style={{ width: `${Math.min(100, Math.max(0, d.pct ?? 0))}%` }}
-              />
-            </div>
+            {d.stale ? (
+              <div className="flex-1 text-[10px] text-zinc-500 italic text-right truncate">
+                last seen {relTime(d.last_sample_at)}
+              </div>
+            ) : (
+              <div className="flex-1 h-1 bg-zinc-800 rounded overflow-hidden">
+                <div
+                  className="h-full rounded bg-rose-500"
+                  style={{ width: `${Math.min(100, Math.max(0, d.pct ?? 0))}%` }}
+                />
+              </div>
+            )}
           </NavLink>
         ))}
       </div>

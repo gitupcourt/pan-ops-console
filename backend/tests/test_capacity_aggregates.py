@@ -276,6 +276,78 @@ def test_table_pct_range_filter(client, db):
     assert rows[0]["device_name"] == "A"
 
 
+# ---------- staleness (stopped-reporting devices) ----------
+
+
+def test_heatmap_excludes_stale_device_from_color(client, db):
+    """A device that stopped reporting keeps its last sample, but it must
+    NOT drive the tile color — else a dead box glows. The fresh device sets
+    max_pct; the stale one is still counted + flagged, just excluded from
+    the max and sunk to the bottom of the hover list."""
+    _signup(client)
+    fresh = _seed_device(db, name="fresh", model="PA-220")
+    stale = _seed_device(db, name="stale", model="PA-220")
+    now = datetime.now(timezone.utc)
+    _seed_sample(db, device_id=fresh.id, metric="address_objects",
+                 ts=now, current=950.0)                         # 95%, live
+    _seed_sample(db, device_id=stale.id, metric="address_objects",
+                 ts=now - timedelta(days=60), current=990.0)    # 99%, frozen
+
+    cell = client.get("/capacity/heatmap").json()[0]
+    assert cell["device_count"] == 2
+    assert cell["stale_count"] == 1
+    # Color comes from the FRESH 95%, not the higher stale 99%.
+    assert cell["max_pct"] == 95.0
+    top = {d["device_name"]: d for d in cell["top_devices"]}
+    assert top["stale"]["stale"] is True
+    assert top["fresh"]["stale"] is False
+    # Fresh sorts above the higher-pct stale device.
+    assert cell["top_devices"][0]["device_name"] == "fresh"
+
+
+def test_heatmap_all_stale_yields_no_color(client, db):
+    """If every device in a bucket is stale, the tile has no live value —
+    max_pct is None (renders as no-data, not a frozen hot color)."""
+    _signup(client)
+    d = _seed_device(db, name="A", model="PA-220")
+    _seed_sample(db, device_id=d.id, metric="address_objects",
+                 ts=datetime.now(timezone.utc) - timedelta(days=60),
+                 current=990.0)
+    cell = client.get("/capacity/heatmap").json()[0]
+    assert cell["stale_count"] == 1
+    assert cell["max_pct"] is None
+
+
+def test_table_flags_stale_rows(client, db):
+    """The table marks a stopped device's row stale so the UI can mute it
+    and show 'last seen …' instead of trusting the frozen %."""
+    _signup(client)
+    fresh = _seed_device(db, name="fresh", model="PA-220")
+    stale = _seed_device(db, name="stale", model="PA-220")
+    now = datetime.now(timezone.utc)
+    _seed_sample(db, device_id=fresh.id, metric="address_objects",
+                 ts=now, current=100.0)
+    _seed_sample(db, device_id=stale.id, metric="address_objects",
+                 ts=now - timedelta(days=60), current=100.0)
+
+    rows = {r["device_name"]: r
+            for r in client.get("/capacity/table").json()["rows"]}
+    assert rows["fresh"]["stale"] is False
+    assert rows["stale"]["stale"] is True
+
+
+def test_fresh_sample_is_never_stale(client, db):
+    """Sanity guard against an inverted comparison or tz bug flagging live
+    data: a just-written sample colors the tile and is not stale."""
+    _signup(client)
+    d = _seed_device(db, name="A", model="PA-220")
+    _seed_sample(db, device_id=d.id, metric="address_objects",
+                 ts=datetime.now(timezone.utc), current=500.0)
+    cell = client.get("/capacity/heatmap").json()[0]
+    assert cell["stale_count"] == 0
+    assert cell["max_pct"] == 50.0
+
+
 # ---------- /capacity/trend/{device_id}/{metric} ----------
 
 

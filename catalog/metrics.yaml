@@ -8,6 +8,7 @@
 #   xpath_count   — count of XPath matches
 #   xpath_text    — float of the first XPath match's text
 #   xpath_avg     — average of numeric text across ALL XPath matches
+#   xpath_max     — maximum of numeric text across ALL XPath matches
 #   state_value   — value of a key from `show system state` output
 #                   (handles mixed decimal `10000` and hex `0x3e8`)
 #   text_regex    — regex against <result> text; named group `value` is the number
@@ -269,17 +270,35 @@ metrics:
 
   - name: dp_cpu
     category: system
-    description: Dataplane CPU utilization (average across cores)
+    description: Data plane CPU utilization (average across all DP cores)
     status: verified
     unit: percent
-    # Average of per-core values from the 1-minute resource-monitor view.
-    # Multi-DP devices have dp1/dp2/etc. — we report dp0 for now;
-    # extend the XPath if you need a multi-DP rollup.
+    # Average per-core load across EVERY data processor (dp0, dp1, ...) from the
+    # 1-minute resource-monitor view — matches panos-upgrade-assurance's
+    # get_dp_cpu_utilization (mean of all cores). The `*` wildcards the DP, so
+    # single-DP and multi-DP boxes both work. NOTE: validated on single-DP
+    # boxes; a chassis (e.g. PA-7000) may nest DPs per slot — confirm the XML
+    # path against a real chassis before trusting it there.
     current:
       cmd: "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
       extract:
         type: xpath_avg
-        xpath: ".//data-processors/dp0/minute/cpu-load-average/entry/value"
+        xpath: ".//data-processors/*/minute/cpu-load-average/entry/value"
+
+  - name: dp_cpu_max
+    category: system
+    description: Data plane CPU utilization (hottest core across all DPs)
+    status: verified
+    unit: percent
+    # The single busiest DP core — catches one pegged data processor that the
+    # average would hide (matters on multi-DP / chassis boxes). Shares the
+    # resource-monitor command with dp_cpu, so the response is fetched once and
+    # cached; this metric adds no extra round-trip.
+    current:
+      cmd: "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
+      extract:
+        type: xpath_max
+        xpath: ".//data-processors/*/minute/cpu-load-average/entry/value"
 
   - name: mp_cpu
     category: system

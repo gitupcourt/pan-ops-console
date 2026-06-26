@@ -1,8 +1,16 @@
 # Kubernetes deployment
 
-Example manifests for running pan-capacity-analyzer on any Kubernetes cluster. They use the **prod images** built by CI and published to GHCR (`ghcr.io/gitupcourt/pan-capacity-analyzer-{backend,frontend}`), so you don't need to build locally.
+> ⚠️ **These example manifests are out of date and being refreshed.** They
+> describe the retired single-container + SQLite + in-process-poller model. The
+> current app requires **PostgreSQL + Redis + Celery workers + a beat
+> scheduler** — none of which are in these files, so applying them as-is would
+> deploy a non-functional app (the API starts, but nothing polls, alerts, or
+> upgrades). See **[`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md)** for the
+> current architecture and component list, and
+> **[`deploy/compose/`](../compose/)** for a working reference stack. The
+> Sealed Secrets section below is still accurate and reusable.
 
-Read top-to-bottom. Manifests are numbered for `kubectl apply -f .` ordering.
+Manifests are numbered for `kubectl apply -f .` ordering.
 
 ## Before you start
 

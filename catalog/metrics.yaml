@@ -286,15 +286,19 @@ metrics:
     description: Management plane CPU utilization (%)
     status: verified
     unit: percent
-    # `show system resources` returns `top` text. We capture the `id` (idle)
-    # value and use the extractor's invert flag to report usage = 100 - idle.
+    # The mgmt-plane CPU the firewall dashboard shows. NOTE: `show system
+    # resources` (top -bn1) is unreliable for CPU — its first %Cpu(s) sample is
+    # the average-since-boot, not the current load (it read ~83% on a box the
+    # firewall reported at ~4%). Read the monitoring subsystem instead:
+    # sys.monitor.<slot>.mp.exports carries { 'cpu': { '1minavg': N } } — the
+    # same source panos-upgrade-assurance + the PAN-OS dashboard use. The slot
+    # is s0 or s1 depending on platform, so wildcard it.
     current:
-      cmd: "<show><system><resources></resources></system></show>"
+      cmd: "<show><system><state><filter>sys.monitor.*.mp.exports</filter></state></system></show>"
       extract:
         type: text_regex
-        # Matches: "%Cpu(s): 47.4 us, 15.8 sy, 0.0 ni, 34.2 id, ..."
-        pattern: '%Cpu\(s\):\s+\S+\s+us,\s+\S+\s+sy,\s+\S+\s+ni,\s+(?P<value>\d+(?:\.\d+)?)\s+id'
-        invert: true
+        # CDATA: "sys.monitor.s1.mp.exports: { 'cpu': { '1minavg': 7, }, ... }"
+        pattern: "'cpu':\\s*\\{[^}]*'1minavg':\\s*(?P<value>\\d+(?:\\.\\d+)?)"
 
   - name: mp_memory
     category: system

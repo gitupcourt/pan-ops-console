@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pan-ops-console-frontend
+  labels: { app: pan-ops-console, tier: frontend }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: pan-ops-console, tier: frontend } }
+  template:
+    metadata: { labels: { app: pan-ops-console, tier: frontend } }
+    spec:
+      automountServiceAccountToken: false
+      # nginx-unprivileged: serves the static SPA on :8080 as uid 101.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: frontend
+          image: ghcr.io/gitupcourt/pan-ops-console-frontend:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          ports: [{ containerPort: 8080 }]
+          volumeMounts:
+            - { name: nginx-cache, mountPath: /var/cache/nginx }
+            - { name: nginx-run,   mountPath: /var/run }
+            - { name: tmp,         mountPath: /tmp }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits:   { cpu: 200m, memory: 128Mi }
+      volumes:
+        - { name: nginx-cache, emptyDir: { sizeLimit: 64Mi } }
+        - { name: nginx-run,   emptyDir: { sizeLimit: 8Mi } }
+        - { name: tmp,         emptyDir: { medium: Memory, sizeLimit: 32Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: pan-ops-console-frontend, labels: { app: pan-ops-console, tier: frontend } }
+spec:
+  selector: { app: pan-ops-console, tier: frontend }
+  ports: [{ port: 80, targetPort: 8080 }]

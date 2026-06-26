@@ -1,0 +1,160 @@
+# The three Celery roles, each its own Deployment:
+#   worker          -- capacity polling + Panorama sync ("celery" queue)
+#   upgrade-worker  -- HA upgrade orchestration ("upgrade" queue), isolated so a
+#                      long upgrade cannot starve metric polling
+#   beat            -- the single schedule ticker (run EXACTLY one replica)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pan-ops-console-worker
+  labels: { app: pan-ops-console, tier: worker }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pan-ops-console, tier: worker } }
+  template:
+    metadata: { labels: { app: pan-ops-console, tier: worker } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/gitupcourt/pan-ops-console-backend:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          command: ["celery"]
+          args: ["-A","app.workers.celery_app:celery","worker","-Q","celery","--loglevel=info","--concurrency","4","-n","capacity@%h"]
+          env:
+            - { name: POSTGRES_HOST, value: postgres }
+            - { name: POSTGRES_PORT, value: "5432" }
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_USER } } }
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_DB } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: DATABASE_URL, value: "postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)" }
+            - { name: REDIS_HOST, value: redis }
+            - { name: REDIS_PORT, value: "6379" }
+            - { name: REDIS_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: REDIS_PASSWORD } } }
+            - { name: REDIS_URL, value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0" }
+            - { name: FERNET_KEY, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: FERNET_KEY } } }
+            - { name: CATALOG_PATH, value: "/app/catalog/metrics.yaml" }
+          volumeMounts:
+            - { name: catalog, mountPath: /app/catalog }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: "2", memory: 768Mi }
+      volumes:
+        - name: catalog
+          configMap: { name: pan-ops-console-catalog }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 128Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pan-ops-console-upgrade-worker
+  labels: { app: pan-ops-console, tier: upgrade-worker }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pan-ops-console, tier: upgrade-worker } }
+  template:
+    metadata: { labels: { app: pan-ops-console, tier: upgrade-worker } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: upgrade-worker
+          image: ghcr.io/gitupcourt/pan-ops-console-backend:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          command: ["celery"]
+          args: ["-A","app.workers.celery_app:celery","worker","-Q","upgrade","--loglevel=info","--concurrency","2","-n","upgrade@%h"]
+          env:
+            - { name: POSTGRES_HOST, value: postgres }
+            - { name: POSTGRES_PORT, value: "5432" }
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_USER } } }
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_DB } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: DATABASE_URL, value: "postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)" }
+            - { name: REDIS_HOST, value: redis }
+            - { name: REDIS_PORT, value: "6379" }
+            - { name: REDIS_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: REDIS_PASSWORD } } }
+            - { name: REDIS_URL, value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0" }
+            - { name: FERNET_KEY, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: FERNET_KEY } } }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: "2", memory: 1Gi }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 512Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pan-ops-console-beat
+  labels: { app: pan-ops-console, tier: beat }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pan-ops-console, tier: beat } }
+  template:
+    metadata: { labels: { app: pan-ops-console, tier: beat } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: beat
+          image: ghcr.io/gitupcourt/pan-ops-console-backend:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          command: ["celery"]
+          args: ["-A","app.workers.celery_app:celery","beat","--loglevel=info","-s","/tmp/celerybeat-schedule"]
+          env:
+            - { name: POSTGRES_HOST, value: postgres }
+            - { name: POSTGRES_PORT, value: "5432" }
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_USER } } }
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_DB } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: DATABASE_URL, value: "postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)" }
+            - { name: REDIS_HOST, value: redis }
+            - { name: REDIS_PORT, value: "6379" }
+            - { name: REDIS_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: REDIS_PASSWORD } } }
+            - { name: REDIS_URL, value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0" }
+            - { name: FERNET_KEY, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: FERNET_KEY } } }
+            - { name: CATALOG_PATH, value: "/app/catalog/metrics.yaml" }
+          volumeMounts:
+            - { name: catalog, mountPath: /app/catalog }
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 128Mi }
+      volumes:
+        - name: catalog
+          configMap: { name: pan-ops-console-catalog }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }

@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.capacity.models.sample import Sample
 from app.capacity.services.catalog import MetricSpec, load_catalog
+from app.capacity.services.polling_config import get_polling_config
 from app.core.devices.models.device import Device
 from app.db import get_db
 
@@ -55,14 +56,23 @@ class HeatmapDeviceTop(BaseModel):
     current: float
     max: float | None
     pct: float | None
+    # True when this device's newest sample for the metric is older than its
+    # poll cadence allows — i.e. the device has stopped reporting and this is a
+    # frozen last-known value. Stale devices are excluded from the tile's color
+    # (see `max_pct`) and rendered muted in the hover popover.
+    stale: bool = False
+    last_sample_at: datetime | None = None
 
 
 class HeatmapCell(BaseModel):
     """One (model, metric) tile on the heat-map grid.
 
-    `max_pct` is the highest % across all devices of this model for this
-    metric — the value that drives the tile's color. `device_count` is
-    the cardinality for the operator's hover popover ("Devices: 22").
+    `max_pct` is the highest % across all **fresh** (non-stale) devices of this
+    model for this metric — the value that drives the tile's color. A device
+    that has stopped reporting can't make a tile glow; if every device in the
+    bucket is stale, `max_pct` is None and the tile renders as no-data.
+    `device_count` is the cardinality for the operator's hover popover
+    ("Devices: 22"), `stale_count` how many of those are frozen, and
     `top_devices` is the leaderboard surfaced in that popover.
     """
 
@@ -72,6 +82,7 @@ class HeatmapCell(BaseModel):
     metric_description: str
     max_pct: float | None
     device_count: int
+    stale_count: int = 0
     top_devices: list[HeatmapDeviceTop]
 
 
@@ -102,6 +113,10 @@ class TableRow(BaseModel):
     # at a time on demand for the chart view.
     predicted_date: datetime | None
     last_sample_at: datetime
+    # True when `last_sample_at` is older than the metric's poll cadence allows
+    # — the device has gone quiet and `current`/`pct` are a frozen last-known
+    # value. The UI mutes the row and shows "last seen …" instead of trusting %.
+    stale: bool = False
 
 
 class TableResponse(BaseModel):
@@ -166,6 +181,46 @@ def _latest_samples_query(db: Session):
 def _catalog_lookup() -> dict[str, MetricSpec]:
     """Catalog keyed by metric name for fast description/category lookup."""
     return {m.name: m for m in load_catalog()}
+
+
+# A device that stops reporting keeps its last sample in the DB, so the
+# "latest sample per device" views would show a frozen value as if it were
+# live (e.g. an RMA'd box stuck at 85% from weeks ago). Treat a metric as STALE
+# once its newest sample is older than this many poll intervals — long enough
+# that normal dispatch jitter never trips it, short enough that a genuinely dark
+# device is flagged within a few cycles. The threshold is cadence-aware: a fast
+# system metric goes stale in minutes, a slow config count in days.
+_STALE_AFTER_MISSED_POLLS = 3
+
+# Mirror of app.capacity.tasks._CONFIG_CATEGORIES (the slow/config cadence).
+# Kept inline so this read path doesn't import the Celery task package.
+_CONFIG_CATEGORIES = frozenset({"config"})
+
+
+def _staleness_checker(db: Session):
+    """Build a `(ts, metric_name) -> bool` staleness predicate.
+
+    Compares a sample's age against its metric class's poll interval × factor,
+    reading the same PollingConfig the dispatcher honors so the threshold tracks
+    operator-tuned cadences automatically. A missing ts counts as stale.
+    """
+    cfg = get_polling_config(db)
+    catalog = _catalog_lookup()
+    now = datetime.now(timezone.utc)
+
+    def is_stale(ts: datetime | None, metric_name: str) -> bool:
+        if ts is None:
+            return True
+        spec = catalog.get(metric_name)
+        is_config = spec is not None and spec.category in _CONFIG_CATEGORIES
+        interval = (
+            cfg.config_interval_seconds if is_config else cfg.system_interval_seconds
+        )
+        # Samples are stored naive-UTC on SQLite, aware on Postgres — normalize.
+        ts_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return (now - ts_utc).total_seconds() > interval * _STALE_AFTER_MISSED_POLLS
+
+    return is_stale
 
 
 def _predict_max_date(
@@ -270,6 +325,7 @@ def get_heatmap(
             latest.c.current_value,
             latest.c.max_value,
             latest.c.pct,
+            latest.c.ts,
         )
         .join(Device, Device.id == latest.c.device_id)
     )
@@ -283,10 +339,11 @@ def get_heatmap(
         return []
 
     # Step 2: group in Python by (model, metric). For each group:
-    #   - max_pct = max of all pct (None-safe)
-    #   - device_count = unique device count
-    #   - top_devices = top N by pct desc
+    #   - max_pct = max pct across FRESH devices only (stale can't color a tile)
+    #   - device_count = unique device count; stale_count = how many are frozen
+    #   - top_devices = fresh-first by pct desc, stale sink to the bottom
     catalog = _catalog_lookup()
+    is_stale = _staleness_checker(db)
     groups: dict[tuple[str, str], list] = {}
     for r in rows:
         if r.model is None:
@@ -295,11 +352,16 @@ def get_heatmap(
 
     out: list[HeatmapCell] = []
     for (model, metric), items in sorted(groups.items()):
-        pcts = [it.pct for it in items if it.pct is not None]
-        max_pct = max(pcts) if pcts else None
-        items_sorted = sorted(
-            items,
-            key=lambda x: (x.pct is None, -(x.pct or 0.0)),
+        # Mark each device once, then derive everything from the marked list.
+        marked = [(it, is_stale(it.ts, metric)) for it in items]
+        fresh_pcts = [
+            it.pct for it, stale in marked if it.pct is not None and not stale
+        ]
+        max_pct = max(fresh_pcts) if fresh_pcts else None
+        stale_count = sum(1 for _, stale in marked if stale)
+        marked_sorted = sorted(
+            marked,
+            key=lambda p: (p[1], p[0].pct is None, -(p[0].pct or 0.0)),
         )
         top = [
             HeatmapDeviceTop(
@@ -308,8 +370,10 @@ def get_heatmap(
                 current=it.current_value,
                 max=it.max_value,
                 pct=it.pct,
+                stale=stale,
+                last_sample_at=it.ts,
             )
-            for it in items_sorted[:top_n]
+            for it, stale in marked_sorted[:top_n]
         ]
         spec = catalog.get(metric)
         out.append(
@@ -320,6 +384,7 @@ def get_heatmap(
                 metric_description=spec.description if spec else metric,
                 max_pct=max_pct,
                 device_count=len(items),
+                stale_count=stale_count,
                 top_devices=top,
             )
         )
@@ -394,6 +459,7 @@ def get_table(
     q = q.limit(limit).offset(offset)
     rows = db.execute(q).all()
     catalog = _catalog_lookup()
+    is_stale = _staleness_checker(db)
 
     out_rows: list[TableRow] = []
     for r in rows:
@@ -416,6 +482,7 @@ def get_table(
                 pct=r.pct,
                 predicted_date=None,  # see schema comment
                 last_sample_at=r.ts,
+                stale=is_stale(r.ts, r.metric),
             )
         )
     return TableResponse(rows=out_rows, total=total)

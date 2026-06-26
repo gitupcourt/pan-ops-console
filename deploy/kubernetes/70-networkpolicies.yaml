@@ -1,0 +1,75 @@
+# Defense-in-depth: default-deny ingress to every app pod, then explicit allows
+# per tier. Optional but recommended.
+#
+# The Traefik selector assumes k3s (Traefik runs in kube-system with the label
+# app.kubernetes.io/name=traefik). Adjust the namespaceSelector / podSelector to
+# match your ingress controller.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pan-ops-console-default-deny-ingress
+  labels: { app: pan-ops-console }
+spec:
+  podSelector: { matchLabels: { app: pan-ops-console } }
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-to-pan-ops-console-frontend
+  labels: { app: pan-ops-console }
+spec:
+  podSelector: { matchLabels: { app: pan-ops-console, tier: frontend } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: traefik } }
+      ports: [{ protocol: TCP, port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-to-pan-ops-console-backend
+  labels: { app: pan-ops-console }
+spec:
+  podSelector: { matchLabels: { app: pan-ops-console, tier: backend } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { app.kubernetes.io/name: traefik } }
+      ports: [{ protocol: TCP, port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pan-ops-console-app-to-postgres
+  labels: { app: pan-ops-console }
+spec:
+  podSelector: { matchLabels: { app: pan-ops-console, tier: postgres } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pan-ops-console }
+            matchExpressions:
+              - { key: tier, operator: In, values: [backend, worker, upgrade-worker, beat] }
+      ports: [{ protocol: TCP, port: 5432 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pan-ops-console-app-to-redis
+  labels: { app: pan-ops-console }
+spec:
+  podSelector: { matchLabels: { app: pan-ops-console, tier: redis } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pan-ops-console }
+            matchExpressions:
+              - { key: tier, operator: In, values: [backend, worker, upgrade-worker, beat] }
+      ports: [{ protocol: TCP, port: 6379 }]

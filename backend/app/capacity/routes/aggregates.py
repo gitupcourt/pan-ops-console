@@ -281,6 +281,15 @@ def _predict_max_date(
             method="linear_regression",
         )
     days_left = (max_value - current) / slope
+    # A tiny positive slope (a near-flat but technically-growing metric) projects
+    # absurdly far out — past timedelta's ~2.7M-day ceiling (which raises
+    # OverflowError and 500s the trend endpoint) and past any actionable horizon.
+    # Treat "beyond ~100 years" as no useful projection.
+    if days_left > 36500:
+        return TrendPrediction(
+            predicted_date=None, days_left=None,
+            slope_per_day=slope, method="linear_regression",
+        )
     predicted = samples[-1][0] + timedelta(days=days_left)
     return TrendPrediction(
         predicted_date=predicted,

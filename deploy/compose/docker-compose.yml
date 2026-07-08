@@ -48,6 +48,13 @@ services:
     environment:
       <<: *app-env
       SESSION_COOKIE_SECURE: "false"   # plain HTTP on localhost; set true behind TLS
+    volumes:
+      # The metric catalog lives at repo root — outside the backend/ build
+      # context, so it is NOT baked into the image. Mount it read-only at
+      # CATALOG_PATH; mirrors how the k8s ConfigMap provides it in prod.
+      # Without this, load_catalog() 404s: the worker crashes on every
+      # dispatch and the capacity heat-map/table 500.
+      - ../../catalog:/app/catalog:ro
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -68,6 +75,9 @@ services:
       -Q celery,upgrade --loglevel=info
     environment:
       <<: *app-env
+    volumes:
+      # Same as backend — the worker loads the catalog on every poll dispatch.
+      - ../../catalog:/app/catalog:ro
     depends_on:
       backend: { condition: service_started }
       postgres: { condition: service_healthy }

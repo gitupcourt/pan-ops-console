@@ -49,7 +49,7 @@ collapses them into one worker; Kubernetes splits them (see
 | `REDIS_URL` | **yes** | `redis://host:6379/0` |
 | `SESSION_COOKIE_SECURE` | no | `true` (default) behind HTTPS; `false` for plain-HTTP local eval |
 | `PUBLIC_BASE_URL` | OIDC only | external base URL, for OIDC redirect callbacks |
-| `CATALOG_PATH` | no | metric catalog path; defaults to the image's bundled `metrics.yaml` |
+| `CATALOG_PATH` | no | path to the metric catalog **inside the container** (default `/app/catalog/metrics.yaml`). The file is **not** baked into the image — it's provided by a mount: a bind-mount in Compose, a ConfigMap in Kubernetes. |
 
 **Generate a `FERNET_KEY`** (no dependencies):
 
@@ -110,10 +110,11 @@ Production specifics that differ from the compose eval:
 - **Split the Celery roles** into separate Deployments: `worker` (`-Q celery`),
   `upgrade-worker` (`-Q upgrade`, sized with more memory), and a single `beat`.
 - **Exactly one beat replica.** Two beats double-schedule every poll.
-- **Catalog via ConfigMap.** Mount `metrics.yaml` from a ConfigMap at
-  `CATALOG_PATH` — it overrides the image's bundled copy, so catalog changes
-  ship without rebuilding the image (and the ConfigMap must be updated when the
-  catalog changes — the image bump alone won't carry it).
+- **Catalog via ConfigMap.** The catalog is **not** baked into the image (it
+  lives at repo root, outside the backend build context). Mount `metrics.yaml`
+  from a ConfigMap at `CATALOG_PATH` so catalog changes ship without rebuilding
+  the image (the ConfigMap must be updated when the catalog changes — the image
+  bump alone won't carry it).
 - **Secrets** (`FERNET_KEY`, `POSTGRES_PASSWORD`, any OIDC client secrets) via a
   Secret / SealedSecret, not a `.env` file.
 - **Read-only root filesystem:** point the beat schedule at a writable path
@@ -132,7 +133,7 @@ Production specifics that differ from the compose eval:
 | TLS | none (localhost HTTP) | terminated at the Ingress; `SESSION_COOKIE_SECURE=true` |
 | Celery layout | one worker, all queues + embedded `--beat` | separate `worker` / `upgrade-worker` / `beat` Deployments |
 | Beat | embedded in the worker | its own Deployment, **1 replica** |
-| Metric catalog | image's bundled `metrics.yaml` | mounted from a ConfigMap (overrides the image) |
+| Metric catalog | bind-mounted from `./catalog` | mounted from a ConfigMap |
 | Secrets | `.env` file | Secret / SealedSecret |
 | Postgres / Redis | compose services + named volume | StatefulSets/Deployments + PVCs (or managed services) |
 | Filesystem | writable | `readOnlyRootFilesystem`; scratch + beat schedule → `/tmp` |

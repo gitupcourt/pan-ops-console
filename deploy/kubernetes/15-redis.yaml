@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pan-ops-console-redis-data
+  labels: { app: pan-ops-console, tier: redis }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pan-ops-console-redis
+  labels: { app: pan-ops-console, tier: redis }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pan-ops-console, tier: redis } }
+  template:
+    metadata: { labels: { app: pan-ops-console, tier: redis } }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          command: [redis-server]
+          args: ["--appendonly","yes","--requirepass","$(REDIS_PASSWORD)"]
+          env:
+            - { name: REDIS_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: REDIS_PASSWORD } } }
+          ports: [{ containerPort: 6379 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe:
+            exec: { command: ["sh","-c","redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: pan-ops-console-redis-data }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redis, labels: { app: pan-ops-console, tier: redis } }
+spec:
+  selector: { app: pan-ops-console, tier: redis }
+  ports: [{ port: 6379, targetPort: 6379 }]

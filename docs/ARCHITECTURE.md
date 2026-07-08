@@ -223,7 +223,9 @@ one Panorama isn't hammered. Each `poll_device_task` builds a client
 (proxy/direct), runs each metric's catalog command via `op_xml`, extracts a
 `current` (and optional `max`) with `pct = current/max·100`, and writes `Sample`
 rows. Aggregates read back via a "latest sample per (device, metric)"
-`ROW_NUMBER` query joined to `devices`.
+`ROW_NUMBER` query joined to `devices`; a sample older than a few poll intervals
+is flagged **stale** and dropped from the heat-map's color, so a device that
+stopped reporting can't keep a tile lit with a frozen value.
 
 **The catalog.** Each metric in `catalog/metrics.yaml` is a `(current, max)` pair
 of fetchers; `current` can sum multiple `sources` (so e.g. Panorama-pushed +
@@ -243,8 +245,10 @@ locally-configured object counts combine automatically):
     extract: { type: state_value, key: cfg.general.max-address }
 ```
 
-Extractor types: `xpath_count`, `xpath_text`, `xpath_avg`, `state_value`,
-`text_regex` (with optional `invert` for "100 − value" cases like CPU idle).
+Extractor types: `xpath_count`, `xpath_text`, `xpath_avg`, `xpath_max`,
+`state_value`, `text_regex` (with optional `invert` for "100 − value" cases like
+CPU idle). `xpath_avg`/`xpath_max` roll a set of matches (e.g. per-DP CPU cores)
+into one number.
 Adding a metric is usually a YAML edit, not code. The poller caches `op()`
 responses across metrics that share a command, so N metrics ≠ N round-trips.
 

@@ -44,6 +44,14 @@ class AlertRule(Base):
         index=True,
     )
     threshold_pct: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Consecutive samples that must breach the threshold before the alert
+    # OPENS. 1 = instantaneous (right for slow-moving config counts). Higher
+    # values suppress flapping on volatile metrics like CPU — e.g. 3 means
+    # "fire only after CPU has been over the line for 3 polls in a row".
+    # Maintaining/escalating an already-open alert is not re-gated.
+    sustained_samples: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1", default=1
+    )
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true", default=True
     )

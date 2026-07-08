@@ -485,6 +485,10 @@ export type HeatmapDeviceTop = {
   current: number;
   max: number | null;
   pct: number | null;
+  // Device stopped reporting; pct is a frozen last-known value. Excluded
+  // from the tile color, rendered muted in the hover popover.
+  stale: boolean;
+  last_sample_at: string | null;
 };
 
 export type HeatmapCell = {
@@ -494,6 +498,8 @@ export type HeatmapCell = {
   metric_description: string;
   max_pct: number | null;
   device_count: number;
+  // How many of device_count are stale (excluded from max_pct).
+  stale_count: number;
   top_devices: HeatmapDeviceTop[];
 };
 
@@ -514,6 +520,8 @@ export type CapacityTableRow = {
   pct: number | null;
   predicted_date: string | null;
   last_sample_at: string;
+  // Device stopped reporting; current/pct are a frozen last-known value.
+  stale: boolean;
 };
 
 export type CapacityTableResponse = {
@@ -598,12 +606,15 @@ export type AlertRuleCreate = {
   metric: string | null;
   severity: AlertSeverity;
   threshold_pct: number;
+  // Consecutive breaching polls before the alert opens. 1 = instant.
+  sustained_samples?: number;
   enabled?: boolean;
 };
 
 export type AlertRuleUpdate = {
   name?: string;
   threshold_pct?: number;
+  sustained_samples?: number;
   enabled?: boolean;
 };
 
@@ -620,6 +631,7 @@ export type AlertRuleRead = {
   metric: string | null;
   severity: AlertSeverity;
   threshold_pct: number;
+  sustained_samples: number;
   enabled: boolean;
   created_at: string;
   updated_at: string;

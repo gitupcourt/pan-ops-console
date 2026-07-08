@@ -130,6 +130,20 @@ def test_predict_no_max_value():
     assert pred.method == "insufficient_data"
 
 
+def test_predict_tiny_slope_does_not_overflow():
+    """A near-flat but technically-growing metric (slope → ~0) projects millions
+    of days out. That overflows `timedelta` and 500s the trend endpoint — guard
+    it: return no date rather than raising."""
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # 30 days, value creeps 100.0 → ~101.0 (~0.03/day) against a far-off max.
+    # (200000 - ~101) / 0.03 ≈ 6.6M days — well past timedelta's ceiling.
+    samples = [(t0 + timedelta(days=i), 100.0 + 0.03 * i) for i in range(30)]
+    pred = _predict_max_date(samples, max_value=200_000.0)
+    assert pred.predicted_date is None
+    assert pred.days_left is None
+    assert pred.slope_per_day is not None and pred.slope_per_day > 0
+
+
 # ---------- /capacity/heatmap ----------
 
 

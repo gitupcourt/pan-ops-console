@@ -1,204 +1,153 @@
 # Deployment
 
-Three ways to run pan-capacity-analyzer. Pick one.
+pan-ops-console runs the same shape everywhere: a FastAPI **API**, **Celery**
+workers + a **beat** scheduler over **Redis**, **PostgreSQL** as the system of
+record, and the **SPA** served behind a web layer.
 
-## 1. Docker Compose (simplest)
+There is **no in-process poller and no single-container mode**. Capacity
+polling, alert evaluation, and upgrade orchestration all run on Celery, so
+**Redis plus at least one worker are mandatory** — the API alone will start but
+do nothing.
 
-One host, two containers, one named volume. Good for a homelab, a VM, a Raspberry Pi.
+> **Database: PostgreSQL, everywhere.** SQLite is used only by the test suite
+> (it's how CI runs without a database service); it is **not** a deployment
+> option. Several processes against one SQLite file serialize and throw
+> "database is locked", so any real install uses Postgres.
 
-```bash
-git clone https://github.com/gitupcourt/pan-capacity-analyzer.git
-cd pan-capacity-analyzer
-cp .env.example .env
+Two supported paths:
 
-# Generate a Fernet key — encrypts firewall API keys at rest in SQLite.
-# Without this, the backend won't start. Losing it makes existing stored
-# credentials unrecoverable, so back it up somewhere safe.
-python -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())" >> .env
+- **[Docker Compose](#docker-compose-kick-the-tires)** — evaluate on a PC or single server.
+- **[Kubernetes](#kubernetes-production)** — production.
 
-docker compose up -d
-```
+---
 
-The frontend is now at <http://localhost:5174>. The backend's OpenAPI docs are reachable at <http://localhost:5174/api/docs> through the frontend's proxy.
+## What it consists of
 
-### Production-ish compose
-
-The default `docker-compose.yml` pulls pre-built images from GHCR. If you want TLS or a real hostname, put a reverse proxy (Caddy, Traefik, nginx) in front:
-
-```yaml
-# Snippet for ./Caddyfile
-capacity.example.com {
-    reverse_proxy localhost:5174
-}
-```
-
-Or extend the compose file with a `caddy:` service. Up to you.
-
-### Persistent data
-
-Samples and the inventory DB live in the `capacity-data` Docker volume. To back up:
-
-```bash
-docker run --rm -v capacity-data:/data -v "$PWD:/backup" alpine \
-    tar czf /backup/capacity-backup-$(date +%F).tar.gz -C /data .
-```
-
-To wipe and start fresh: `docker compose down -v` (note the `-v` removes the volume).
-
-## 2. Kubernetes
-
-See [`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md) — full walkthrough lives there. Short version:
-
-```bash
-# 1. Edit deploy/kubernetes/01-secret.yaml — paste your FERNET_KEY
-# 2. Edit deploy/kubernetes/40-ingress-traefik.yaml — replace capacity.example.com
-# 3. Apply
-kubectl apply -f deploy/kubernetes/
-```
-
-The example manifests are tested on k3s with Traefik. nginx-ingress, Gateway API, etc. work — you just need the equivalent of "route `/api/*` to backend with prefix stripped, everything else to frontend."
-
-## 3. From source
-
-For development or if you want to modify the code.
-
-```bash
-# Backend
-cd backend
-python -m venv .venv && source .venv/bin/activate    # or .venv/Scripts/activate on Windows
-pip install -r requirements.txt
-export FERNET_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-uvicorn app.main:app --reload
-
-# Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend will be at <http://localhost:5173>; it proxies `/api/*` to <http://localhost:8000> via the vite config. Backend's OpenAPI docs are at <http://localhost:8000/docs>.
-
-To produce production images:
-
-```bash
-docker build -t pan-capacity-backend  backend/
-docker build -f frontend/Dockerfile.prod -t pan-capacity-frontend frontend/
-```
-
-## Securing the `FERNET_KEY`
-
-The `FERNET_KEY` encrypts every stored firewall / Panorama API credential at rest in SQLite. **If it leaks, an attacker can decrypt every stored API token and use it against your firewalls.** Treat it like a private TLS key, not like an API token.
-
-Two principles regardless of how you deploy:
-
-1. **The key never lives unencrypted anywhere except the running container's memory.** Not in git, not pasted into chats or screenshots, not in shell history that's getting backed up.
-2. **The key is backed up to a password manager** so a host failure doesn't take all your stored credentials with it.
-
-### Compose: `.env` hygiene
-
-The threat model on a single docker-compose host is mostly accidental leakage, not a determined attacker — anyone with shell on the host has the key regardless of clever storage. So the rules are simple:
-
-```bash
-# Generate the key directly into .env so it never echoes to the terminal
-python -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())" >> .env
-
-# Lock down the file so only your user can read it
-chmod 600 .env
-
-# Verify it's gitignored
-git check-ignore -v .env    # should print a .gitignore reference
-
-# Back up the VALUE (not the file) to your password manager
-# Open .env, copy the FERNET_KEY value, paste it into 1Password/Bitwarden/etc.
-# under "pan-capacity-analyzer FERNET_KEY"
-```
-
-Do not regenerate the key after you've added device credentials — every stored credential is encrypted with the current key and rotating means losing them all. If you really need to rotate, do it before adding devices, or expect to re-enter every credential by hand afterward.
-
-### Kubernetes: Sealed Secrets (recommended for production)
-
-Plaintext `Secret` manifests in git are decryptable by anyone with repo read access, and worse, a stale `kubectl apply` silently overwrites the live key — both of which we've eaten in real life. The fix is to encrypt the secret value into the manifest itself using a cluster-side controller.
-
-[`bitnami-labs/sealed-secrets`](https://github.com/bitnami-labs/sealed-secrets) is the canonical option:
-
-```bash
-# 1. Install the controller (cluster-wide, one-time)
-kubectl apply -f https://github.com/bitnami-labs/sealed-secrets/releases/latest/download/controller.yaml
-
-# 2. Install the kubeseal CLI on your workstation
-#    (see https://github.com/bitnami-labs/sealed-secrets/releases)
-
-# 3. Back up the controller's master key once, RIGHT AFTER install,
-#    into a password manager. Without this, a cluster rebuild loses
-#    every sealed value in your repo permanently.
-kubectl get secret -n kube-system \
-  -l sealedsecrets.bitnami.com/sealed-secrets-key=active \
-  -o yaml > sealed-secrets-master.yaml
-# Paste contents into 1Password as "<cluster name> sealed-secrets master key", then delete the file.
-
-# 4. Seal pan-capacity-secrets and commit the result
-kubectl create secret generic pan-capacity-secrets \
-    --namespace=default \
-    --from-literal=FERNET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')" \
-    --dry-run=client -o yaml \
-  | kubeseal --format=yaml \
-  > deploy/kubernetes/01-sealed-secret.yaml
-
-# 5. Apply
-kubectl apply -f deploy/kubernetes/01-sealed-secret.yaml
-```
-
-The resulting `01-sealed-secret.yaml` is encrypted ciphertext targeted at your specific cluster's controller. It's safe to commit to a public repo — re-applies are idempotent, and a copy of the file does an attacker no good without the master key (which lives only in `etcd` and your password manager).
-
-[`deploy/kubernetes/README.md`](../deploy/kubernetes/README.md) covers the sealed-secrets variant of the apply step.
-
-### Other options (when you outgrow sealed-secrets)
-
-- **SOPS + age/PGP** — like sealed-secrets but works for any file, not just Secrets. More general but requires `sops` installed wherever you edit.
-- **External Secrets Operator + a vault** (1Password Connect, AWS Secrets Manager, HashiCorp Vault, …) — single canonical source with audit trail and rotation. Right call once you're managing many apps or want central rotation.
-- **HashiCorp Vault directly** — overkill for homelab, the right answer at multi-team / multi-cluster scale.
-
-For 1-2 apps on a single cluster, sealed-secrets is the sweet spot of safety + simplicity.
-
-## Configuration
-
-Everything is environment variables on the backend:
-
-| Variable | Default | Notes |
+| Component | Role | Image |
 |---|---|---|
-| `FERNET_KEY` | *(required)* | Generated once, kept forever. Encrypts API credentials at rest. |
-| `DATABASE_URL` | `sqlite:///data/capacity.db` | Anything SQLAlchemy supports. Postgres tested but unsupported until storage swap lands. |
-| `CATALOG_PATH` | `/app/catalog/metrics.yaml` | Where to load the metric catalog from at startup. |
-| `POLL_INTERVAL_SECONDS` | `300` | Fast (live-telemetry) polling cadence. Back-compat single knob; `POLL_SYSTEM_INTERVAL_SECONDS` inherits it when unset. |
-| `POLL_SYSTEM_INTERVAL_SECONDS` | *(inherits `POLL_INTERVAL_SECONDS`)* | Explicit fast cadence for live telemetry (CPU, memory, sessions, throughput). |
-| `POLL_CONFIG_INTERVAL_SECONDS` | `3600` | Slow cadence for config-class counts (objects, policies, NAT, VPN peers) — they only change on commit. |
-| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated. Set to your public frontend origin in prod. |
+| **api** | FastAPI HTTP API; runs `alembic upgrade head` on startup | backend |
+| **worker** | Celery: capacity polling + Panorama sync (`celery` queue) | backend |
+| **upgrade-worker** | Celery: upgrade orchestration (`upgrade` queue) | backend |
+| **beat** | Celery scheduler (dispatch + sync ticks) | backend |
+| **redis** | Celery broker + coordination locks | `redis:7` |
+| **postgres** | system of record | `postgres:16` |
+| **frontend** | static SPA | frontend |
 
-Frontend (build-time and dev-server only):
+The three Celery roles (worker / upgrade-worker / beat) are separate processes
+of the **same backend image** — only the launch command differs. Compose
+collapses them into one worker; Kubernetes splits them (see
+[differences](#docker-vs-kubernetes)).
 
-| Variable | Default | Notes |
+---
+
+## Required configuration
+
+| Env var | Required | Notes |
 |---|---|---|
-| `VITE_ALLOWED_HOSTS` | *(permissive)* | Comma-separated hostnames the dev server accepts in Host: header, or a `.suffix` to allow subdomains. Production nginx doesn't use this. |
-| `VITE_API_TARGET` | `http://backend:8000` | Where the dev server proxies `/api/*` to. Only used in `npm run dev`. |
+| `DATABASE_URL` | **yes** | `postgresql+psycopg://user:pass@host:5432/db` (the `+psycopg` selects psycopg3) |
+| `FERNET_KEY` | **yes** | encrypts stored firewall/Panorama credentials at rest |
+| `REDIS_URL` | **yes** | `redis://host:6379/0` |
+| `SESSION_COOKIE_SECURE` | no | `true` (default) behind HTTPS; `false` for plain-HTTP local eval |
+| `PUBLIC_BASE_URL` | OIDC only | external base URL, for OIDC redirect callbacks |
+| `CATALOG_PATH` | no | path to the metric catalog **inside the container** (default `/app/catalog/metrics.yaml`). The file is **not** baked into the image — it's provided by a mount: a bind-mount in Compose, a ConfigMap in Kubernetes. |
 
-## Verifying it's running
+**Generate a `FERNET_KEY`** (no dependencies):
 
 ```bash
-# Backend health
-curl https://capacity.example.com/api/healthz
-# {"status":"ok"}
-
-# Trigger an immediate poll (don't wait for the scheduler)
-curl -X POST https://capacity.example.com/api/metrics/poll/run-now
-
-# Inspect what samples are landing
-curl 'https://capacity.example.com/api/metrics/1/address_objects?hours=1'
+openssl rand -base64 32 | tr '+/' '-_'
 ```
 
-## Updating
+> **Never regenerate `FERNET_KEY` on an existing install** — it makes every
+> stored credential, TOTP secret, and OIDC client secret unrecoverable. Back it up.
 
-**Compose:** `docker compose pull && docker compose up -d`
+**Run the Celery roles** (same image, different command):
 
-**Kubernetes:** bump the `image:` tags in `20-backend.yaml` and `30-frontend.yaml` (or use `kubectl set image ...`), then `kubectl rollout restart`.
+```bash
+# capacity polling + Panorama sync
+celery -A app.workers.celery_app:celery worker -Q celery
+# upgrade orchestration (give it more RAM — snapshot + XML diff work)
+celery -A app.workers.celery_app:celery worker -Q upgrade
+# scheduler (exactly ONE of these, ever)
+celery -A app.workers.celery_app:celery beat
+```
 
-**From source:** `git pull && pip install -r backend/requirements.txt && (cd frontend && npm install)` and restart.
+---
+
+## Docker Compose (kick-the-tires)
+
+A working stack lives in [`deploy/compose/`](../deploy/compose/): Postgres,
+Redis, the API, **one** combined worker (all queues + an embedded beat), and the
+SPA.
+
+```bash
+git clone https://github.com/gitupcourt/pan-ops-console.git
+cd pan-ops-console/deploy/compose
+cp .env.example .env          # set POSTGRES_PASSWORD and FERNET_KEY
+docker compose up --build
+```
+
+Open **http://localhost:8080** and create the first admin when prompted
+(first-run bootstrap). Then add a Panorama or firewall under **Inventory**.
+
+How it maps to the components above: the frontend container also **proxies
+`/api` to the backend** (via `deploy/compose/web.conf`) — in Kubernetes the
+Ingress does that instead. The single `worker` service runs `-Q celery,upgrade`
+with `--beat`, so it covers polling, upgrades, and scheduling in one process.
+
+**Not for production:** plain HTTP, a single combined worker, no resource
+limits, secrets in a `.env` file, single-node.
+
+---
+
+## Kubernetes (production)
+
+Run each component as its own Deployment, backed by Postgres + Redis, behind an
+Ingress that terminates TLS and routes `/api/*` to the API Service. Example
+manifests are in [`deploy/kubernetes/`](../deploy/kubernetes/).
+
+Production specifics that differ from the compose eval:
+
+- **Split the Celery roles** into separate Deployments: `worker` (`-Q celery`),
+  `upgrade-worker` (`-Q upgrade`, sized with more memory), and a single `beat`.
+- **Exactly one beat replica.** Two beats double-schedule every poll.
+- **Catalog via ConfigMap.** The catalog is **not** baked into the image (it
+  lives at repo root, outside the backend build context). Mount `metrics.yaml`
+  from a ConfigMap at `CATALOG_PATH` so catalog changes ship without rebuilding
+  the image (the ConfigMap must be updated when the catalog changes — the image
+  bump alone won't carry it).
+- **Secrets** (`FERNET_KEY`, `POSTGRES_PASSWORD`, any OIDC client secrets) via a
+  Secret / SealedSecret, not a `.env` file.
+- **Read-only root filesystem:** point the beat schedule at a writable path
+  (`--schedule=/tmp/celerybeat-schedule`); the frontend runs nginx-unprivileged
+  on `:8080`.
+- **`SESSION_COOKIE_SECURE=true`** (you're behind TLS) and set `PUBLIC_BASE_URL`
+  if you use OIDC.
+
+---
+
+## Docker vs Kubernetes
+
+| Concern | Docker Compose | Kubernetes |
+|---|---|---|
+| `/api` routing | frontend nginx proxies `/api` → backend (`web.conf`) | Ingress routes `/api` (stripPrefix) to the API Service |
+| TLS | none (localhost HTTP) | terminated at the Ingress; `SESSION_COOKIE_SECURE=true` |
+| Celery layout | one worker, all queues + embedded `--beat` | separate `worker` / `upgrade-worker` / `beat` Deployments |
+| Beat | embedded in the worker | its own Deployment, **1 replica** |
+| Metric catalog | bind-mounted from `./catalog` | mounted from a ConfigMap |
+| Secrets | `.env` file | Secret / SealedSecret |
+| Postgres / Redis | compose services + named volume | StatefulSets/Deployments + PVCs (or managed services) |
+| Filesystem | writable | `readOnlyRootFilesystem`; scratch + beat schedule → `/tmp` |
+| Scale | single node | scale `worker` horizontally; keep beat a singleton |
+
+---
+
+## Operational notes
+
+- **Migrations** run automatically on API startup (`alembic upgrade head`). The
+  API owns the schema; workers connect once it exists.
+- **First run** prompts you to create the first admin (bootstrap); local
+  accounts use Argon2id, with optional TOTP, and OIDC is configurable in the UI.
+- **Upgrade-worker memory:** the `upgrade` queue does snapshot capture + XML diff
+  — give it more RAM than the polling worker in production.
+- **Backups:** back up Postgres (and your `FERNET_KEY` — separately, since it
+  decrypts what's in the database).

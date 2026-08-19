@@ -2,19 +2,20 @@
 
 Engine config is dialect-aware:
 
-- **SQLite** (default / today): `check_same_thread=False` so the
-  APScheduler thread and FastAPI request handlers can share the engine.
-  Pool defaults are fine; SQLite holds one connection at a time anyway.
-- **Postgres** (phase 2b onwards): explicit pool size + recycle so the
-  long-running poller + Celery workers don't accumulate stale
-  connections through Postgres's idle-disconnect window. `pool_pre_ping`
-  catches the half-dropped-connection case before a query fails.
+- **PostgreSQL** — every deployment. Explicit pool size + recycle so the
+  Celery workers + API don't accumulate stale connections through Postgres's
+  idle-disconnect window; `pool_pre_ping` catches a half-dropped connection
+  before a query fails. Set
+  `DATABASE_URL=postgresql+psycopg://user:pass@host:port/db` (the `+psycopg`
+  qualifier selects psycopg3, which is what's installed).
+- **SQLite** — the **test suite only**. `check_same_thread=False`; one
+  connection at a time. This is how CI runs the tests without a database
+  service. It is NOT a deployment option: polling, alerting, and upgrade
+  orchestration all run on Celery + Redis (multiple processes), and several
+  processes against one SQLite file serialize and throw "database is locked".
+  See docs/DEPLOYMENT.md.
 
-DATABASE_URL is the single env var that flips between them. To use
-Postgres, set `DATABASE_URL=postgresql+psycopg://user:pass@host:port/db`
-(the `+psycopg` qualifier explicitly selects psycopg3, which is what's
-installed; plain `postgresql://` would fall back to psycopg2 if
-present).
+DATABASE_URL is the single env var that selects the dialect.
 """
 
 from collections.abc import Generator

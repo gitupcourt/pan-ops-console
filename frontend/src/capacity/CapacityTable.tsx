@@ -8,6 +8,7 @@ import {
 
 import { api, CapacityTableRow, MetricCategory } from "../api";
 import { Button, Card, CardHeader, Input, Select, TableScroll } from "../core/ui/ui";
+import { relTime } from "../lib/relTime";
 import { CapacityViewToggle } from "./CapacityViewToggle";
 
 // Sortable columns. "alert" and "predicted" aren't sortable yet
@@ -367,7 +368,12 @@ function CategoryTable({
       </thead>
       <tbody>
         {rows.map((r) => (
-          <tr key={`${r.device_id}-${r.metric}`} className="border-b border-zinc-800/40 hover:bg-zinc-900/30">
+          <tr
+            key={`${r.device_id}-${r.metric}`}
+            className={`border-b border-zinc-800/40 hover:bg-zinc-900/30${
+              r.stale ? " opacity-70" : ""
+            }`}
+          >
             <td className="px-4 py-2">
               <button
                 onClick={() => onMetricClick(r.device_id, r.metric)}
@@ -418,6 +424,29 @@ function UsageCell({ row }: { row: CapacityTableRow }) {
   const max = row.max;
   const barWidth = pct == null ? 0 : Math.min(100, Math.max(0, pct));
   const barColor = barColorForPct(pct);
+
+  // Stale: the device stopped reporting, so current/pct are a frozen
+  // last-known value. Show the number muted and replace the usage bar with
+  // a "stale · last seen …" marker, so it's clear this isn't live data.
+  if (row.stale) {
+    return (
+      <div className="flex items-center gap-3 text-zinc-600">
+        <div className="text-xs tabular-nums w-28">
+          {fmtCount(row.current)}{" "}
+          <span>({pct == null ? "—" : `${pct.toFixed(pct < 10 ? 1 : 0)}%`})</span>
+        </div>
+        <div
+          className="flex items-center gap-1.5 text-[10px] italic"
+          title={`No fresh sample — this device has stopped reporting (last sample ${relTime(
+            row.last_sample_at,
+          )}).`}
+        >
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-600" />
+          stale · last seen {relTime(row.last_sample_at)}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-3">
@@ -518,7 +547,9 @@ function sortRows(
 function isSortEmpty(r: CapacityTableRow, key: SortKey): boolean {
   switch (key) {
     case "pct":
-      return r.pct == null;
+      // Stale rows sink with the null-pct rows: a frozen last-known value
+      // must not float to the top of the "what's on fire" (pct-desc) view.
+      return r.pct == null || r.stale;
     case "sw":
       return !r.software_version;
     case "metric":

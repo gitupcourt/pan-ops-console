@@ -1,66 +1,76 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pan-capacity-backend
-  labels:
-    app: pan-capacity
-    tier: backend
+  name: pan-ops-console-backend
+  labels: { app: pan-ops-console, tier: backend }
 spec:
-  # Single replica — SQLite isn't safe for concurrent writers. Don't scale
-  # this above 1 unless you've swapped storage to Postgres/TimescaleDB.
   replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels: { app: pan-capacity, tier: backend }
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: pan-ops-console, tier: backend } }
   template:
-    metadata:
-      labels: { app: pan-capacity, tier: backend }
+    metadata: { labels: { app: pan-ops-console, tier: backend } }
     spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: backend
-          image: ghcr.io/gitupcourt/pan-capacity-analyzer-backend:latest
+          # Public image. If you mirror it to a private registry, add imagePullSecrets.
+          # Pin to a release tag instead of :latest for real deploys.
+          image: ghcr.io/gitupcourt/pan-ops-console-backend:latest
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           ports: [{ containerPort: 8000 }]
+          # The API runs "alembic upgrade head" on startup, so it owns schema
+          # migrations -- no separate migration Job needed.
           env:
-            - { name: DATABASE_URL, value: "sqlite:////app/data/capacity.db" }
+            - { name: POSTGRES_HOST, value: postgres }
+            - { name: POSTGRES_PORT, value: "5432" }
+            - { name: POSTGRES_USER,     valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_USER } } }
+            - { name: POSTGRES_DB,       valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_DB } } }
+            - { name: POSTGRES_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: POSTGRES_PASSWORD } } }
+            - { name: DATABASE_URL, value: "postgresql+psycopg://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)" }
+            - { name: REDIS_HOST, value: redis }
+            - { name: REDIS_PORT, value: "6379" }
+            - { name: REDIS_PASSWORD, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: REDIS_PASSWORD } } }
+            - { name: REDIS_URL, value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0" }
             - { name: CATALOG_PATH, value: "/app/catalog/metrics.yaml" }
-            # Capacity polling cadences. Live telemetry on the fast knob,
-            # config-class object counts on the slow one (they only change
-            # on commit). POLL_SYSTEM_INTERVAL_SECONDS defaults to
-            # POLL_INTERVAL_SECONDS when unset.
             - { name: POLL_INTERVAL_SECONDS, value: "300" }
-            - { name: POLL_CONFIG_INTERVAL_SECONDS, value: "3600" }
-            # CORS — set to the public origin of your frontend. Comma-separated
-            # if you serve from multiple hostnames.
-            - { name: CORS_ORIGINS, value: "https://capacity.example.com" }
-            - name: FERNET_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: pan-capacity-secrets
-                  key: FERNET_KEY
+            - { name: CORS_ORIGINS, value: "https://pan-ops-console.example.com" }
+            - { name: PUBLIC_BASE_URL, value: "https://pan-ops-console.example.com" }
+            - { name: FERNET_KEY, valueFrom: { secretKeyRef: { name: pan-ops-console-secrets, key: FERNET_KEY } } }
           volumeMounts:
-            - { name: data, mountPath: /app/data }
             - { name: catalog, mountPath: /app/catalog }
+            - { name: tmp, mountPath: /tmp }
           readinessProbe:
             httpGet: { path: /healthz, port: 8000 }
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
           livenessProbe:
             httpGet: { path: /healthz, port: 8000 }
             initialDelaySeconds: 30
-            periodSeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits:   { cpu: "1", memory: 512Mi }
       volumes:
-        - name: data
-          persistentVolumeClaim:
-            claimName: pan-capacity-data
         - name: catalog
-          configMap:
-            name: pan-capacity-catalog
+          configMap: { name: pan-ops-console-catalog }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
 ---
 apiVersion: v1
 kind: Service
-metadata:
-  name: pan-capacity-backend
+metadata: { name: pan-ops-console-backend, labels: { app: pan-ops-console, tier: backend } }
 spec:
-  selector: { app: pan-capacity, tier: backend }
+  selector: { app: pan-ops-console, tier: backend }
   ports: [{ port: 8000, targetPort: 8000 }]

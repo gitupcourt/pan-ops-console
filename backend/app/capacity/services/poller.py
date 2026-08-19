@@ -169,6 +169,11 @@ def poll_device(
             max_value: float | None = None
             if spec.max is not None:
                 max_value = _sum_sources(spec.max)
+            elif spec.unit == "percent":
+                # The value is already a 0-100 utilization figure (CPU, memory).
+                # Treat the ceiling as 100 so pct == current and the metric gets
+                # heat-map color + alert evaluation like every other metric.
+                max_value = 100.0
 
             pct: float | None = None
             if max_value and max_value > 0:

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.alerts.models.alert import Alert
 from app.alerts.models.enums import AlertSeverity
 from app.alerts.models.rule import AlertRule
+from app.capacity.models.sample import Sample
 from app.capacity.services.storage import SamplePoint
 
 log = logging.getLogger(__name__)
@@ -119,7 +120,11 @@ def evaluate_device_samples(
                 existing.max_value = s.max
                 existing.pct = s.pct
                 existing.last_seen_at = now
-            else:
+            elif _breach_is_sustained(db, s, rule.threshold_pct, rule.sustained_samples):
+                # OPEN — but only once the breach has persisted for the rule's
+                # required consecutive samples (suppresses one-poll spikes on
+                # volatile metrics like CPU). Escalating an already-open alert
+                # is handled above and intentionally NOT re-gated.
                 db.add(
                     Alert(
                         device_id=device_id,
@@ -134,12 +139,14 @@ def evaluate_device_samples(
                     )
                 )
                 log.info(
-                    "Alert opened: device=%s metric=%s severity=%s pct=%.1f threshold=%d",
+                    "Alert opened: device=%s metric=%s severity=%s pct=%.1f "
+                    "threshold=%d (sustained %d)",
                     device_id,
                     s.metric,
                     sev.value,
                     s.pct,
                     rule.threshold_pct,
+                    rule.sustained_samples,
                 )
         else:
             # No rule is firing for this sample. If we have an open
@@ -154,3 +161,33 @@ def evaluate_device_samples(
                     s.pct,
                     existing.severity.value,
                 )
+
+
+def _breach_is_sustained(
+    db: Session, sample: SamplePoint, threshold_pct: int, sustained_samples: int
+) -> bool:
+    """True if this sample plus the prior ``sustained_samples - 1`` for the same
+    (device, metric) are ALL at/above the threshold.
+
+    ``sustained_samples <= 1`` is instantaneous (always True) — the original
+    behavior, right for slow-moving config counts. Higher values gate OPENING an
+    alert so a one-poll spike on a volatile metric (CPU) doesn't flap. The
+    current sample's pct is used directly (already in hand); the earlier ones
+    come from the persisted history.
+    """
+    if sustained_samples <= 1:
+        return True
+    prior = db.execute(
+        select(Sample.pct)
+        .where(
+            Sample.device_id == sample.device_id,
+            Sample.metric == sample.metric,
+            Sample.ts < sample.ts,
+        )
+        .order_by(Sample.ts.desc())
+        .limit(sustained_samples - 1)
+    ).scalars().all()
+    pcts = [sample.pct, *prior]
+    return len(pcts) >= sustained_samples and all(
+        p is not None and p >= threshold_pct for p in pcts
+    )

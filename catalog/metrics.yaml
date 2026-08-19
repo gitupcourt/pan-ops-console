@@ -8,6 +8,7 @@
 #   xpath_count   — count of XPath matches
 #   xpath_text    — float of the first XPath match's text
 #   xpath_avg     — average of numeric text across ALL XPath matches
+#   xpath_max     — maximum of numeric text across ALL XPath matches
 #   state_value   — value of a key from `show system state` output
 #                   (handles mixed decimal `10000` and hex `0x3e8`)
 #   text_regex    — regex against <result> text; named group `value` is the number
@@ -269,35 +270,60 @@ metrics:
 
   - name: dp_cpu
     category: system
-    description: Dataplane CPU utilization (average across cores)
+    description: Data plane CPU utilization (average across all DP cores)
     status: verified
-    # Average of per-core values from the 1-minute resource-monitor view.
-    # Multi-DP devices have dp1/dp2/etc. — we report dp0 for now;
-    # extend the XPath if you need a multi-DP rollup.
+    unit: percent
+    # Average per-core load across EVERY data processor (dp0, dp1, ...) from the
+    # 1-minute resource-monitor view — matches panos-upgrade-assurance's
+    # get_dp_cpu_utilization (mean of all cores). The `*` wildcards the DP, so
+    # single-DP and multi-DP boxes both work. NOTE: validated on single-DP
+    # boxes; a chassis (e.g. PA-7000) may nest DPs per slot — confirm the XML
+    # path against a real chassis before trusting it there.
     current:
       cmd: "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
       extract:
         type: xpath_avg
-        xpath: ".//data-processors/dp0/minute/cpu-load-average/entry/value"
+        xpath: ".//data-processors/*/minute/cpu-load-average/entry/value"
+
+  - name: dp_cpu_max
+    category: system
+    description: Data plane CPU utilization (hottest core across all DPs)
+    status: verified
+    unit: percent
+    # The single busiest DP core — catches one pegged data processor that the
+    # average would hide (matters on multi-DP / chassis boxes). Shares the
+    # resource-monitor command with dp_cpu, so the response is fetched once and
+    # cached; this metric adds no extra round-trip.
+    current:
+      cmd: "<show><running><resource-monitor><minute><last>1</last></minute></resource-monitor></running></show>"
+      extract:
+        type: xpath_max
+        xpath: ".//data-processors/*/minute/cpu-load-average/entry/value"
 
   - name: mp_cpu
     category: system
     description: Management plane CPU utilization (%)
     status: verified
-    # `show system resources` returns `top` text. We capture the `id` (idle)
-    # value and use the extractor's invert flag to report usage = 100 - idle.
+    unit: percent
+    # The mgmt-plane CPU the firewall dashboard shows. NOTE: `show system
+    # resources` (top -bn1) is unreliable for CPU — its first %Cpu(s) sample is
+    # the average-since-boot, not the current load (it read ~83% on a box the
+    # firewall reported at ~4%). Read the monitoring subsystem instead:
+    # sys.monitor.<slot>.mp.exports carries { 'cpu': { '1minavg': N } } — the
+    # same source panos-upgrade-assurance + the PAN-OS dashboard use. The slot
+    # is s0 or s1 depending on platform, so wildcard it.
     current:
-      cmd: "<show><system><resources></resources></system></show>"
+      cmd: "<show><system><state><filter>sys.monitor.*.mp.exports</filter></state></system></show>"
       extract:
         type: text_regex
-        # Matches: "%Cpu(s): 47.4 us, 15.8 sy, 0.0 ni, 34.2 id, ..."
-        pattern: '%Cpu\(s\):\s+\S+\s+us,\s+\S+\s+sy,\s+\S+\s+ni,\s+(?P<value>\d+(?:\.\d+)?)\s+id'
-        invert: true
+        # CDATA: "sys.monitor.s1.mp.exports: { 'cpu': { '1minavg': 7, }, ... }"
+        pattern: "'cpu':\\s*\\{[^}]*'1minavg':\\s*(?P<value>\\d+(?:\\.\\d+)?)"
 
   - name: mp_memory
     category: system
     description: Management plane memory utilization (%)
     status: verified
+    unit: percent
     # `MiB Mem : 6959.1 total, 98.0 free, 2903.9 used, 3957.2 buff/cache`.
     # Capturing both `total` and `used` in one regex lets the extractor
     # turn this into a ratio percentage automatically.

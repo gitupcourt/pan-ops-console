@@ -37,6 +37,8 @@ class AlertRuleRead(BaseModel):
     metric: str | None
     severity: str
     threshold_pct: int
+    # Consecutive breaching samples required to OPEN the alert. 1 = instant.
+    sustained_samples: int
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -49,6 +51,10 @@ class AlertRuleCreate(BaseModel):
     metric: str | None = Field(default=None, max_length=64)
     severity: AlertSeverity
     threshold_pct: int = Field(ge=1, le=100)
+    # 1 = fire the instant the threshold is breached (good for slow-moving
+    # config counts). Higher = require N consecutive breaching polls before
+    # firing (good for volatile metrics like CPU).
+    sustained_samples: int = Field(default=1, ge=1, le=20)
     enabled: bool = True
 
 
@@ -61,6 +67,7 @@ class AlertRuleUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=128)
     threshold_pct: int | None = Field(default=None, ge=1, le=100)
+    sustained_samples: int | None = Field(default=None, ge=1, le=20)
     enabled: bool | None = None
 
 
@@ -92,6 +99,7 @@ def create_rule(
         metric=body.metric,
         severity=body.severity,
         threshold_pct=body.threshold_pct,
+        sustained_samples=body.sustained_samples,
         enabled=body.enabled,
     )
     db.add(rule)
@@ -129,6 +137,8 @@ def update_rule(
         rule.name = body.name
     if body.threshold_pct is not None:
         rule.threshold_pct = body.threshold_pct
+    if body.sustained_samples is not None:
+        rule.sustained_samples = body.sustained_samples
     if body.enabled is not None:
         rule.enabled = body.enabled
     db.commit()
@@ -166,6 +176,7 @@ def _to_read(r: AlertRule) -> AlertRuleRead:
         metric=r.metric,
         severity=r.severity.value,
         threshold_pct=r.threshold_pct,
+        sustained_samples=r.sustained_samples,
         enabled=r.enabled,
         created_at=r.created_at,
         updated_at=r.updated_at,

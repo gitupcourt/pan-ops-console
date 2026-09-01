@@ -70,7 +70,7 @@ jobs:
     # sweeps are handled out-of-band by AppSec).
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history so the --log-opts range resolves
 
@@ -111,7 +111,7 @@ jobs:
     name: pip-audit (backend) [informational]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
@@ -133,7 +133,7 @@ jobs:
     name: npm audit (frontend) [informational]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
@@ -166,7 +166,7 @@ jobs:
     name: trivy (deps + misconfig) [informational]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Trivy filesystem scan (HIGH/CRITICAL)
         run: |
           set -euo pipefail
@@ -191,7 +191,7 @@ jobs:
     name: SBOM (syft)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Generate SBOM (SPDX + CycloneDX)
         run: |
           set -euo pipefail

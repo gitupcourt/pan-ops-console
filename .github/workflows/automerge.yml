@@ -1,0 +1,36 @@
+name: dependabot auto-merge
+
+# Arms GitHub's native auto-merge on low-risk Dependabot PRs.
+# The "Protect main" ruleset (strict, 3 required checks) remains the gate:
+# nothing lands until backend tests + frontend typecheck + gitleaks all pass
+# against an up-to-date branch. This workflow only removes the manual click.
+on: pull_request
+
+# Deliberately NOT pull_request_target, and the PR is never checked out,
+# so no untrusted code from the PR branch can execute with these permissions.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Majors are excluded on purpose: every major bump currently open
+      # (#232 redis, #216 typescript, #215 react, #210 recharts) fails CI.
+      # Those need a human.
+      - name: Enable auto-merge (patch + minor only)
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

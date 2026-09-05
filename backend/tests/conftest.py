@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from cryptography.fernet import Fernet
 import pytest
 
 # Set required env vars BEFORE the first `from app...` import anywhere.
@@ -32,12 +33,13 @@ _TEST_DB = Path(tempfile.gettempdir()) / "pca-test.db"
 if _TEST_DB.exists():
     _TEST_DB.unlink()
 os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB}"
-os.environ.setdefault(
-    "FERNET_KEY",
-    # Generated once for the test suite — deterministic so two runs
-    # don't drift, but NOT used anywhere outside tests.
-    "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs=",
-)
+# One-shot Fernet key for the test session. Generate a fresh ephemeral key
+# unless the environment already supplied one (CI may inject its own). Never
+# a hardcoded literal — a real key value must not live in this public repo,
+# even as a test fixture. Tests that seed encrypted rows do so via the app's
+# own crypto helper, so they always match this process key regardless of value.
+if "FERNET_KEY" not in os.environ:
+    os.environ["FERNET_KEY"] = Fernet.generate_key().decode("ascii")
 os.environ.setdefault("CATALOG_PATH", str(Path(__file__).parent / "fake_metrics.yaml"))
 # Insecure cookie attribute for tests (no HTTPS in the TestClient transport)
 os.environ.setdefault("SESSION_COOKIE_SECURE", "false")

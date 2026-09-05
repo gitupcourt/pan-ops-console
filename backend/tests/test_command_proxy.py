@@ -21,24 +21,25 @@ from datetime import datetime
 from unittest.mock import patch
 
 import pytest
-from cryptography.fernet import Fernet
 from sqlalchemy import text
 
 from app.core.command_proxy.builder import build_client_with_fallback
 from app.core.command_proxy.pan_client import TargetDisconnectedError
+from app.core.crypto import encrypt
 from app.core.devices.models.device import Device
 from app.core.panorama.models.panorama import Panorama
 
 
-KEY = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
+# Seed encrypted blobs through the app's own crypto helper so they use the
+# process FERNET_KEY the app under test will decrypt with — no hardcoded key
+# literal in the repo, and encrypt/decrypt always agree regardless of value.
 
 
 def _seed_panorama(db, name: str = "pano1") -> Panorama:
-    fernet = Fernet(KEY.encode())
     pano = Panorama(
         name=name,
         hostname="10.0.0.100",
-        encrypted_api_key=fernet.encrypt(b"pano-key"),
+        encrypted_api_key=encrypt("pano-key"),
         verify_tls=False,
         reachable=True,
     )
@@ -57,7 +58,6 @@ def _seed_device(
     serial: str | None = None,
     has_own_key: bool = True,
 ) -> Device:
-    fernet = Fernet(KEY.encode())
     dev = Device(
         name=name,
         hostname="10.0.0.1",
@@ -67,7 +67,7 @@ def _seed_device(
         proxy_via_panorama=proxy_via_panorama,
         polling_enabled=True,
         panorama_id=panorama.id if panorama else None,
-        encrypted_api_key=fernet.encrypt(b"dev-key") if has_own_key else None,
+        encrypted_api_key=encrypt("dev-key") if has_own_key else None,
     )
     db.add(dev)
     db.commit()

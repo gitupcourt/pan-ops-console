@@ -28,6 +28,8 @@ import time
 
 from fastapi import HTTPException, Request, status
 
+from app.config import get_settings
+
 _lock = threading.Lock()
 # key -> (window_start_monotonic, count)
 _buckets: dict[str, tuple[float, int]] = {}
@@ -36,15 +38,25 @@ _buckets: dict[str, tuple[float, int]] = {}
 _MAX_KEYS = 10_000
 
 
-def client_ip(request: Request) -> str:
-    """Best-effort client IP. Behind Traefik the real client is in the
-    leftmost X-Forwarded-For entry; fall back to the socket peer."""
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    return request.client.host if request.client else "unknown"
+def client_ip(request: Request, *, trusted_hops: int | None = None) -> str:
+    """Client address for rate-limit keying (V-2).
+
+    Only the X-Forwarded-For entries appended by our own reverse proxies
+    are trusted. Each hop appends the peer it saw, so with N trusted hops
+    the client is the N-th entry from the RIGHT; everything further left
+    arrived from the caller and is never used for keying. If the header is
+    missing or shorter than the trusted chain, the request did not come
+    through the expected proxies and the socket peer is used instead.
+    `trusted_hops` overrides the TRUSTED_PROXY_HOPS setting (tests)."""
+    hops = get_settings().TRUSTED_PROXY_HOPS if trusted_hops is None else trusted_hops
+    peer = request.client.host if request.client else "unknown"
+    if hops <= 0:
+        return peer
+    xff = request.headers.get("x-forwarded-for", "")
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    if len(parts) < hops:
+        return peer
+    return parts[-hops]
 
 
 def hit(key: str, *, limit: int, window_s: int) -> None:

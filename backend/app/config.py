@@ -104,6 +104,13 @@ class Settings(BaseSettings):
     # navigations carry the cookie, but cross-site POSTs don't.
     SESSION_COOKIE_SAMESITE: str = "lax"
 
+    # Reverse-proxy hops in front of this app that append the peer address
+    # to X-Forwarded-For. Traefik (k8s) and the compose nginx are both one
+    # hop. The rate limiter keys on the entry that many positions from the
+    # RIGHT of the header; entries further left were supplied by the caller
+    # and are never used. 0 = ignore the header, key on the socket peer.
+    TRUSTED_PROXY_HOPS: int = 1
+
     # Public URL where this app is reachable from a browser. Used to
     # construct the OIDC redirect_uri the IdP calls back to. If left empty,
     # the OIDC routes fall back to deriving from the request — fine for

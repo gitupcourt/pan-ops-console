@@ -287,11 +287,15 @@ function TrendChart({
               labelFormatter={(t) =>
                 new Date(t as number).toLocaleString()
               }
-              formatter={(value: number, name: string) => {
-                if (name === "projected") return [fmtCount(value), "projected"];
-                const pct = max && max > 0 ? ((value / max) * 100).toFixed(1) : null;
+              formatter={(value, name) => {
+                // recharts 3 widened the formatter value to ValueType | undefined.
+                // Every series on this chart is numeric, so narrow before math.
+                const v = typeof value === "number" ? value : Number(value);
+                if (!Number.isFinite(v)) return ["—", String(name ?? "")];
+                if (name === "projected") return [fmtCount(v), "projected"];
+                const pct = max && max > 0 ? ((v / max) * 100).toFixed(1) : null;
                 return [
-                  `${fmtCount(value)}${pct ? ` (${pct}%)` : ""}`,
+                  `${fmtCount(v)}${pct ? ` (${pct}%)` : ""}`,
                   "actual",
                 ];
               }}

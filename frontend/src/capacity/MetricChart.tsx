@@ -132,13 +132,17 @@ export function MetricChart({ deviceId, spec, hours }: Props) {
                   fontSize: 12,
                 }}
                 labelFormatter={(ts) => new Date(ts as number).toLocaleString()}
-                formatter={(value: number, _name, payload) => {
+                formatter={(value, _name, payload) => {
+                  // recharts 3 widened the formatter value to ValueType | undefined.
+                  // This chart is always numeric, so narrow before math.
+                  const v = typeof value === "number" ? value : Number(value);
+                  if (!Number.isFinite(v)) return ["—", "current"];
                   const p = payload?.payload;
                   if (p?.max != null) {
-                    const pct = p.max > 0 ? ((value / p.max) * 100).toFixed(2) : null;
-                    return [`${fmt(value)} / ${fmt(p.max)}${pct ? `  (${pct}%)` : ""}`, "current"];
+                    const pct = p.max > 0 ? ((v / p.max) * 100).toFixed(2) : null;
+                    return [`${fmt(v)} / ${fmt(p.max)}${pct ? `  (${pct}%)` : ""}`, "current"];
                   }
-                  return [fmt(value), "current"];
+                  return [fmt(v), "current"];
                 }}
               />
               <Line

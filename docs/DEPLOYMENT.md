@@ -48,6 +48,7 @@ collapses them into one worker; Kubernetes splits them (see
 | `FERNET_KEY` | **yes** | encrypts stored firewall/Panorama credentials at rest |
 | `REDIS_URL` | **yes** | `redis://host:6379/0` |
 | `SESSION_COOKIE_SECURE` | no | `true` (default) behind HTTPS; `false` for plain-HTTP local eval |
+| `TRUSTED_PROXY_HOPS` | no | `1` (default): reverse-proxy hops that append to `X-Forwarded-For` (Traefik, compose nginx). The auth rate limiter keys on that entry from the right; set `0` to key on the socket peer instead |
 | `PUBLIC_BASE_URL` | OIDC only | external base URL, for OIDC redirect callbacks |
 | `CATALOG_PATH` | no | path to the metric catalog **inside the container** (default `/app/catalog/metrics.yaml`). The file is **not** baked into the image — it's provided by a mount: a bind-mount in Compose, a ConfigMap in Kubernetes. |
 

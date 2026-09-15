@@ -18,7 +18,7 @@ command proxy**, so a device added once is available to every module.
 
 | Layer | Tech |
 |---|---|
-| Frontend | React 18 + TypeScript, Vite, @tanstack/react-query 5, react-router 6, Tailwind, recharts |
+| Frontend | React 19 + TypeScript, Vite, @tanstack/react-query 5, react-router 7, Tailwind 4, recharts 3 |
 | Backend | FastAPI, SQLAlchemy 2.0, Pydantic v2 (Python 3.11) |
 | Async | Celery (beat + workers), Redis (broker + coordination) |
 | Storage | PostgreSQL (prod) / SQLite (tests), Alembic migrations |

@@ -24,6 +24,14 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # celery[redis] pulls in kombu[redis], which caps redis below 8.x. A
+      # redis major bump therefore dies at `pip install` before a single test
+      # runs, and nothing in this repo can fix it — it needs an upstream
+      # Celery release. Drop this ignore once Celery supports redis 8.
+      - dependency-name: "redis"
+        update-types:
+          - "version-update:semver-major"
 
   # --- React frontend ---
   - package-ecosystem: "npm"
@@ -35,6 +43,18 @@ updates:
     labels:
       - "dependencies"
     groups:
+      # React and its type packages must move as a set: @types/react-dom
+      # peer-depends on a matching @types/react, so a solo major bump of
+      # either one fails `npm ci` before typecheck ever runs.
+      # Declared before npm-minor-patch deliberately — Dependabot files a
+      # dependency under the first group it matches, so this must win for
+      # the react family.
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
       npm-minor-patch:
         update-types:
           - "minor"

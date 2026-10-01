@@ -24,10 +24,10 @@ jobs:
     name: backend tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
@@ -64,7 +64,7 @@ jobs:
     needs: [test-backend]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build backend image
         run: docker build -t pan-ops-console-backend:smoke backend/
       - name: Generate an ephemeral FERNET_KEY for this job
@@ -144,7 +144,7 @@ jobs:
           --health-timeout 3s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build backend image
         run: docker build -t pan-ops-console-backend:smoke backend/
       - name: Generate an ephemeral FERNET_KEY for this job
@@ -183,10 +183,10 @@ jobs:
     name: frontend typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Node 20
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: "npm"

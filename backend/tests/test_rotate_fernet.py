@@ -19,9 +19,11 @@ from sqlalchemy import text
 from scripts.rotate_fernet import rotate
 
 
-# Two deterministic keys — generated once for the test, never used outside.
-KEY_A = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
-KEY_B = "aFKkQ2GfQEJDxKjPYsbnNg-LeFRSnB-DcdsdJZ3lGtY="
+# Two distinct ephemeral keys, generated per test run. They are passed
+# straight into rotate() as the old/new pair (never the process FERNET_KEY),
+# so any two different valid keys work — and no key literal lives in this repo.
+KEY_A = Fernet.generate_key().decode("ascii")
+KEY_B = Fernet.generate_key().decode("ascii")
 
 # Stronger-than-policy plaintext so the password-strength check accepts it.
 STRONG_PW = "correct horse battery staple"

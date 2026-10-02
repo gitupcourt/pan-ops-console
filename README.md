@@ -25,7 +25,7 @@ Active development. Capacity (with alerting) is in production use; the upgrade m
 - **Backend** — Python 3.11, FastAPI, SQLAlchemy 2.0, Pydantic v2
 - **Async** — Celery (workers + beat) over Redis; polling, alert evaluation, and upgrades all run off the API process
 - **Storage** — PostgreSQL (system of record), Alembic migrations. SQLite is used only by the test suite.
-- **Frontend** — React 18 + TypeScript, Vite, @tanstack/react-query 5, Tailwind, Recharts
+- **Frontend** — React 19 + TypeScript, Vite, @tanstack/react-query 5, Tailwind 4, Recharts 3
 - **Device I/O** — pan-os-python (XML API), panos-upgrade-assurance (readiness checks, snapshots)
 
 > **No single-container / SQLite deployment mode.** Capacity polling, alert evaluation, and upgrade orchestration all run on Celery, so **Redis plus at least one worker are required** — the API alone will start but do nothing.

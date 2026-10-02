@@ -36,22 +36,22 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from cryptography.fernet import Fernet
-
 from app.capacity.services.poller import _is_known_offline, poll_all
+from app.core.crypto import encrypt
 from app.core.devices.models.device import Device
 from app.core.devices.models.enums import DeviceSource
 from app.core.panorama.models.panorama import Panorama
 
-KEY = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
+
+# Seed encrypted blobs through the app's own crypto helper: they use the
+# process FERNET_KEY, so no key literal lives in this repo.
 
 
 def _make_panorama(db) -> Panorama:
-    fernet = Fernet(KEY.encode())
     pano = Panorama(
         name="pano1",
         hostname="10.0.0.100",
-        encrypted_api_key=fernet.encrypt(b"pano-key"),
+        encrypted_api_key=encrypt("pano-key"),
         verify_tls=False,
         reachable=True,
     )
@@ -70,7 +70,6 @@ def _make_device(
     panorama: Panorama | None = None,
     serial: str | None = None,
 ) -> Device:
-    fernet = Fernet(KEY.encode())
     dev = Device(
         name=name,
         hostname="10.0.0.1",
@@ -82,7 +81,7 @@ def _make_device(
         proxy_via_panorama=(source == DeviceSource.PANORAMA),
         polling_enabled=True,
         panorama_id=panorama.id if panorama else None,
-        encrypted_api_key=fernet.encrypt(b"dev-key"),
+        encrypted_api_key=encrypt("dev-key"),
     )
     db.add(dev)
     db.commit()

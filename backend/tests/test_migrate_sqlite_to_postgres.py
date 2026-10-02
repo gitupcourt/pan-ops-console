@@ -27,8 +27,12 @@ from scripts.migrate_sqlite_to_postgres import (
     migrate,
 )
 
-KEY_A = "0iJL2gP4XzVnQ5OYG9w7c-3RbWUf3jM0SQk5oN6E9Bs="
-KEY_B = "aFKkQ2GfQEJDxKjPYsbnNg-LeFRSnB-DcdsdJZ3lGtY="
+# Two distinct ephemeral keys, generated per test run. They are passed
+# straight into migrate() as the old/new rotation pair (never the process
+# FERNET_KEY), so any two different valid keys work — and no key literal
+# lives in this public repo.
+KEY_A = Fernet.generate_key().decode("ascii")
+KEY_B = Fernet.generate_key().decode("ascii")
 
 
 @pytest.fixture

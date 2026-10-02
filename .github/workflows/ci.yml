@@ -14,6 +14,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Default token scope for every job: read the repo, nothing else. A job
+# that needs more declares it itself (see `ship`).
+permissions:
+  contents: read
+
 jobs:
   # =====================================================================
   # Tests — gates the rest of the pipeline. Must pass before any image

@@ -16,6 +16,11 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # Only offer versions that have survived a week on the registry. Most
+    # malicious releases are pulled within days of publication, so this is
+    # the check that replaces the human click once auto-merge is on.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"
@@ -39,6 +44,11 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    # Only offer versions that have survived a week on the registry. Most
+    # malicious releases are pulled within days of publication, so this is
+    # the check that replaces the human click once auto-merge is on.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     labels:
       - "dependencies"

@@ -19,17 +19,24 @@ jobs:
     steps:
       - name: Fetch Dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Majors are excluded on purpose: every major bump currently open
-      # (#232 redis, #216 typescript, #215 react, #210 recharts) fails CI.
-      # Those need a human.
-      - name: Enable auto-merge (patch + minor only)
+      # Majors are excluded on purpose: they are the bumps that break
+      # (recharts 3, Tailwind 4, React 19 and TypeScript 6 all needed code
+      # or config changes before they built). Those need a human.
+      #
+      # GitHub Actions bumps are excluded too, regardless of semver: an
+      # action update changes code that runs inside this pipeline with the
+      # workflow token, including the job that publishes images. That is a
+      # different risk class from a library that only runs under test.
+      # They are low-volume, so keeping them manual costs little.
+      - name: Enable auto-merge (patch + minor library bumps only)
         if: |
-          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-          steps.meta.outputs.update-type == 'version-update:semver-minor'
+          steps.meta.outputs.package-ecosystem != 'github_actions' &&
+          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+           steps.meta.outputs.update-type == 'version-update:semver-minor')
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}

@@ -57,3 +57,67 @@ def test_ratelimit_reset_clears_state(client):
         client.post("/auth/login", json={"username": "bob", "password": "wrong"}).status_code
         == 401
     )
+
+
+# --- V-2: X-Forwarded-For handling ---------------------------------------
+
+
+class _Req:
+    """Minimal stand-in for fastapi.Request: `headers` + `client.host`."""
+
+    def __init__(self, xff: str | None = None, peer: str = "10.0.0.9"):
+        self.headers = {"x-forwarded-for": xff} if xff is not None else {}
+        self.client = type("Peer", (), {"host": peer})()
+
+
+def test_client_ip_uses_rightmost_trusted_hop():
+    from app.core.auth.ratelimit import client_ip
+
+    # One trusted proxy: the entry IT appended is the rightmost one.
+    assert client_ip(_Req("203.0.113.7, 198.51.100.4"), trusted_hops=1) == "198.51.100.4"
+    assert client_ip(_Req("198.51.100.4"), trusted_hops=1) == "198.51.100.4"
+
+
+def test_client_ip_ignores_caller_supplied_left_entries():
+    from app.core.auth.ratelimit import client_ip
+
+    a = client_ip(_Req("203.0.113.1, 198.51.100.4"), trusted_hops=1)
+    b = client_ip(_Req("203.0.113.2, 198.51.100.4"), trusted_hops=1)
+    assert a == b == "198.51.100.4"
+
+
+def test_client_ip_counts_hops_from_the_right():
+    from app.core.auth.ratelimit import client_ip
+
+    chain = "203.0.113.7, 198.51.100.4, 10.0.0.2"
+    assert client_ip(_Req(chain), trusted_hops=2) == "198.51.100.4"
+    assert client_ip(_Req(chain), trusted_hops=3) == "203.0.113.7"
+
+
+def test_client_ip_falls_back_to_socket_peer():
+    from app.core.auth.ratelimit import client_ip
+
+    assert client_ip(_Req(None, peer="10.0.0.9"), trusted_hops=1) == "10.0.0.9"
+    # Header shorter than the trusted chain: not our proxies, don't trust it.
+    assert client_ip(_Req("203.0.113.7", peer="10.0.0.9"), trusted_hops=2) == "10.0.0.9"
+    # Zero hops: header ignored outright.
+    assert client_ip(_Req("203.0.113.7", peer="10.0.0.9"), trusted_hops=0) == "10.0.0.9"
+
+
+def test_login_throttle_survives_varying_forwarded_for(client):
+    """V-2: a caller-supplied leftmost X-Forwarded-For entry must not
+    carve out a fresh budget per request. With the default single trusted
+    hop the key is the RIGHTMOST entry, which the caller does not control
+    behind the proxy."""
+    for i in range(11):
+        client.post(
+            "/auth/login",
+            json={"username": "bob", "password": "wrong"},
+            headers={"X-Forwarded-For": f"203.0.113.{i}, 198.51.100.4"},
+        )
+    r = client.post(
+        "/auth/login",
+        json={"username": "bob", "password": "wrong"},
+        headers={"X-Forwarded-For": "203.0.113.99, 198.51.100.4"},
+    )
+    assert r.status_code == 429

@@ -1,0 +1,43 @@
+name: dependabot auto-merge
+
+# Arms GitHub's native auto-merge on low-risk Dependabot PRs.
+# The "Protect main" ruleset (strict, 3 required checks) remains the gate:
+# nothing lands until backend tests + frontend typecheck + gitleaks all pass
+# against an up-to-date branch. This workflow only removes the manual click.
+on: pull_request
+
+# Deliberately NOT pull_request_target, and the PR is never checked out,
+# so no untrusted code from the PR branch can execute with these permissions.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Majors are excluded on purpose: they are the bumps that break
+      # (recharts 3, Tailwind 4, React 19 and TypeScript 6 all needed code
+      # or config changes before they built). Those need a human.
+      #
+      # GitHub Actions bumps are excluded too, regardless of semver: an
+      # action update changes code that runs inside this pipeline with the
+      # workflow token, including the job that publishes images. That is a
+      # different risk class from a library that only runs under test.
+      # They are low-volume, so keeping them manual costs little.
+      - name: Enable auto-merge (patch + minor library bumps only)
+        if: |
+          steps.meta.outputs.package-ecosystem != 'github_actions' &&
+          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+           steps.meta.outputs.update-type == 'version-update:semver-minor')
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

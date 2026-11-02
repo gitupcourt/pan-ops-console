@@ -11,7 +11,7 @@ PyYAML==6.0.3
 argon2-cffi==25.1.0
 zxcvbn==4.5.0
 pyotp==2.10.0
-authlib==1.8.0
+authlib==1.9.1
 itsdangerous==2.2.0
 alembic==1.20.0
 psycopg[binary]==3.3.6

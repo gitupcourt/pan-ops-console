@@ -68,3 +68,23 @@ updates:
       day: "monday"
     labels:
       - "dependencies"
+
+  # --- Docker base images ---
+  # backend/Dockerfile + backend/Dockerfile.dev, and frontend/Dockerfile +
+  # frontend/Dockerfile.prod, all live one per directory below; Dependabot's
+  # docker ecosystem watches every Dockerfile* in the given directory.
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
